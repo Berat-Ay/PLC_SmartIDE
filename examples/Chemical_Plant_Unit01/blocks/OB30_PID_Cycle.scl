@@ -1,6 +1,6 @@
 // ============================================================
 // Block: OB30_PID_Cycle (Cyclic Interrupt 100ms)
-// Description: Deterministic PID loop for Dosing Header Pressure
+// Description: PID loop for Dosing Header Pressure
 // ============================================================
 
 ORGANIZATION_BLOCK "OB30_PID_Cycle"

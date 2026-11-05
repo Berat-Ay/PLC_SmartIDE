@@ -32,7 +32,7 @@
           "id": "node_first_scan",
           "kind": "contact",
           "contactType": "NO_CONTACT",
-          "operand": "FirstScan"
+          "operand": "%M1.0"
         },
         {
           "id": "node_alarm_silenced",
@@ -47,7 +47,7 @@
           "kind": "contact",
           "data": {
             "type": "NO",
-            "operand": "FirstScan"
+            "operand": "%M1.0"
           }
         },
         {
