@@ -552,7 +552,7 @@ export const TopAppBar: React.FC = () => {
           <button
             data-testid="topbar-export-button"
             onClick={() => setExportModalOpen(true)}
-            title="Export SCL, SimaticML XML & Openness Bridge for TIA Portal"
+            title="Export SCL blocks, DBs, UDTs and tag tables for TIA Portal"
             className="h-6 px-2 flex items-center gap-1 text-[11px] font-mono text-cyan-200 hover:text-white bg-[#141f2b] hover:bg-[#1b2b3d] border border-[#1e3c5a] transition-colors font-medium"
           >
             <Share2 className="w-3 h-3 text-cyan-400" />

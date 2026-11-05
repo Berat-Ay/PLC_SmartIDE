@@ -33,6 +33,10 @@ export interface ElectronApi {
   saveAll: (payload: ProjectLoadPayload) => Promise<boolean>
   loadDemoProject: (customDir?: string) => Promise<ProjectLoadPayload>
   onFileChanged: (callback: (payload: FileChangeEventPayload) => void) => () => void
+  /** Asks for a folder, writes the bundle there and returns its path. Null when cancelled. */
+  exportTiaBundle: (projectName: string, files: { filename: string; folder: string; content: string }[]) => Promise<string | null>
+  /** Asks for a folder and returns its TIA files. Null when cancelled. */
+  pickTiaImportFolder: () => Promise<{ folder: string; files: { path: string; content: string }[] } | null>
   getSecret: (key: string) => Promise<string | null>
   setSecret: (key: string, value: string) => Promise<boolean>
 }

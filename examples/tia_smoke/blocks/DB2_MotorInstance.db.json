@@ -1,0 +1,9 @@
+{
+  "blockType": "DB",
+  "blockNumber": 2,
+  "name": "DB2_MotorInstance",
+  "dbType": "Instance",
+  "parentFbName": "FB1_Motor",
+  "optimizedAccess": true,
+  "variables": []
+}

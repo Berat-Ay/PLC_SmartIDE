@@ -1,0 +1,31 @@
+FUNCTION_BLOCK "FB1_Motor"
+TITLE = Motor with start delay
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+VAR_INPUT
+  Start : Bool;
+  Stop : Bool; // NC contact, true when not pressed
+END_VAR
+VAR_OUTPUT
+  Run : Bool;
+END_VAR
+VAR
+  Latched : Bool;
+  StartDelay : TON_TIME;
+  StartEdge : R_TRIG;
+  Starts : DInt;
+END_VAR
+BEGIN
+  IF #Start AND #Stop THEN
+    #Latched := TRUE;
+  ELSIF NOT #Stop THEN
+    #Latched := FALSE;
+  END_IF;
+
+  #StartDelay(IN := #Latched, PT := T#500ms, Q => #Run);
+
+  #StartEdge(CLK := #Run);
+  IF #StartEdge.Q THEN
+    #Starts := #Starts + 1;
+  END_IF;
+END_FUNCTION_BLOCK

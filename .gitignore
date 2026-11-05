@@ -24,3 +24,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+
+# TIA test package and the built bridge
+tia-package/
+tools/tia-bridge/TiaBridge.exe

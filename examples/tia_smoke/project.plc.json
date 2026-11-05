@@ -1,0 +1,10 @@
+{
+  "id": "proj_tia_smoke",
+  "name": "TIA_Smoke",
+  "targetCpu": "CPU 1214C DC/DC/DC",
+  "firmwareVersion": "V4.6",
+  "schemaVersion": "1.0.0",
+  "description": "Small SCL-only project used to verify the TIA Portal round trip.",
+  "createdAt": "2026-11-06T00:00:00.000Z",
+  "updatedAt": "2026-11-06T00:00:00.000Z"
+}
