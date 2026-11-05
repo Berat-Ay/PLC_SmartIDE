@@ -90,7 +90,7 @@ export class PlcAgentTools {
           projectPath,
           relPath,
           content
-        )
+        ).catch((err: unknown) => console.warn('Disk sync skipped or failed:', err))
       }
     } catch (err) {
       console.warn('Disk sync skipped or failed:', err)

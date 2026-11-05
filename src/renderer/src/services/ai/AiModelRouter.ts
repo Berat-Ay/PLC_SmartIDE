@@ -1579,7 +1579,23 @@ END_IF;`
           params: {
             name: 'FB_ValveControl',
             blockType: 'FB',
-            sourceCode: `// Siemens S7-1200/1500 FB_ValveControl Function Block
+            sourceCode: `FUNCTION_BLOCK "FB_ValveControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+VAR_INPUT
+  EmergencyStop : Bool;
+  OpenRequest : Bool;
+  CloseRequest : Bool;
+  OpenedLimit : Bool;
+  ClosedLimit : Bool;
+END_VAR
+VAR_OUTPUT
+  OpenCmd : Bool;
+  CloseCmd : Bool;
+  IsOpen : Bool;
+  IsClosed : Bool;
+END_VAR
+BEGIN
 // Updated with Emergency Close Priority Override
 IF #EmergencyStop THEN
     #OpenCmd := FALSE;
@@ -1597,7 +1613,8 @@ END_IF;
 
 // Position Feedback Status
 #IsOpen := #OpenedLimit AND NOT #ClosedLimit;
-#IsClosed := #ClosedLimit AND NOT #OpenedLimit;`
+#IsClosed := #ClosedLimit AND NOT #OpenedLimit;
+END_FUNCTION_BLOCK`
           }
         })
       } else {
@@ -1637,7 +1654,22 @@ END_IF;
           params: {
             name: 'FB_ValveControl',
             blockType: 'FB',
-            sourceCode: `// Siemens S7-1200/1500 FB_ValveControl Function Block
+            sourceCode: `FUNCTION_BLOCK "FB_ValveControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+VAR_INPUT
+  OpenRequest : Bool;
+  CloseRequest : Bool;
+  OpenedLimit : Bool;
+  ClosedLimit : Bool;
+END_VAR
+VAR_OUTPUT
+  OpenCmd : Bool;
+  CloseCmd : Bool;
+  IsOpen : Bool;
+  IsClosed : Bool;
+END_VAR
+BEGIN
 // Manages open/close actuation with limit switch feedback and travel timeout supervision
 IF #OpenRequest AND NOT #CloseRequest THEN
     #OpenCmd := TRUE;
@@ -1652,7 +1684,8 @@ END_IF;
 
 // Position Feedback Status
 #IsOpen := #OpenedLimit AND NOT #ClosedLimit;
-#IsClosed := #ClosedLimit AND NOT #OpenedLimit;`
+#IsClosed := #ClosedLimit AND NOT #OpenedLimit;
+END_FUNCTION_BLOCK`
           }
         })
       }

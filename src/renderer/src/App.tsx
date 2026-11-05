@@ -32,6 +32,7 @@ if (typeof window !== 'undefined') {
     ;(window as any).plcTestContext = {}
   }
   ;(window as any).plcTestContext.BlackBoxLogger = BlackBoxLogger.getInstance()
+  ;(window as any).plcTestContext.useTagStore = useTagStore
 }
 
 export const App: React.FC = () => {

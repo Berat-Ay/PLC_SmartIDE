@@ -237,7 +237,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                   <div className="flex-1 overflow-auto p-4">
                     <div className="rounded bg-industrial-950 border border-industrial-800 p-3">
                       <div className="text-[11px] text-industrial-400 font-mono mb-2 pb-1 border-b border-industrial-850">
-                        Deterministic AST Tree (/blocks/{ladBlock.fileName})
+                        Ladder JSON (/blocks/{ladBlock.fileName})
                       </div>
                       <pre className="text-industrial-200 font-mono text-[11px] overflow-auto max-h-[600px]">
                         {JSON.stringify(ladBlock, null, 2)}
@@ -272,12 +272,12 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                         Structured Control Language (SCL) Editor
                       </div>
                       <div className="text-industrial-400 text-[11px]">
-                        IEC 61131-3 SCL Compiler Front-End • Live Execution Badges • Deterministic Runtime
+                        SCL source of this block
                       </div>
                     </div>
                   </div>
                   <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 font-bold">
-                    Deterministic SCL
+                    SCL
                   </span>
                 </div>
 

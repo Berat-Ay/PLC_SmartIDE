@@ -109,7 +109,7 @@ export class DemoProjectSeeder {
             inOperand: 'HydraulicPump_Start',
             ptOperand: 'T#5s',
             qOperand: 'HydraulicPump_Run',
-            etOperand: 'T#0ms',
+            etOperand: '',
             timePreset: 'T#5s',
             timeElapsed: 'T#0ms'
           } as LadderTimerNode,
@@ -250,7 +250,7 @@ export class DemoProjectSeeder {
             cycleTimeMs: 100,
             phaseOffsetMs: 0,
             priority: 7,
-            description: 'Deterministic 100ms cyclic interrupt for PID header control'
+            description: '100 ms cyclic interrupt for PID header control'
           },
           {
             blockNumber: 82,
@@ -383,7 +383,7 @@ export class DemoProjectSeeder {
           },
           code: `// ============================================================
 // Block: OB30_PID_Cycle (Cyclic Interrupt 100ms)
-// Description: Deterministic PID loop for Dosing Header Pressure
+// Description: PID loop for Dosing Header Pressure
 // ============================================================
 
 ORGANIZATION_BLOCK "OB30_PID_Cycle"

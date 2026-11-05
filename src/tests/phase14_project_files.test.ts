@@ -6,6 +6,12 @@ import { FileEngine } from '../main/fileEngine'
 import { assertPlainFileName, assertProjectRoot, registerProjectRoot, resolveInside } from '../main/pathGuard'
 import { emptyInterface } from '../shared/scl/sourceBlock'
 import { useBlockStore } from '../renderer/src/stores/useBlockStore'
+import { useRuntimeStore } from '../renderer/src/stores/useRuntimeStore'
+import { useProjectStore } from '../renderer/src/stores/useProjectStore'
+import { useTagStore } from '../renderer/src/stores/useTagStore'
+import { useUIStore } from '../renderer/src/stores/useUIStore'
+import { ProjectCompilerEngine } from '../renderer/src/services/compiler/ProjectCompilerEngine'
+import { PlcRuntimeEngine } from '../renderer/src/runtime/PlcRuntimeEngine'
 import { SclBlockDefinition } from '../shared/types/blocks'
 
 let passed = 0
@@ -143,6 +149,67 @@ async function run(): Promise<void> {
       'A source edit updates the interface',
       useBlockStore.getState().sclBlocks[0].interface.input.some((v) => v.name === 'Renamed')
     )
+
+    // RUN refuses a program that does not compile
+    const runtimeStore = useRuntimeStore.getState()
+    useProjectStore.setState({ metadata: { name: 'gate' } as never, projectPath: root, isLoaded: true })
+    useTagStore.getState().setTagTables([])
+    useBlockStore.getState().setBlocks({
+      udts: [],
+      dataBlocks: [],
+      ladBlocks: [],
+      sclBlocks: [
+        {
+          blockType: 'OB',
+          blockNumber: 1,
+          name: 'Main',
+          fileName: 'Main.scl',
+          optimizedAccess: true,
+          interface: emptyInterface(),
+          code: '"Missing_Tag" := TRUE;'
+        }
+      ]
+    })
+    check('RUN is refused when compilation fails', runtimeStore.start() === false)
+    check('The engine stays in STOP', useRuntimeStore.getState().engine.getState() === 'STOP')
+    check('The compile tab shows why', useUIStore.getState().bottomActiveTab === 'compile')
+    useBlockStore.getState().updateSclBlock('Main.scl', { code: '%M0.0 := TRUE;' })
+    check('RUN starts once the program compiles', runtimeStore.start() === true)
+    useRuntimeStore.getState().stop()
+
+    // The bundled sample project
+    const sample = await FileEngine.loadProject(path.join(process.cwd(), 'examples', 'Chemical_Plant_Unit01'))
+    check('Sample loads without errors', sample.loadErrors?.length === 0, sample.loadErrors)
+    const compile = ProjectCompilerEngine.runFullProjectCompilation(
+      sample.tagTables,
+      sample.ladBlocks,
+      sample.sclBlocks,
+      sample.hardware,
+      sample.dataBlocks,
+      sample.udts
+    )
+    const blocking = compile.diagnostics.filter((d) => d.severity === 'Error' && d.blocksDownload !== false)
+    check('Sample has no blocking errors', compile.canDownload, blocking.map((d) => d.message))
+    check('Sample shows its intentional overlap', compile.diagnostics.some((d) => d.iecCode === 'S7-MEM-001'))
+
+    const engine = new PlcRuntimeEngine(sample) as unknown as PlcRuntimeEngine & {
+      intervalHandle: NodeJS.Timeout
+      interruptHandles: NodeJS.Timeout[]
+      runCyclicInterrupt(n: number): void
+      runCyclicScan(): void
+    }
+    engine.start()
+    clearInterval(engine.intervalHandle)
+    engine.interruptHandles.forEach((h) => clearInterval(h))
+    check('Sample memory follows CPU 1214C', engine.merker.length === 8192)
+    engine.setVariable('"DB1_PlantData".SystemPressureBar', 3.5)
+    engine.runCyclicInterrupt(30)
+    const pid = Number(engine.getVariable('TankPressure_Bar'))
+    check('Sample OB30 computes its PID output', Math.abs(pid - 2.4) < 1e-4, pid)
+    engine.runCyclicScan()
+    check('Sample stays in RUN', engine.getState() === 'RUN', engine.getDiagnostics())
+    check('Sample scan reports no unknown symbols', engine.getDiagnostics().length === 0, engine.getDiagnostics())
+    engine.stop()
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

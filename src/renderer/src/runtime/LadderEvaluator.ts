@@ -102,6 +102,8 @@ export class LadderEvaluator {
 
   private static writeOperand(op: string, value: unknown, context: SclExecutionContext): void {
     const raw = op.trim()
+    // An output pin holding a literal or just its own name is not connected to anything
+    if (/^(LTIME|TIME|LT|T)#/i.test(raw) || /^(Q|ET|QU|QD|CV)$/i.test(raw)) return
     context.setVar(raw.replace(/"/g, ''), value, raw.startsWith('"'))
   }
 

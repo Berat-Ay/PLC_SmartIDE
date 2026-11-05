@@ -52,6 +52,43 @@ async function runGuiAudit() {
     })
 
     const window = await electronApp.firstWindow()
+
+    // Earlier scenarios delete tags and blocks on purpose, so OB1 may no longer compile. RUN refuses
+    // such a program; scenarios that only look at monitoring UI then start the engine directly.
+    const defineAuditStart = () => {
+      window.__auditStart = () => {
+        const store = window.plcTestContext.useRuntimeStore.getState()
+        if (store.state === 'RUN') return
+        if (store.start()) return
+        const errors = window.plcTestContext.useProjectStore.getState().lastCompileResult?.diagnostics
+          .filter((d) => d.severity === 'Error' && d.blocksDownload !== false)
+          .map((d) => d.message)
+        console.log('[audit] RUN refused:', JSON.stringify(errors))
+        store.syncProjectToEngine()
+        store.engine.start()
+      }
+    }
+    await window.addInitScript(defineAuditStart)
+    await window.evaluate(defineAuditStart)
+
+    // Earlier scenarios replace or delete tags on purpose. OB30 of the demo still needs this one.
+    const restoreDemoTag = () =>
+      window.evaluate(() => {
+        const tagStore = window.plcTestContext.useTagStore.getState()
+        const hasTag = tagStore.tagTables.some((table) => table.tags.some((t) => t.name === 'TankPressure_Bar'))
+        if (hasTag) return
+        const [first, ...others] = tagStore.tagTables
+        tagStore.setTagTables([
+          {
+            ...first,
+            tags: [
+              ...first.tags,
+              { id: 't6', name: 'TankPressure_Bar', dataType: 'REAL', address: '%MD20', comment: 'Restored by the audit' }
+            ]
+          },
+          ...others
+        ])
+      })
     await window.waitForLoadState('domcontentloaded')
     console.log(' Window loaded. Setting viewport to 1440x900...')
 
@@ -864,7 +901,7 @@ async function runGuiAudit() {
     await window.evaluate(() => {
       const runtimeStore = window.plcTestContext.useRuntimeStore.getState()
       runtimeStore.setMonitoring(true)
-      runtimeStore.start()
+      window.__auditStart()
     })
     await window.waitForTimeout(500)
 
@@ -984,7 +1021,7 @@ async function runGuiAudit() {
         runtimeStore.toggleMonitoring()
       }
       if (runtimeStore.cpuState !== 'RUN') {
-        runtimeStore.start()
+        window.__auditStart()
       }
     })
 
@@ -1293,7 +1330,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
       engine.setVariable('%I0.0', false)
       engine.setVariable('T1.Q', false)
       if (runtime.state !== 'RUN') {
-        runtime.start()
+        window.__auditStart()
       }
     })
     await window.waitForTimeout(300)
@@ -1679,7 +1716,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     // Ensure CPU is in RUN and monitoring is active
     await window.evaluate(() => {
       const runtimeStore = window.plcTestContext.useRuntimeStore.getState()
-      if (runtimeStore.state !== 'RUN') runtimeStore.start()
+      if (runtimeStore.state !== 'RUN') window.__auditStart()
       if (!runtimeStore.isMonitoring) runtimeStore.setMonitoring(true)
     })
     await window.waitForTimeout(300)
@@ -1929,6 +1966,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     console.log('\n---------------------------------------------------------------')
     console.log(' SCENARIO 19: FULL-PROJECT TOP BAR [COMPILE] BUTTON & STATUS BANNER')
     console.log('---------------------------------------------------------------')
+    await restoreDemoTag()
     const compileBtn = window.locator('[data-testid="topbar-compile-btn"]')
     await compileBtn.waitFor({ state: 'visible', timeout: 5000 })
     await compileBtn.click()
@@ -1939,6 +1977,12 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     const bannerText = await window.locator('[data-testid="compile-banner-text"]').innerText()
     console.log(`  -> Real Compile Banner: "${bannerText}"`)
     if (!bannerText.includes('COMPILE SUCCESS')) {
+      const compileErrors = await window.evaluate(() =>
+        window.plcTestContext.useProjectStore.getState().lastCompileResult?.diagnostics
+          .filter((d) => d.severity === 'Error')
+          .map((d) => `${d.code || ''} ${d.blockName || ''}: ${d.message}`)
+      )
+      console.log('  -> Compile errors:', JSON.stringify(compileErrors, null, 1))
       throw new Error(`Expected COMPILE SUCCESS in banner, got: ${bannerText}`)
     }
 
@@ -1952,6 +1996,38 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
       title: 'Full-Project CompileEngine & Real [Compile] Button Audit',
       passed: true
     })
+
+    // =========================================================================
+    // SCENARIO 19B: TIA Portal modal shows the real export and its limits
+    // =========================================================================
+    console.log('\n---------------------------------------------------------------')
+    console.log(' SCENARIO 19B: TIA PORTAL EXPORT AND IMPORT MODAL')
+    console.log('---------------------------------------------------------------')
+    await window.locator('[data-testid="topbar-export-button"]').click()
+    await window.locator('[data-testid="tia-modal"]').waitFor({ state: 'visible', timeout: 5000 })
+    const tiaWarnings = await window.locator('[data-testid="tia-warnings"]').innerText()
+    if (!tiaWarnings.includes('LAD')) {
+      throw new Error(`The modal must say that LAD blocks were skipped, got: ${tiaWarnings}`)
+    }
+    if (!(await window.locator('[data-testid="tia-export-folder"]').isEnabled())) {
+      throw new Error('Export to folder must be available in the desktop app')
+    }
+    await window.locator('[data-testid="tia-tab-verify"]').click()
+    if (!(await window.locator('[data-testid="tia-modal"]').innerText()).includes('has not been run against a real TIA Portal')) {
+      throw new Error('The Compile tab must state that the bridge is untested')
+    }
+    await window.locator('[data-testid="tia-tab-import"]').click()
+    await window.locator('[data-testid="tia-pick-import"]').waitFor({ state: 'visible', timeout: 3000 })
+    const bridgeApiReady = await window.evaluate(
+      () => typeof window.electronApi.exportTiaBundle === 'function' && typeof window.electronApi.pickTiaImportFolder === 'function'
+    )
+    if (!bridgeApiReady) throw new Error('The TIA functions are missing from the preload API')
+    const shot19b = path.join(artifactsDir, 'gui-audit-19b-tia-modal.png')
+    await window.screenshot({ path: shot19b, fullPage: true })
+    auditResults.screenshots.push(shot19b)
+    await window.locator('[data-testid="tia-modal"] button:has-text("Close")').click()
+    console.log('  ✅ PASS: TIA modal shows the export, its warnings and the untested status.')
+    auditResults.scenarios.push({ scenario: 'Scenario 19B', title: 'TIA Portal export and import modal', passed: true })
 
     // =========================================================================
     // SCENARIO 20: AI Natural Language Synthesis with Green & Red LED Indicators
@@ -2265,9 +2341,10 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
 
       if (!mem) return { success: false, reason: 'Engine memory is null' }
 
-      const isPiiUint8 = mem.pii instanceof Uint8Array && mem.pii.byteLength === 128
-      const isPiqUint8 = mem.piq instanceof Uint8Array && mem.piq.byteLength === 128
-      const isMerkerUint8 = mem.merker instanceof Uint8Array && mem.merker.byteLength === 512
+      // The sizes follow the selected CPU, so a smaller fixed buffer would be a regression
+      const isPiiUint8 = mem.pii instanceof Uint8Array && mem.pii.byteLength >= 1024
+      const isPiqUint8 = mem.piq instanceof Uint8Array && mem.piq.byteLength >= 1024
+      const isMerkerUint8 = mem.merker instanceof Uint8Array && mem.merker.byteLength >= 1024
 
       // Write bit into binary memory and verify engine reads it
       mem.writeBit('I', 0, 5, true)
@@ -2287,7 +2364,7 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
     if (!binaryMemoryVerification.success) {
       throw new Error(`S7 Binary Memory assertion failed: ${JSON.stringify(binaryMemoryVerification)}`)
     }
-    console.log('  ✅ PASS: Contiguous Uint8Array buffers (PII: 128B, PIQ: 128B, Merker: 512B) active!')
+    console.log('  ✅ PASS: Contiguous Uint8Array buffers sized from the CPU profile are active!')
 
     // 2. Setup 2 networks for real-time motor latching and TON timer execution
     await window.evaluate(() => {
@@ -2349,7 +2426,7 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       }
 
       const runtime = useRuntimeStore.getState()
-      runtime.start()
+      window.__auditStart()
       runtime.setMonitoring(true)
     })
     await window.waitForTimeout(400)
@@ -2446,6 +2523,7 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
     console.log('---------------------------------------------------------------')
     {
       // 1. Click Top Bar [Compile] button on clean project
+      await restoreDemoTag()
       console.log('  -> Clicking Top Bar [Compile] button on clean project...')
       const compileBtn25 = window.locator('[data-testid="topbar-compile-btn"]')
       await compileBtn25.click()
@@ -2457,6 +2535,11 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       const bannerText = await window.locator('[data-testid="compile-banner-text"]').textContent()
       console.log(`  -> Compilation status banner: "${bannerText}"`)
       if (!bannerText.includes('COMPILE SUCCESS')) {
+        console.log('  -> Compile errors:', JSON.stringify(await window.evaluate(() =>
+          window.plcTestContext.useProjectStore.getState().lastCompileResult?.diagnostics
+            .filter((d) => d.severity === 'Error')
+            .map((d) => d.message)
+        )))
         throw new Error(`Expected clean compile to succeed, but got: "${bannerText}"`)
       }
       console.log('  ✅ PASS: Top Bar [Compile] button executed compilation pass and opened Bottom Dock!')
@@ -2899,7 +2982,7 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
         engine.setVariable('%I0.3', false)
         engine.setVariable('%I0.4', false)
         if (runtime.state !== 'RUN') {
-          runtime.start()
+          window.__auditStart()
         }
       })
       await window.waitForTimeout(300)

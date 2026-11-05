@@ -209,7 +209,7 @@ export class PlcRuntimeEngine {
     this.blockInfoCache = new WeakMap()
     this.reportedOnce.clear()
 
-    const profile = getCpuProfile(payload.hardware?.general?.targetCpu)
+    const profile = getCpuProfile(payload.hardware?.general?.targetCpu || payload.hardware?.general?.cpuName || payload.metadata?.targetCpu)
     if (profile) this.memory.configure(profile.inputBytes, profile.outputBytes, profile.merkerBytes)
 
     this.syncDataBlocks()
@@ -648,7 +648,8 @@ export class PlcRuntimeEngine {
   }
 
   private runInFrame(block: CodeBlock, frame: Frame): void {
-    const family = getCpuProfile(this.projectPayload?.hardware?.general?.targetCpu)?.family
+    const general = this.projectPayload?.hardware?.general
+    const family = getCpuProfile(general?.targetCpu || general?.cpuName || this.projectPayload?.metadata?.targetCpu)?.family
     const maxDepth = family === 'S7-1200' ? 16 : 24
     if (this.frames.length >= maxDepth) {
       throw new Error(`Block nesting deeper than ${maxDepth} levels at '${block.name}'`)

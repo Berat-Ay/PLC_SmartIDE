@@ -33,6 +33,8 @@ export interface ProgramFinding {
   tagName?: string
 }
 
+/** New timer and counter boxes show their pin name until an output is connected. */
+const BOX_PIN_PLACEHOLDER = /^(Q|ET|QU|QD|CV)$/i
 const TIMER_FIELD = /\.(Q|ET|IN|PT|QU|QD|CV|PV|CU|CD|R|LD|CLK)$/i
 
 class Checker {
@@ -45,7 +47,7 @@ class Checker {
   private readonly resolver: TypeResolver
 
   constructor(private readonly input: ProgramCheckInput) {
-    this.profile = getCpuProfile(input.cpuConfig?.general?.targetCpu)
+    this.profile = getCpuProfile(input.cpuConfig?.general?.targetCpu || input.cpuConfig?.general?.cpuName)
     for (const table of input.tagTables) {
       for (const tag of table.tags || []) this.tagNames.add((tag.name || '').toLowerCase())
     }
@@ -186,6 +188,8 @@ class Checker {
         return
       }
       if (token.type !== 'IDENTIFIER') return
+      // The member in "DB"."Member" is checked with its block at run time
+      if (body[index - 1]?.value === '.') return
 
       if (token.quoted) {
         const next = body[index + 1]
@@ -240,6 +244,7 @@ class Checker {
   private checkLadOperand(raw: string | undefined, iface: BlockInterface, base: Omit<ProgramFinding, 'iecCode' | 'message'>, blockName: string): void {
     const trimmed = (raw || '').trim()
     if (!trimmed || trimmed === '???' || trimmed.includes('???')) return // Reported as S7-LAD-002
+    if (BOX_PIN_PLACEHOLDER.test(trimmed)) return
     if (/^-?\d+(\.\d+)?$/.test(trimmed) || /^(TRUE|FALSE)$/i.test(trimmed)) return
 
     const quoted = trimmed.startsWith('"')
