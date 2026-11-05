@@ -9,6 +9,7 @@ import { useProjectStore } from './useProjectStore'
 import { useHardwareStore } from './useHardwareStore'
 import { useTagStore } from './useTagStore'
 import { useBlockStore } from './useBlockStore'
+import { useUIStore } from './useUIStore'
 
 interface RuntimeStoreState {
   engine: PlcRuntimeEngine
@@ -22,7 +23,8 @@ interface RuntimeStoreState {
   forceOverrides: Map<string, unknown>
 
   // Actions
-  start: () => void
+  /** Compiles first. Returns false and shows the errors when the program cannot go to RUN. */
+  start: () => boolean
   stop: () => void
   reset: () => void
   toggleMonitoring: () => void
@@ -109,10 +111,18 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
       if (!useProjectStore.getState().metadata) {
         useProjectStore.getState().loadDemoProject()
       }
+      const compile = useProjectStore.getState().compileProject()
+      if (!compile.canDownload) {
+        useUIStore.getState().setBottomActiveTab('compile')
+        return false
+      }
+
       get().syncProjectToEngine()
       get().engine.start()
-      set({ state: 'RUN', timeTravelActive: false, scrubbedSnapshot: null })
-      useProjectStore.getState().setCpuState('RUN')
+      const running = get().engine.getState()
+      set({ state: running, timeTravelActive: false, scrubbedSnapshot: null })
+      useProjectStore.getState().setCpuState(running === 'RUN' ? 'RUN' : running === 'ERROR' ? 'ERROR' : 'STOP')
+      return running === 'RUN'
     },
 
     stop: () => {

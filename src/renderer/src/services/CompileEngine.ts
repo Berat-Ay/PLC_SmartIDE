@@ -1,6 +1,7 @@
 import { TagTable } from '@shared/types/tags'
 import { CpuConfig } from '@shared/types/hardware'
-import { LadBlockDefinition, SclBlockDefinition } from '@shared/types/blocks'
+import { DataBlockDefinition, LadBlockDefinition, SclBlockDefinition } from '@shared/types/blocks'
+import { UdtDefinition } from '@shared/types/types'
 import {
   ProjectCompilerEngine,
   type CompileMessage,
@@ -15,13 +16,17 @@ export class CompileEngine {
     tagTables?: TagTable[],
     ladBlocks?: LadBlockDefinition[],
     sclBlocks?: SclBlockDefinition[],
-    cpuConfig?: CpuConfig
+    cpuConfig?: CpuConfig,
+    dataBlocks?: DataBlockDefinition[],
+    udts?: UdtDefinition[]
   ): CompileResult {
     return ProjectCompilerEngine.runFullProjectCompilation(
       tagTables,
       ladBlocks,
       sclBlocks,
-      cpuConfig
+      cpuConfig,
+      dataBlocks,
+      udts
     )
   }
 }

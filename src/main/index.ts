@@ -3,6 +3,8 @@ import { join } from 'path'
 import * as path from 'path'
 import * as os from 'os'
 import { FileEngine } from './fileEngine'
+import { assertProjectRoot, registerProjectRoot } from './pathGuard'
+import { getSecret, setSecret } from './secretStore'
 import { ProjectWatcher } from './watcher'
 import { ProjectLoadPayload } from '../shared/types/ipc'
 
@@ -20,10 +22,12 @@ function createWindow(): void {
     title: 'Antigravity S7 Industrial IDE',
     backgroundColor: '#0b0d10',
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.mjs'),
-      sandbox: false,
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      sandbox: true,
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      // The virtual PLC keeps scanning while the window is in the background
+      backgroundThrottling: false
     }
   })
 
@@ -32,8 +36,14 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    if (/^https?:\/\//i.test(details.url)) shell.openExternal(details.url)
     return { action: 'deny' }
+  })
+
+  // The app window only ever shows the app itself
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (process.env.ELECTRON_RENDERER_URL && url.startsWith(process.env.ELECTRON_RENDERER_URL)) return
+    event.preventDefault()
   })
 
   // HMR for renderer based on electron-vite cli
@@ -71,7 +81,8 @@ ipcMain.handle('dialog:selectProjectDirectory', async () => {
 })
 
 ipcMain.handle('project:create', async (_, targetDir: string, name: string) => {
-  const fullPath = path.join(targetDir, name)
+  const fullPath = path.join(targetDir, path.basename(name))
+  registerProjectRoot(fullPath)
   await FileEngine.ensureProjectDirectories(fullPath)
   const payload = await FileEngine.loadProject(fullPath)
   payload.metadata.name = name
@@ -81,23 +92,30 @@ ipcMain.handle('project:create', async (_, targetDir: string, name: string) => {
 })
 
 ipcMain.handle('project:open', async (_, projectDir: string) => {
+  registerProjectRoot(projectDir)
   const payload = await FileEngine.loadProject(projectDir)
   projectWatcher.startWatching(projectDir, () => mainWindow)
   return payload
 })
 
 ipcMain.handle('project:save', async (_, payload: ProjectLoadPayload) => {
+  assertProjectRoot(payload.projectPath)
   return await FileEngine.saveProject(payload)
 })
 
 ipcMain.handle('project:saveFile', async (_, projectDir: string, relPath: string, content: string) => {
+  assertProjectRoot(projectDir)
   return await FileEngine.saveSingleFile(projectDir, relPath, content)
 })
 
 ipcMain.handle('project:loadDemo', async (_, customDir?: string) => {
   const targetDir = customDir || path.join(os.tmpdir(), 'Virtual_S7_Plant_Demo')
+  registerProjectRoot(targetDir)
   await FileEngine.ensureProjectDirectories(targetDir)
   const payload = await FileEngine.loadProject(targetDir)
   projectWatcher.startWatching(targetDir, () => mainWindow)
   return payload
 })
+
+ipcMain.handle('secrets:get', async (_, key: string) => getSecret(key))
+ipcMain.handle('secrets:set', async (_, key: string, value: string) => setSecret(key, value))

@@ -480,6 +480,28 @@ export class AiModelRouter {
     this.saveConfig()
   }
 
+  private persistSecrets(): void {
+    const api = typeof window !== 'undefined' ? window.electronApi : undefined
+    if (!api?.setSecret) return
+    const failed = (): void => console.warn('API key is kept for this session only: encrypted storage is unavailable')
+    for (const key of ['geminiApiKey', 'openaiApiKey'] as const) {
+      api.setSecret(key, this.config[key] || '').then((stored) => {
+        if (!stored && this.config[key]) failed()
+      }, failed)
+    }
+  }
+
+  /** Loads stored keys. A key still in the old localStorage entry is moved to encrypted storage. */
+  public async hydrateSecrets(): Promise<void> {
+    const api = typeof window !== 'undefined' ? window.electronApi : undefined
+    if (!api?.getSecret) return
+    const gemini = await api.getSecret('geminiApiKey')
+    const openai = await api.getSecret('openaiApiKey')
+    if (gemini && !this.config.geminiApiKey) this.config.geminiApiKey = gemini
+    if (openai && !this.config.openaiApiKey) this.config.openaiApiKey = openai
+    this.saveConfig()
+  }
+
   private loadConfig(): AiConfig {
     try {
       const saved = localStorage.getItem(STORAGE_KEY)
@@ -513,10 +535,13 @@ export class AiModelRouter {
 
   private saveConfig(): void {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.config))
+      // API keys never go to localStorage; they are held in the main process, encrypted by the OS
+      const { geminiApiKey: _gemini, openaiApiKey: _openai, ...withoutKeys } = this.config
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(withoutKeys))
     } catch {
       // ignore
     }
+    this.persistSecrets()
   }
 
   /**
@@ -599,9 +624,9 @@ export class AiModelRouter {
     }
 
     if (provider === 'gemini') {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`
+      const url = 'https://generativelanguage.googleapis.com/v1beta/models'
       try {
-        const res = await fetch(url)
+        const res = await fetch(url, { headers: { 'x-goog-api-key': key } })
         if (!res.ok) {
           let errorMsg = `HTTP ${res.status}: ${res.statusText}`
           try {
@@ -1091,7 +1116,7 @@ export class AiModelRouter {
     // 2. Upsert Networks into OB1_Main
     const blockStore = useBlockStore.getState()
     const ladBlocks = blockStore.ladBlocks
-    const ob1 = ladBlocks.find((b) => b.blockNumber === 1 || b.name === 'OB1_Main') || ladBlocks[0]
+    const ob1 = ladBlocks.find((b) => (b.blockType === 'OB' && b.blockNumber === 1) || b.name === 'OB1_Main')
 
     let stagedChangeset: Array<{
       path: string
@@ -1844,7 +1869,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
       if (signal?.aborted) throw new Error('Synthesis cancelled by user.')
 
       const cleanModelId = modelToTry.trim().replace(/^models\//i, '')
-      const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelId}:generateContent?key=${encodeURIComponent(cleanKey)}`
+      const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelId}:generateContent`
 
       // Fresh 90-second timeout controller per candidate model attempt
       const modelController = new AbortController()
@@ -1877,7 +1902,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
 
         return fetch(requestUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey },
           signal: modelController.signal,
           body: JSON.stringify({
             systemInstruction: {

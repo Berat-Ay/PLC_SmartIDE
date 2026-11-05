@@ -9,7 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "tsx src/tests/s7engine.test.ts && tsx src/tests/phase2_engine.test.ts && tsx src/tests/phase3_simulation.test.ts && tsx src/tests/phase4_ai_and_export.test.ts && tsx src/tests/phase5_compiler_and_collision.test.ts && tsx src/tests/phase6_dsl_compiler.test.ts && tsx src/tests/phase7_grid_layout.test.ts && tsx src/tests/phase8_s7_binary_memory.test.ts && tsx src/tests/phase9_bytecode_compiler.test.ts && tsx src/tests/phase10_hybrid_ai_and_rag.test.ts && tsx src/tests/phase11_parking_garage_and_cards.test.ts && tsx src/tests/phase12_blackbox_and_telemetry.test.ts && tsx src/tests/phase13_runtime_fidelity.test.ts",
+    "test": "tsx src/tests/s7engine.test.ts && tsx src/tests/phase2_engine.test.ts && tsx src/tests/phase3_simulation.test.ts && tsx src/tests/phase4_ai_and_export.test.ts && tsx src/tests/phase5_compiler_and_collision.test.ts && tsx src/tests/phase6_dsl_compiler.test.ts && tsx src/tests/phase7_grid_layout.test.ts && tsx src/tests/phase8_s7_binary_memory.test.ts && tsx src/tests/phase9_bytecode_compiler.test.ts && tsx src/tests/phase10_hybrid_ai_and_rag.test.ts && tsx src/tests/phase11_parking_garage_and_cards.test.ts && tsx src/tests/phase12_blackbox_and_telemetry.test.ts && tsx src/tests/phase13_runtime_fidelity.test.ts && tsx src/tests/phase14_project_files.test.ts",
     "test:gui": "electron-vite build && node scripts/run-gui-audit.mjs",
     "preview": "electron-vite preview"
   },

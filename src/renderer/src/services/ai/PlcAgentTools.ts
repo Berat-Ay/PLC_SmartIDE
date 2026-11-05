@@ -80,6 +80,7 @@ export class PlcAgentTools {
   private syncFileToDisk(relPath: string, content: string): void {
     try {
       const projectPath = useProjectStore.getState().projectPath
+      useProjectStore.getState().noteLocalWrite()
       if (
         projectPath &&
         typeof window !== 'undefined' &&
@@ -476,7 +477,7 @@ export class PlcAgentTools {
     if (mode === 'diff-view') {
       const existing = useBlockStore.getState().udts.find((u) => u.name === name)
       staged.push({
-        path: `/blocks/udts/${udt.fileName}`,
+        path: `/types/${udt.fileName}`,
         title: `UDT: ${name}`,
         fileType: 'udt',
         beforeContent: existing ? JSON.stringify(existing, null, 2) : '// New UDT (Does not exist yet)',
@@ -492,7 +493,7 @@ export class PlcAgentTools {
     } else {
       blockStore.addUdt(udt)
     }
-    this.syncFileToDisk(`/blocks/udts/${udt.fileName}`, JSON.stringify(udt, null, 2))
+    this.syncFileToDisk(`/types/${udt.fileName}`, JSON.stringify(udt, null, 2))
     useUIStore.getState().openTab({
       id: `udt_${udt.id}`,
       title: udt.name,
@@ -538,7 +539,7 @@ export class PlcAgentTools {
     if (mode === 'diff-view') {
       const existing = useBlockStore.getState().dataBlocks.find((d) => d.name === name)
       staged.push({
-        path: `/blocks/dbs/${db.fileName}`,
+        path: `/blocks/${db.fileName}`,
         title: `DB: ${name}`,
         fileType: 'db',
         beforeContent: existing ? JSON.stringify(existing, null, 2) : '// New DB (Does not exist yet)',
@@ -554,7 +555,7 @@ export class PlcAgentTools {
     } else {
       blockStore.addDataBlock(db)
     }
-    this.syncFileToDisk(`/blocks/dbs/${db.fileName}`, JSON.stringify(db, null, 2))
+    this.syncFileToDisk(`/blocks/${db.fileName}`, JSON.stringify(db, null, 2))
     useUIStore.getState().openTab({
       id: `db_${db.fileName}`,
       title: db.name,

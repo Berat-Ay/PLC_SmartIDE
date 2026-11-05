@@ -1,5 +1,5 @@
 import assert from 'node:assert'
-import { BytecodeCompiler } from '../renderer/src/services/compiler/BytecodeCompiler'
+import { StlListingGenerator } from '../renderer/src/services/compiler/StlListingGenerator'
 import { ProjectCompilerEngine } from '../renderer/src/services/compiler/ProjectCompilerEngine'
 import { TagTable } from '@shared/types/tags'
 import { LadBlockDefinition, SclBlockDefinition } from '@shared/types/blocks'
@@ -127,12 +127,11 @@ const testLadBlock: LadBlockDefinition = {
   networks: [ladNet1, ladNet2, ladNet3]
 }
 
-const compiledLad = BytecodeCompiler.compileLadBlock(testLadBlock)
+const compiledLad = StlListingGenerator.forLadBlock(testLadBlock)
 
 assert.strictEqual(compiledLad.blockName, 'OB1_Main')
 assert.strictEqual(compiledLad.blockType, 'OB')
 assert.ok(compiledLad.totalInstructions >= 10, `Expected at least 10 instructions, got ${compiledLad.totalInstructions}`)
-assert.ok(compiledLad.scanMemoryBytes >= 30, `Expected at least 30 bytes, got ${compiledLad.scanMemoryBytes}`)
 
 // Verify parallel branch instructions
 const opcodes = compiledLad.instructions.map((i) => i.opcode)
@@ -147,10 +146,11 @@ assert.ok(opcodes.includes('+I'), 'Emitted +I for math ADD')
 assert.ok(opcodes.includes('NOT'), 'Emitted NOT for negated coil')
 
 // Check authentic Siemens disassembly formatting
-assert.ok(compiledLad.disassemblyText.includes('// Block: OB1_Main (OB)'))
-assert.ok(compiledLad.disassemblyText.includes('Network 1:'))
-assert.ok(compiledLad.disassemblyText.includes('CALL     "TON" , "T1"'))
-assert.ok(compiledLad.disassemblyText.includes('0x0000'))
+assert.ok(compiledLad.listingText.includes('// Block: OB1_Main (OB)'))
+assert.ok(compiledLad.listingText.includes('Network 1:'))
+assert.ok(compiledLad.listingText.includes('CALL     "TON" , "T1"'))
+assert.ok(compiledLad.listingText.includes('0001'))
+assert.ok(!compiledLad.listingText.includes('Bytecode'), 'The listing does not claim to be bytecode')
 console.log('PASS: Ladder AST compiles to authentic Siemens S7 STL bytecode with parallel branches, timers, math and coils')
 
 // -----------------------------------------------------------------------------
@@ -178,7 +178,7 @@ const testSclBlock: SclBlockDefinition = {
   code: sclSource
 }
 
-const compiledScl = BytecodeCompiler.compileSclBlock(testSclBlock)
+const compiledScl = StlListingGenerator.forSclBlock(testSclBlock)
 
 assert.strictEqual(compiledScl.blockName, 'FC1_Control')
 assert.ok(compiledScl.totalInstructions >= 8, `Expected at least 8 instructions, got ${compiledScl.totalInstructions}`)
@@ -189,10 +189,35 @@ assert.ok(sclOpcodes.includes('JU'), 'Emitted JU for unconditional loop/else jum
 assert.ok(sclOpcodes.includes('T'), 'Emitted T for transfer instruction')
 assert.ok(sclOpcodes.includes('<=I'), 'Emitted <=I for FOR loop boundary check')
 
-assert.ok(compiledScl.disassemblyText.includes('// Block: FC1_Control (FC)'))
-assert.ok(compiledScl.disassemblyText.includes('_ELSE_'))
-assert.ok(compiledScl.disassemblyText.includes('_FOR_START_'))
-console.log('PASS: SCL AST compiles to S7 IL with deterministic IF-ELSE and FOR loop jumps')
+assert.ok(compiledScl.listingText.includes('// Block: FC1_Control (FC)'))
+assert.ok(compiledScl.listingText.includes('_ELSE_'))
+assert.ok(compiledScl.listingText.includes('_FOR_START_'))
+// ELSIF chains, WHILE, REPEAT, CASE, and labels that all exist
+const flowBlock: SclBlockDefinition = {
+  fileName: 'FC_Flow.scl',
+  name: 'FC_Flow',
+  blockType: 'FC',
+  blockNumber: 2,
+  code: `
+IF #a > 1 THEN #x := 1; ELSIF #a > 2 THEN #x := 2; ELSIF #a > 3 THEN #x := 3; ELSE #x := 4; END_IF;
+WHILE #a > 0 DO #a := #a - 1; IF #a = 3 THEN EXIT; END_IF; END_WHILE;
+REPEAT #a := #a + 1; UNTIL #a > 5 END_REPEAT;
+CASE #a OF 1: #x := 1; 2..4: #x := 2; ELSE #x := 3; END_CASE;
+#flag := (#a > 1 AND #b) OR NOT #c;
+`
+}
+const flow = StlListingGenerator.forSclBlock(flowBlock)
+const placed = new Set(flow.instructions.filter((i) => i.label).map((i) => i.label))
+const jumps = flow.instructions.filter((i) => ['JCN', 'JC', 'JU', 'JNB'].includes(i.opcode))
+assert.ok(jumps.length > 8, 'Control flow produced jumps')
+for (const jump of jumps) {
+  assert.ok(placed.has(jump.operand), `Jump target ${jump.operand} exists`)
+}
+assert.strictEqual(placed.size, flow.instructions.filter((i) => i.label).length, 'Each label is placed once')
+assert.ok(!flow.listingText.includes('???'), 'Complex operands are expanded, not replaced by ???')
+assert.ok(flow.instructions.some((i) => i.opcode === 'A('), 'Nested logic uses A(')
+
+console.log('PASS: SCL AST compiles to STL with valid jumps for IF, ELSIF, CASE, WHILE, REPEAT and FOR')
 
 // -----------------------------------------------------------------------------
 // 3. ProjectCompilerEngine 5-Pass Audit Test (Errors + IEC Diagnostic Codes)
@@ -347,16 +372,15 @@ const cleanResult = ProjectCompilerEngine.runFullProjectCompilation(
 
 assert.strictEqual(cleanResult.success, true, 'Clean project compilation succeeds with 0 errors')
 assert.strictEqual(cleanResult.errorsCount, 0)
-assert.ok(cleanResult.metricSummary?.includes('Networks ->'), 'metricSummary reports network count')
-assert.ok(cleanResult.metricSummary?.includes('S7 VM Instructions'), 'metricSummary reports S7 VM instructions')
-assert.ok(cleanResult.metricSummary?.includes('Scan Memory'), 'metricSummary reports scan memory bytes')
-assert.ok(cleanResult.bytecodeSummary, 'cleanResult includes bytecodeSummary')
-assert.strictEqual(cleanResult.bytecodeSummary?.blocks.length, 2)
-assert.ok(cleanResult.bytecodeSummary?.totalInstructions > 0)
-assert.ok(cleanResult.bytecodeSummary?.totalScanMemoryBytes > 0)
+assert.strictEqual(cleanResult.canDownload, true, 'A clean project can go to RUN')
+assert.ok(cleanResult.metricSummary?.includes('Networks'), 'metricSummary reports network count')
+assert.ok(cleanResult.metricSummary?.includes('STL listing'), 'metricSummary reports listing size')
+assert.ok(cleanResult.listingSummary, 'cleanResult includes listingSummary')
+assert.strictEqual(cleanResult.listingSummary?.blocks.length, 2)
+assert.ok((cleanResult.listingSummary?.totalInstructions || 0) > 0)
 
 console.log(`PASS: Clean Project Compilation: ${cleanResult.metricSummary}`)
 
 console.log('\n======================================================')
-console.log('ALL PHASE 9 BYTECODE & COMPILER UNIT TESTS PASSED: 4/4')
+console.log('ALL PHASE 9 LISTING & COMPILER UNIT TESTS PASSED: 4/4')
 console.log('======================================================\n')

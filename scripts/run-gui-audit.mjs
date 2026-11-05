@@ -2472,10 +2472,10 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
         await bytecodeView.waitFor({ state: 'visible', timeout: 5000 })
         const bytecodeText = await bytecodeView.textContent()
         console.log('  -> S7 Bytecode view rendered successfully.')
-        if (!bytecodeText.includes('MC7') && !bytecodeText.includes('0x0000')) {
-          throw new Error('Expected bytecode disassembly to contain MC7 instructions and 0x0000 addresses')
+        if (!bytecodeText.includes('STL listing') || !bytecodeText.includes('0001')) {
+          throw new Error('Expected the STL listing with numbered lines')
         }
-        console.log('  ✅ PASS: S7 Bytecode / STL Disassembly inspector verified with MC7 VM metrics!')
+        console.log('  ✅ PASS: STL listing shown with numbered lines')
 
         // Toggle back to normal ladder canvas
         await bytecodeToggle.click()
