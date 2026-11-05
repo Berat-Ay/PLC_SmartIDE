@@ -10,7 +10,8 @@ import {
   LadderParallelBranchNode
 } from '@shared/types/ladder'
 import { SclExecutionContext, SclInterpreter } from './SclInterpreter'
-import { S7BinaryMemory, S7TimerState, S7CounterState } from './S7BinaryMemory'
+import { S7BinaryMemory, S7TimerState } from './S7BinaryMemory'
+import { parseS7Time } from '@shared/s7/time'
 
 export interface TimerInternalState {
   startTime: number
@@ -21,70 +22,36 @@ export interface TimerInternalState {
   ptVal: number
 }
 
+/**
+ * Reads a timer preset: a number of ms, a TIME literal or a symbol holding a TIME.
+ * An empty or unresolvable preset falls back to 10 s; the compiler reports invalid literals.
+ */
 export function parseTimePresetMs(val: unknown, context?: SclExecutionContext): number {
   if (typeof val === 'number' && !isNaN(val) && val > 0) {
     return Math.round(val)
   }
   if (!val) return 10000
 
-  let s = String(val).replace(/^["']|["']$/g, '').trim()
+  const s = String(val).replace(/^["']|["']$/g, '').trim()
   if (!s) return 10000
 
-  // 1. Pure integer string e.g. "10000"
   if (/^\d+$/.test(s)) {
     const parsed = parseInt(s, 10)
     return parsed > 0 ? parsed : 10000
   }
 
-  // Strip optional leading T#
-  if (s.toUpperCase().startsWith('T#')) {
-    s = s.substring(2).trim()
-  }
+  const literal = parseS7Time(s)
+  if (literal !== null) return literal
+  if (/^(LTIME|TIME|LT|T)#/i.test(s)) return 10000
 
-  // 2. Tokenize components: e.g. 1m30s, 500ms, 10s, 2m
-  let totalMs = 0
-  let matchedAny = false
-
-  const mMatch = s.match(/(\d+)\s*m(?!s)/i)
-  if (mMatch) {
-    totalMs += parseInt(mMatch[1], 10) * 60000
-    matchedAny = true
-  }
-
-  const sMatch = s.match(/(\d+)\s*s(?![a-z])/i)
-  if (sMatch) {
-    totalMs += parseInt(sMatch[1], 10) * 1000
-    matchedAny = true
-  }
-
-  const msMatch = s.match(/(\d+)\s*ms/i)
-  if (msMatch) {
-    totalMs += parseInt(msMatch[1], 10)
-    matchedAny = true
-  }
-
-  if (matchedAny && totalMs > 0) {
-    return totalMs
-  }
-
-  // 3. SCL time expression evaluation
   if (context) {
     try {
       const evalRes = Number(SclInterpreter.evaluateExpression(s, context))
-      if (!isNaN(evalRes) && evalRes > 0) return Math.round(evalRes)
+      if (!isNaN(evalRes) && evalRes >= 0) return Math.round(evalRes)
     } catch {
-      // ignore
+      // Falls through to the default preset
     }
   }
-
-  // 4. Symbolic variable in context (e.g. tag named 'PresetDwell')
-  if (context && !s.startsWith('%') && !s.toUpperCase().startsWith('T#')) {
-    const ctxVal = context.getVar(s)
-    if (typeof ctxVal === 'number' && !isNaN(ctxVal) && ctxVal > 0) {
-      return Math.round(ctxVal)
-    }
-  }
-
   return 10000
 }
 
@@ -117,34 +84,32 @@ export interface LadderEvaluationResult {
 }
 
 export class LadderEvaluator {
-  private static timerStates = new Map<string, TimerInternalState>()
-  private static counterStates = new Map<string, CounterInternalState>()
+  private static fallbackMemory = new S7BinaryMemory()
   private static edgeStates = new Map<string, EdgeInternalState>()
 
   public static resetInternalStates(): void {
-    this.timerStates.clear()
-    this.counterStates.clear()
+    this.fallbackMemory = new S7BinaryMemory()
     this.edgeStates.clear()
   }
 
-  public static getAllTimerStates(): Map<string, TimerInternalState> {
-    return this.timerStates
+  /** Reads an operand that may be a literal, a symbol or a small expression. */
+  private static readOperand(op: string | undefined, context: SclExecutionContext): unknown {
+    const trimmed = (op || '').trim()
+    if (!trimmed) return undefined
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed)
+    return SclInterpreter.evaluateExpression(trimmed, context)
   }
 
-  public static getTimerState(key: string): TimerInternalState | undefined {
-    return this.timerStates.get(key.toUpperCase()) || this.timerStates.get(key)
+  private static writeOperand(op: string, value: unknown, context: SclExecutionContext): void {
+    const raw = op.trim()
+    context.setVar(raw.replace(/"/g, ''), value, raw.startsWith('"'))
   }
 
-  public static setTimerState(key: string, state: TimerInternalState): void {
-    this.timerStates.set(key.toUpperCase(), state)
-  }
-
-  public static getCounterState(key: string): CounterInternalState | undefined {
-    return this.counterStates.get(key.toUpperCase()) || this.counterStates.get(key)
-  }
-
-  public static setCounterState(key: string, state: CounterInternalState): void {
-    this.counterStates.set(key.toUpperCase(), state)
+  private static instanceKey(raw: string, context: SclExecutionContext): string {
+    const trimmed = raw.trim()
+    const quoted = trimmed.startsWith('"')
+    const clean = trimmed.replace(/"/g, '')
+    return context.resolveInstanceKey ? context.resolveInstanceKey(clean, quoted) : clean
   }
 
   /**
@@ -169,7 +134,8 @@ export class LadderEvaluator {
 
     // Handle Hybrid SCL Network
     if (network.isSclNetwork && network.sclCode) {
-      SclInterpreter.execute(network.sclCode, context)
+      const result = SclInterpreter.execute(network.sclCode, context)
+      if (!result.success) context.onError?.(`Network ${network.networkNumber}: ${result.error}`)
       return { nodePowerStates }
     }
 
@@ -208,74 +174,10 @@ export class LadderEvaluator {
     switch (node.kind) {
       case 'contact': {
         const c = node as LadderContactNode
-        const cleanOp = (c.operand || '').replace(/^"|"$/g, '').trim()
-        let rawVal: unknown = undefined
-        if (c.address) {
-          rawVal = context.getVar(c.address)
-        }
-        if (rawVal === undefined || rawVal === 0 || rawVal === false) {
-          const symVal = context.getVar(cleanOp)
-          if (symVal !== undefined && symVal !== 0 && symVal !== false) {
-            rawVal = symVal
-          } else if (rawVal === undefined) {
-            rawVal = symVal
-          }
-        }
-
-        // Direct Native Timer & Counter Sub-bit Resolution (e.g. T1.Q, T1, C1.QU)
-        if (rawVal === undefined || rawVal === 0 || rawVal === false) {
-          const opUpper = cleanOp.toUpperCase()
-          const timerMatch = opUpper.match(/^([A-Za-z0-9_]+)\.(Q|IN|ET|PT)$/)
-          if (timerMatch) {
-            const inst = normalizeTimerKey(timerMatch[1])
-            const member = timerMatch[2]
-            if (memory) {
-              const tMem = memory.getTimer(inst)
-              if (member === 'Q') rawVal = tMem.Q
-              else if (member === 'ET') rawVal = tMem.ET
-              else if (member === 'IN') rawVal = tMem.IN
-              else if (member === 'PT') rawVal = tMem.PT
-            } else {
-              const t = this.getTimerState(inst)
-              if (t) {
-                if (member === 'Q') rawVal = t.q
-                else if (member === 'ET') rawVal = t.elapsed
-                else if (member === 'IN') rawVal = t.running
-                else if (member === 'PT') rawVal = t.ptVal
-              }
-            }
-          } else if (/^T\d+$/i.test(opUpper)) {
-            if (memory) {
-              rawVal = memory.getTimer(opUpper).Q
-            } else {
-              const t = this.getTimerState(opUpper)
-              if (t) rawVal = t.q
-            }
-          }
-
-          const counterMatch = opUpper.match(/^([A-Za-z0-9_]+)\.(QU|QD|CV|PV)$/)
-          if (counterMatch) {
-            const inst = counterMatch[1].toUpperCase()
-            const member = counterMatch[2]
-            if (memory) {
-              const cMem = memory.getCounter(inst)
-              if (member === 'QU' || member === 'Q') rawVal = cMem.QU
-              else if (member === 'QD') rawVal = cMem.QD
-              else if (member === 'CV') rawVal = cMem.CV
-              else if (member === 'PV') rawVal = cMem.PV
-            } else {
-              const cState = this.getCounterState(inst)
-              if (cState && (member === 'QU' || member === 'Q')) rawVal = cState.q
-            }
-          } else if (/^C\d+$/i.test(opUpper)) {
-            if (memory) {
-              rawVal = memory.getCounter(opUpper).QU
-            } else {
-              const cState = this.getCounterState(opUpper)
-              if (cState) rawVal = cState.q
-            }
-          }
-        }
+        const cleanOp = (c.operand || '').replace(/"/g, '').trim()
+        const operandQuoted = (c.operand || '').trim().startsWith('"')
+        let rawVal: unknown = c.address ? context.getVar(c.address) : undefined
+        if (rawVal === undefined) rawVal = context.getVar(cleanOp, operandQuoted)
         const isTrue = !!rawVal
         let isConducting = false
 
@@ -283,18 +185,16 @@ export class LadderEvaluator {
           isConducting = isTrue
         } else if (c.contactType === 'NC_CONTACT') {
           isConducting = !isTrue
-        } else if (c.contactType === 'P_TRIG') {
-          const edgeKey = c.edgeTag || c.address || cleanOp
+        } else if (c.contactType === 'P_TRIG' || c.contactType === 'N_TRIG') {
+          // The edge bit lives in its declared operand when there is one, as on a real CPU
+          const edgeKey = (context.instancePrefix?.() || '') + (c.edgeTag || c.address || cleanOp)
+          const usesEdgeBit = !!c.edgeTag && !!context.hasSymbol?.(c.edgeTag)
           const edgeState = this.edgeStates.get(edgeKey) || { prevVal: false }
-          isConducting = !edgeState.prevVal && isTrue
+          const previous = usesEdgeBit ? !!context.getVar(c.edgeTag as string) : edgeState.prevVal
+          isConducting = c.contactType === 'P_TRIG' ? !previous && isTrue : previous && !isTrue
           edgeState.prevVal = isTrue
           this.edgeStates.set(edgeKey, edgeState)
-        } else if (c.contactType === 'N_TRIG') {
-          const edgeKey = c.edgeTag || c.address || cleanOp
-          const edgeState = this.edgeStates.get(edgeKey) || { prevVal: false }
-          isConducting = edgeState.prevVal && !isTrue
-          edgeState.prevVal = isTrue
-          this.edgeStates.set(edgeKey, edgeState)
+          if (usesEdgeBit) context.setVar(c.edgeTag as string, isTrue)
         }
 
         const passesPower = incomingPower && isConducting
@@ -315,34 +215,18 @@ export class LadderEvaluator {
 
       case 'coil': {
         const c = node as LadderCoilNode
-        const cleanOp = (c.operand || '').replace(/^"|"$/g, '').trim()
-        const targetKey = c.address || cleanOp
-
-        if (c.coilType === 'OUTPUT_COIL') {
-          context.setVar(targetKey, incomingPower)
-          if (c.address && cleanOp && c.address !== cleanOp) {
-            context.setVar(cleanOp, incomingPower)
-          }
-        } else if (c.coilType === 'NEGATED_COIL') {
-          context.setVar(targetKey, !incomingPower)
-          if (c.address && cleanOp && c.address !== cleanOp) {
-            context.setVar(cleanOp, !incomingPower)
-          }
-        } else if (c.coilType === 'SET_COIL') {
-          if (incomingPower) {
-            context.setVar(targetKey, true)
-            if (c.address && cleanOp && c.address !== cleanOp) {
-              context.setVar(cleanOp, true)
-            }
-          }
-        } else if (c.coilType === 'RESET_COIL') {
-          if (incomingPower) {
-            context.setVar(targetKey, false)
-            if (c.address && cleanOp && c.address !== cleanOp) {
-              context.setVar(cleanOp, false)
-            }
-          }
+        const operandQuoted = (c.operand || '').trim().startsWith('"')
+        const cleanOp = (c.operand || '').replace(/"/g, '').trim()
+        const write = (value: boolean): void => {
+          if (c.address) context.setVar(c.address, value)
+          // With real memory the address and the symbol are one location
+          if (!c.address || (!memory && cleanOp && c.address !== cleanOp)) context.setVar(cleanOp, value, operandQuoted)
         }
+
+        if (c.coilType === 'OUTPUT_COIL') write(incomingPower)
+        else if (c.coilType === 'NEGATED_COIL') write(!incomingPower)
+        else if (c.coilType === 'SET_COIL' && incomingPower) write(true)
+        else if (c.coilType === 'RESET_COIL' && incomingPower) write(false)
 
         results[c.id] = {
           powered: incomingPower,
@@ -381,14 +265,16 @@ export class LadderEvaluator {
       case 'timer': {
         const t = node as LadderTimerNode
         const instName = normalizeTimerKey(
-          t.instanceDb ||
-          (t as unknown as { instanceName?: string }).instanceName ||
-          (t as unknown as { operand?: string }).operand ||
-          (t as unknown as { label?: string }).label ||
-          (t as unknown as { id?: string }).id ||
-          'T1'
+          this.instanceKey(
+            t.instanceDb ||
+              (t as unknown as { instanceName?: string }).instanceName ||
+              (t as unknown as { operand?: string }).operand ||
+              (t as unknown as { label?: string }).label ||
+              (t as unknown as { id?: string }).id ||
+              'T1',
+            context
+          )
         )
-        const key = instName
 
         const ptRaw =
           (t as unknown as { ptMs?: number }).ptMs ??
@@ -398,138 +284,27 @@ export class LadderEvaluator {
           'T#10s'
         const ptVal = parseTimePresetMs(ptRaw, context)
 
-        let running = false
-        let elapsed = 0
-        let q = false
-
-        if (memory) {
-          let s7t: S7TimerState
-          if (t.timerType === 'TON') {
-            s7t = memory.updateTonTimer(instName, incomingPower, ptVal, currentTimeMs)
-          } else if (t.timerType === 'TOF') {
-            s7t = memory.updateTofTimer(instName, incomingPower, ptVal, currentTimeMs)
-          } else {
-            s7t = memory.updateTpTimer(instName, incomingPower, ptVal, currentTimeMs)
-          }
-          running = s7t.running
-          elapsed = s7t.ET
-          q = s7t.Q
-
-          this.setTimerState(key, {
-            startTime: s7t.startTime,
-            lastTickTime: s7t.lastTickTime,
-            running: s7t.running,
-            elapsed: s7t.ET,
-            q: s7t.Q,
-            ptVal
-          })
-        } else {
-          let timer = this.timerStates.get(key)
-          if (!timer) {
-            timer = { startTime: 0, lastTickTime: currentTimeMs, running: false, elapsed: 0, q: false, ptVal: 10000 }
-            this.timerStates.set(key, timer)
-          }
-          timer.ptVal = ptVal
-
-          if (t.timerType === 'TON') {
-            if (incomingPower) {
-              if (!timer.running) {
-                timer.running = true
-                timer.startTime = currentTimeMs
-                timer.lastTickTime = currentTimeMs
-                timer.elapsed = 0
-                timer.q = false
-              } else {
-                const dt = Math.max(10, currentTimeMs - timer.lastTickTime)
-                timer.lastTickTime = currentTimeMs
-                const fromStart = currentTimeMs - timer.startTime
-                timer.elapsed = Math.min(ptVal, Math.max(fromStart, timer.elapsed + dt))
-                if (timer.elapsed >= ptVal) {
-                  timer.q = true
-                }
-              }
-            } else {
-              timer.running = false
-              timer.elapsed = 0
-              timer.q = false
-              timer.lastTickTime = currentTimeMs
-            }
-          } else if (t.timerType === 'TOF') {
-            if (incomingPower) {
-              timer.running = false
-              timer.elapsed = 0
-              timer.q = true
-              timer.lastTickTime = currentTimeMs
-            } else if (timer.q) {
-              if (!timer.running) {
-                timer.running = true
-                timer.startTime = currentTimeMs
-                timer.lastTickTime = currentTimeMs
-              } else {
-                const dt = Math.max(10, currentTimeMs - timer.lastTickTime)
-                timer.lastTickTime = currentTimeMs
-                timer.elapsed = Math.min(ptVal, Math.max(currentTimeMs - timer.startTime, timer.elapsed + dt))
-                if (timer.elapsed >= ptVal) {
-                  timer.q = false
-                  timer.running = false
-                }
-              }
-            }
-          } else if (t.timerType === 'TP') {
-            if (incomingPower && !timer.running && !timer.q) {
-              timer.running = true
-              timer.startTime = currentTimeMs
-              timer.lastTickTime = currentTimeMs
-              timer.elapsed = 0
-              timer.q = true
-            } else if (timer.running) {
-              const dt = Math.max(10, currentTimeMs - timer.lastTickTime)
-              timer.lastTickTime = currentTimeMs
-              timer.elapsed = Math.min(ptVal, Math.max(currentTimeMs - timer.startTime, timer.elapsed + dt))
-              if (timer.elapsed >= ptVal) {
-                timer.q = false
-                timer.running = false
-              }
-            }
-          }
-          running = timer.running
-          elapsed = timer.elapsed
-          q = timer.q
-        }
-
-        // Export native timer instance variables directly to context and memory
-        const etMs = Math.round(elapsed)
+        const mem = memory || this.fallbackMemory
+        const s7t: S7TimerState =
+          t.timerType === 'TON'
+            ? mem.updateTonTimer(instName, incomingPower, ptVal, currentTimeMs)
+            : t.timerType === 'TOF'
+              ? mem.updateTofTimer(instName, incomingPower, ptVal, currentTimeMs)
+              : mem.updateTpTimer(instName, incomingPower, ptVal, currentTimeMs)
+        const q = s7t.Q
+        const etMs = Math.round(s7t.ET)
         const ptMs = Math.round(ptVal)
         const progress = ptMs > 0 ? Math.min(100, Math.round((etMs / ptMs) * 100)) : 0
 
-        context.setVar(`${instName}.IN`, incomingPower)
-        context.setVar(`${instName}.Q`, q)
-        context.setVar(`${instName}.ET`, etMs)
-        context.setVar(`${instName}.PT`, ptMs)
-        context.setVar(`${key}.IN`, incomingPower)
-        context.setVar(`${key}.Q`, q)
-        context.setVar(`${key}.ET`, etMs)
-        context.setVar(`${key}.PT`, ptMs)
-
-        if (memory) {
-          memory.setVariable(`${instName}.IN`, incomingPower)
-          memory.setVariable(`${instName}.Q`, q)
-          memory.setVariable(`${instName}.ET`, etMs)
-          memory.setVariable(`${instName}.PT`, ptMs)
-          memory.setVariable(`${key}.IN`, incomingPower)
-          memory.setVariable(`${key}.Q`, q)
-          memory.setVariable(`${key}.ET`, etMs)
-          memory.setVariable(`${key}.PT`, ptMs)
+        // Without binary memory the caller's context is the only place these can be read back
+        if (!memory) {
+          context.setVar(`${instName}.IN`, incomingPower)
+          context.setVar(`${instName}.Q`, q)
+          context.setVar(`${instName}.ET`, etMs)
+          context.setVar(`${instName}.PT`, ptMs)
         }
-
-        if (t.qOperand) {
-          context.setVar(t.qOperand, q)
-          if (memory) memory.setVariable(t.qOperand, q)
-        }
-        if (t.etOperand) {
-          context.setVar(t.etOperand, etMs)
-          if (memory) memory.setVariable(t.etOperand, etMs)
-        }
+        if (t.qOperand) this.writeOperand(t.qOperand, q, context)
+        if (t.etOperand) this.writeOperand(t.etOperand, etMs, context)
 
         results[t.id] = {
           powered: q,
@@ -547,121 +322,36 @@ export class LadderEvaluator {
 
       case 'counter': {
         const c = node as LadderCounterNode
-        const instName = c.instanceDb || 'C1'
-        const key = instName.toUpperCase()
+        const instName = normalizeTimerKey(this.instanceKey(c.instanceDb || 'C1', context))
 
-        const pv = Number(context.getVar(c.pvOperand)) || Number(c.pvOperand) || 10
-        const isReset = !!(c.rLdOperand ? context.getVar(c.rLdOperand) : false)
+        const pv = Number(this.readOperand(c.pvOperand, context)) || 10
+        const isReset = !!this.readOperand(c.rLdOperand, context)
+        const cuRlo = c.cuOperand ? !!this.readOperand(c.cuOperand, context) : incomingPower
+        const cdRlo = c.cdOperand
+          ? !!this.readOperand(c.cdOperand, context)
+          : c.counterType === 'CTD'
+            ? incomingPower
+            : false
 
-        // Resolve CU and CD inputs
-        let cuRlo = incomingPower
-        if (c.cuOperand) {
-          cuRlo = !!context.getVar(c.cuOperand)
-        }
-        let cdRlo = false
-        if (c.cdOperand) {
-          cdRlo = !!context.getVar(c.cdOperand)
-        } else if (c.counterType === 'CTD') {
-          cdRlo = incomingPower
-        }
-
-        let qu = false
-        let qd = false
-        let cv = 0
-
-        if (memory) {
-          if (c.counterType === 'CTUD') {
-            const s7c = memory.updateCtudCounter(instName, cuRlo, cdRlo, isReset, false, pv)
-            qu = s7c.QU
-            qd = s7c.QD
-            cv = s7c.CV
-          } else if (c.counterType === 'CTD') {
-            const s7c = memory.updateCtdCounter(instName, cdRlo, isReset, pv)
-            qu = s7c.QU
-            qd = s7c.QD
-            cv = s7c.CV
-          } else {
-            const s7c = memory.updateCtuCounter(instName, cuRlo, isReset, pv)
-            qu = s7c.QU
-            qd = s7c.QD
-            cv = s7c.CV
-          }
-          this.setCounterState(key, { prevCu: cuRlo, cv, q: c.counterType === 'CTD' ? qd : qu })
-        } else {
-          let counter = this.counterStates.get(key)
-          if (!counter) {
-            counter = { prevCu: false, cv: c.counterType === 'CTD' ? pv : 0, q: false }
-            this.counterStates.set(key, counter)
-          }
-
-          if (isReset) {
-            counter.cv = c.counterType === 'CTD' ? pv : 0
-            counter.q = c.counterType === 'CTD'
-          } else {
-            if (c.counterType === 'CTUD') {
-              const edgeStateCd = this.edgeStates.get(`${key}_CD`) || { prevVal: false }
-              if (!counter.prevCu && cuRlo && counter.cv < 32767) {
-                counter.cv++
-              }
-              if (!edgeStateCd.prevVal && cdRlo && counter.cv > 0) {
-                counter.cv--
-              }
-              edgeStateCd.prevVal = cdRlo
-              this.edgeStates.set(`${key}_CD`, edgeStateCd)
-            } else if (c.counterType === 'CTD') {
-              if (!counter.prevCu && cdRlo && counter.cv > 0) {
-                counter.cv--
-              }
-            } else {
-              if (!counter.prevCu && cuRlo) {
-                counter.cv++
-              }
-            }
-            qu = counter.cv >= pv
-            qd = counter.cv <= 0
-            counter.q = c.counterType === 'CTD' ? qd : qu
-          }
-          counter.prevCu = cuRlo
-          cv = counter.cv
-          qu = counter.cv >= pv
-          qd = counter.cv <= 0
-        }
-
+        const mem = memory || this.fallbackMemory
+        const s7c =
+          c.counterType === 'CTUD'
+            ? mem.updateCtudCounter(instName, cuRlo, cdRlo, isReset, false, pv)
+            : c.counterType === 'CTD'
+              ? mem.updateCtdCounter(instName, cdRlo, isReset, pv)
+              : mem.updateCtuCounter(instName, cuRlo, isReset, pv)
+        const { QU: qu, QD: qd, CV: cv } = s7c
         const q = c.counterType === 'CTD' ? qd : qu
 
-        // Export native counter instance variables directly to context
-        context.setVar(`${instName}.QU`, qu)
-        context.setVar(`${instName}.QD`, qd)
-        context.setVar(`${instName}.Q`, q)
-        context.setVar(`${instName}.CV`, cv)
-        context.setVar(`${instName}.PV`, pv)
-        context.setVar(`${key}.QU`, qu)
-        context.setVar(`${key}.QD`, qd)
-        context.setVar(`${key}.Q`, q)
-        context.setVar(`${key}.CV`, cv)
-        context.setVar(`${key}.PV`, pv)
-
-        if (memory) {
-          memory.setVariable(`${instName}.QU`, qu)
-          memory.setVariable(`${instName}.QD`, qd)
-          memory.setVariable(`${instName}.Q`, q)
-          memory.setVariable(`${instName}.CV`, cv)
-          memory.setVariable(`${instName}.PV`, pv)
-          memory.setVariable(`${key}.QU`, qu)
-          memory.setVariable(`${key}.QD`, qd)
-          memory.setVariable(`${key}.Q`, q)
-          memory.setVariable(`${key}.CV`, cv)
-          memory.setVariable(`${key}.PV`, pv)
+        if (!memory) {
+          context.setVar(`${instName}.QU`, qu)
+          context.setVar(`${instName}.QD`, qd)
+          context.setVar(`${instName}.Q`, q)
+          context.setVar(`${instName}.CV`, cv)
+          context.setVar(`${instName}.PV`, pv)
         }
-
-        if (c.qOperand) {
-          context.setVar(c.qOperand, q)
-          if (memory) memory.setVariable(c.qOperand, q)
-        }
-        if (c.cvOperand) {
-          context.setVar(c.cvOperand, cv)
-          if (memory) memory.setVariable(c.cvOperand, cv)
-        }
+        if (c.qOperand) this.writeOperand(c.qOperand, q, context)
+        if (c.cvOperand) this.writeOperand(c.cvOperand, cv, context)
 
         results[c.id] = {
           powered: q,
@@ -673,24 +363,9 @@ export class LadderEvaluator {
       case 'comparator': {
         const cmp = node as LadderComparatorNode
         const evalOperand = (op: string): number => {
-          const trimmed = (op || '').trim()
-          if (!trimmed) return 0
-          const directVal = context.getVar(trimmed)
-          if (directVal !== undefined && typeof directVal === 'number') {
-            return directVal
-          }
-          if (typeof directVal === 'boolean') {
-            return directVal ? 1 : 0
-          }
-          try {
-            const exprRes = SclInterpreter.evaluateExpression(trimmed, context)
-            if (exprRes !== undefined && !isNaN(Number(exprRes))) {
-              return Number(exprRes)
-            }
-          } catch {
-            // ignore
-          }
-          const num = Number(trimmed)
+          const value = this.readOperand(op, context)
+          if (typeof value === 'boolean') return value ? 1 : 0
+          const num = Number(value)
           return isNaN(num) ? 0 : num
         }
 
@@ -725,7 +400,7 @@ export class LadderEvaluator {
           const max = Number(SclInterpreter.evaluateExpression(m.max || m.in2 || '27648', context)) || 27648
           const val = Number(SclInterpreter.evaluateExpression(m.value || m.in1 || '0', context)) || 0
           const norm = max !== min ? (val - min) / (max - min) : 0
-          if (m.out) context.setVar(m.out, norm)
+          if (m.out) this.writeOperand(m.out, norm, context)
           results[m.id] = {
             powered: true,
             liveValues: { in: val, out: Math.round(norm * 1000) / 1000 }
@@ -735,14 +410,14 @@ export class LadderEvaluator {
           const max = Number(SclInterpreter.evaluateExpression(m.max || m.in2 || '10', context)) || 10
           const val = Number(SclInterpreter.evaluateExpression(m.value || m.in1 || '0', context)) || 0
           const scaled = min + val * (max - min)
-          if (m.out) context.setVar(m.out, scaled)
+          if (m.out) this.writeOperand(m.out, scaled, context)
           results[m.id] = {
             powered: true,
             liveValues: { in: Math.round(val * 1000) / 1000, out: Math.round(scaled * 100) / 100 }
           }
         } else if (m.boxType === 'MOVE') {
           const val = SclInterpreter.evaluateExpression(m.in1 || '0', context)
-          if (m.out) context.setVar(m.out, val)
+          if (m.out) this.writeOperand(m.out, val, context)
           results[m.id] = { powered: true, liveValues: { val: String(val) } }
         } else {
           const in1 = Number(SclInterpreter.evaluateExpression(m.in1 || '0', context)) || 0
@@ -751,9 +426,13 @@ export class LadderEvaluator {
           if (m.boxType === 'ADD') outVal = in1 + in2
           else if (m.boxType === 'SUB') outVal = in1 - in2
           else if (m.boxType === 'MUL') outVal = in1 * in2
-          else if (m.boxType === 'DIV') outVal = in2 !== 0 ? in1 / in2 : 0
+          else if (m.boxType === 'DIV') {
+            const outType = m.out ? context.typeOf?.(m.out.replace(/"/g, ''), m.out.trim().startsWith('"'))?.toUpperCase() : undefined
+            const isRealOut = !outType || outType === 'REAL' || outType === 'LREAL'
+            outVal = in2 !== 0 ? (isRealOut ? in1 / in2 : Math.trunc(in1 / in2)) : 0
+          }
 
-          if (m.out) context.setVar(m.out, outVal)
+          if (m.out) this.writeOperand(m.out, outVal, context)
           results[m.id] = {
             powered: true,
             liveValues: { in1, in2, out: Math.round(outVal * 100) / 100 }

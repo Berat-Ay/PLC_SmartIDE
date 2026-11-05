@@ -9,9 +9,10 @@ export interface RuntimeMemorySnapshot {
   cycleDurationMs: number
 
   // Memory Areas
-  pii: number[] // Process Image Inputs (%IB0..%IB127)
-  piq: number[] // Process Image Outputs (%QB0..%QB127)
-  merker: number[] // Bit Memory (%MB0..%MB511)
+  // Each area is copied up to its last used byte; bytes past the end read as zero
+  pii: Uint8Array // Process Image Inputs
+  piq: Uint8Array // Process Image Outputs
+  merker: Uint8Array // Bit Memory
   dataBlocks: Record<string, Record<string, unknown>> // dbName -> varName -> value
 
   // Active Ladder Node states: nodeId -> { powered: boolean, liveValues?: Record<string, string | number> }

@@ -48,6 +48,13 @@ const initialMetrics: RuntimeWorkerMetrics = {
 }
 
 const defaultEngine = new PlcRuntimeEngine()
+defaultEngine.setLiveProjectProvider({
+  tagTables: () => useTagStore.getState().tagTables,
+  ladBlocks: () => useBlockStore.getState().ladBlocks,
+  sclBlocks: () => useBlockStore.getState().sclBlocks,
+  dataBlocks: () => useBlockStore.getState().dataBlocks,
+  udts: () => useBlockStore.getState().udts
+})
 
 export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
   defaultEngine.setOnStateChange((state) => {

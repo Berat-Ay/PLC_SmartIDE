@@ -1,934 +1,104 @@
-// Siemens IEC 61131-3 Structured Control Language (SCL) Recursive-Descent Lexer, AST Parser & Runtime Engine
+// SCL runtime interpreter. Lexing and parsing live in src/shared/scl.
+import { SclLexer } from '@shared/scl/lexer'
+import { SclParser } from '@shared/scl/parser'
+import { SclStatement, SclExpression } from '@shared/scl/ast'
+import { parseS7Time } from '@shared/s7/time'
+import { roundHalfEven } from '@shared/s7/typeLayout'
+
+export * from '@shared/scl/ast'
+export { SclLexer, SclParser }
+
+export interface SclBlockCall {
+  name: string
+  quoted: boolean
+  /** Parameters passed with :=, already evaluated. */
+  inputs: Record<string, unknown>
+  /** Parameters passed with => or as a plain variable with :=, for outputs and in-outs. */
+  writers: Record<string, (value: unknown) => void>
+}
 
 export interface SclExecutionContext {
-  getVar: (symbol: string) => unknown
-  setVar: (symbol: string, value: unknown) => void
+  getVar: (symbol: string, quoted?: boolean) => unknown
+  setVar: (symbol: string, value: unknown, quoted?: boolean) => void
+  /** Declared S7 type of a symbol, used to tell integer division from REAL division. */
+  typeOf?: (symbol: string, quoted?: boolean) => string | undefined
+  /** Runs a user block or an instance call. handled=false falls through to built-in functions. */
+  callBlock?: (call: SclBlockCall) => { handled: boolean; returnValue?: unknown }
+  /** True when callBlock would run this name. Arguments are only evaluated once it is known. */
+  canCall?: (name: string, quoted: boolean) => boolean
+  hasSymbol?: (symbol: string, quoted?: boolean) => boolean
+  /** Prefix that keeps edge memory of one FB instance apart from another. */
+  instancePrefix?: () => string
   callFunction?: (name: string, args: Record<string, unknown>) => unknown
+  /** Key of a timer or counter instance within the running block. */
+  resolveInstanceKey?: (name: string, quoted: boolean) => string
   lineValues?: Record<number, string | number> // lineNumber -> display value for online monitoring
+  onError?: (message: string) => void
 }
 
-export type SclTokenType =
-  | 'KEYWORD'
-  | 'IDENTIFIER'
-  | 'NUMBER'
-  | 'REAL'
-  | 'STRING'
-  | 'TIME'
-  | 'OPERATOR'
-  | 'PUNCTUATION'
-  | 'EOF'
+/** Same effect as a watchdog timeout on a real CPU: the program never finished. */
+const MAX_LOOP_ITERATIONS = 1_000_000
+const PARSE_CACHE_LIMIT = 2000
 
-export interface SclToken {
-  type: SclTokenType
-  value: string
-  line: number
-  col: number
+type ExecResult = 'NORMAL' | 'EXIT' | 'CONTINUE' | 'RETURN'
+type StaticType = 'real' | 'int' | 'bool' | undefined
+
+interface ParsedProgram {
+  statements: SclStatement[]
+  error?: string
 }
 
-// -----------------------------------------------------------------------------
-// AST Node Interfaces
-// -----------------------------------------------------------------------------
-
-export type SclStatement =
-  | SclAssignStatement
-  | SclIfStatement
-  | SclCaseStatement
-  | SclForStatement
-  | SclWhileStatement
-  | SclRepeatStatement
-  | SclCallStatement
-  | SclReturnStatement
-  | SclExitStatement
-
-export interface SclAssignStatement {
-  kind: 'assign'
-  line: number
-  target: string
-  expression: SclExpression
+const INTEGER_RANGES: Record<string, [number, number]> = {
+  SINT: [-128, 127],
+  INT: [-32768, 32767],
+  DINT: [-2147483648, 2147483647],
+  USINT: [0, 255],
+  BYTE: [0, 255],
+  UINT: [0, 65535],
+  WORD: [0, 65535],
+  UDINT: [0, 4294967295],
+  DWORD: [0, 4294967295]
 }
 
-export interface SclIfStatement {
-  kind: 'if'
-  line: number
-  condition: SclExpression
-  thenStatements: SclStatement[]
-  elsifBranches: Array<{ condition: SclExpression; statements: SclStatement[]; line: number }>
-  elseStatements?: SclStatement[]
+const BIT_WIDTHS: Record<string, number> = { BYTE: 8, USINT: 8, SINT: 8, WORD: 16, UINT: 16, INT: 16, DWORD: 32, UDINT: 32, DINT: 32 }
+
+function wrapInteger(value: number, target: string): number {
+  const range = INTEGER_RANGES[target]
+  if (!range) return value
+  const span = range[1] - range[0] + 1
+  const wrapped = ((value - range[0]) % span + span) % span
+  return wrapped + range[0]
 }
 
-export interface SclCaseStatement {
-  kind: 'case'
-  line: number
-  selector: SclExpression
-  cases: Array<{ values: Array<number | { from: number; to: number }>; statements: SclStatement[]; line: number }>
-  elseStatements?: SclStatement[]
+function isFalsy(value: unknown): boolean {
+  return !value
 }
-
-export interface SclForStatement {
-  kind: 'for'
-  line: number
-  iterVar: string
-  startExpr: SclExpression
-  endExpr: SclExpression
-  stepExpr?: SclExpression
-  body: SclStatement[]
-}
-
-export interface SclWhileStatement {
-  kind: 'while'
-  line: number
-  condition: SclExpression
-  body: SclStatement[]
-}
-
-export interface SclRepeatStatement {
-  kind: 'repeat'
-  line: number
-  condition: SclExpression
-  body: SclStatement[]
-}
-
-export interface SclCallStatement {
-  kind: 'call'
-  line: number
-  callee: string
-  args: Record<string, SclExpression>
-}
-
-export interface SclReturnStatement {
-  kind: 'return'
-  line: number
-}
-
-export interface SclExitStatement {
-  kind: 'exit'
-  line: number
-}
-
-// Expressions
-export type SclExpression =
-  | SclLiteralExpr
-  | SclVariableExpr
-  | SclUnaryExpr
-  | SclBinaryExpr
-  | SclCallExpr
-
-export interface SclLiteralExpr {
-  kind: 'literal'
-  value: unknown
-  raw: string
-  line: number
-}
-
-export interface SclVariableExpr {
-  kind: 'variable'
-  name: string
-  line: number
-}
-
-export interface SclUnaryExpr {
-  kind: 'unary'
-  op: 'NOT' | '-' | '+'
-  expr: SclExpression
-  line: number
-}
-
-export interface SclBinaryExpr {
-  kind: 'binary'
-  op: string
-  left: SclExpression
-  right: SclExpression
-  line: number
-}
-
-export interface SclCallExpr {
-  kind: 'call_expr'
-  callee: string
-  args: Record<string, SclExpression>
-  line: number
-}
-
-// -----------------------------------------------------------------------------
-// SCL Lexer (Tokenizer)
-// -----------------------------------------------------------------------------
-
-export class SclLexer {
-  private static readonly KEYWORDS = new Set([
-    'IF', 'THEN', 'ELSIF', 'ELSE', 'END_IF',
-    'CASE', 'OF', 'END_CASE',
-    'FOR', 'TO', 'BY', 'DO', 'END_FOR',
-    'WHILE', 'END_WHILE',
-    'REPEAT', 'UNTIL', 'END_REPEAT',
-    'VAR', 'VAR_INPUT', 'VAR_OUTPUT', 'VAR_IN_OUT', 'VAR_TEMP', 'VAR_STAT', 'END_VAR',
-    'BEGIN', 'ORGANIZATION_BLOCK', 'FUNCTION_BLOCK', 'FUNCTION',
-    'END_ORGANIZATION_BLOCK', 'END_FUNCTION_BLOCK', 'END_FUNCTION',
-    'RETURN', 'EXIT', 'CONTINUE',
-    'AND', 'OR', 'XOR', 'NOT', 'MOD',
-    'TRUE', 'FALSE'
-  ])
-
-  public static tokenize(code: string): { tokens: SclToken[]; errors: string[] } {
-    const tokens: SclToken[] = []
-    const errors: string[] = []
-    let i = 0
-    let line = 1
-    let col = 1
-
-    const advance = () => {
-      if (code[i] === '\n') {
-        line++
-        col = 1
-      } else {
-        col++
-      }
-      i++
-    }
-
-    while (i < code.length) {
-      const ch = code[i]
-
-      // Whitespace
-      if (/\s/.test(ch)) {
-        advance()
-        continue
-      }
-
-      // Line comments: // ...
-      if (ch === '/' && code[i + 1] === '/') {
-        while (i < code.length && code[i] !== '\n') advance()
-        continue
-      }
-
-      // Block comments: (* ... *)
-      if (ch === '(' && code[i + 1] === '*') {
-        advance()
-        advance()
-        while (i < code.length && !(code[i] === '*' && code[i + 1] === ')')) {
-          advance()
-        }
-        if (i < code.length) {
-          advance()
-          advance()
-        } else {
-          errors.push(`Line ${line}: Unclosed block comment '(*'`)
-        }
-        continue
-      }
-
-      // Pragmas & Block Attributes: { S7_Optimized_Access := 'TRUE' }
-      if (ch === '{') {
-        advance()
-        while (i < code.length && code[i] !== '}') {
-          advance()
-        }
-        if (i < code.length && code[i] === '}') {
-          advance()
-        } else {
-          errors.push(`Line ${line}: Unclosed pragma '{'`)
-        }
-        continue
-      }
-
-      const startLine = line
-      const startCol = col
-
-      // Two-character punctuation & operators: :=, <=, >=, <>, .., =>
-      const two = code.substring(i, i + 2)
-      if ([':=', '<=', '>=', '<>', '..', '=>'].includes(two)) {
-        tokens.push({ type: 'OPERATOR', value: two, line: startLine, col: startCol })
-        advance()
-        advance()
-        continue
-      }
-
-      // Single-character operators & punctuation
-      if ([';', ':', ',', '(', ')', '[', ']', '.', '+', '-', '*', '/', '=', '<', '>'].includes(ch)) {
-        const type = [';', ':', ',', '(', ')', '[', ']', '.'].includes(ch) ? 'PUNCTUATION' : 'OPERATOR'
-        tokens.push({ type, value: ch, line: startLine, col: startCol })
-        advance()
-        continue
-      }
-
-      // Double-quoted strings / identifiers e.g. "TankLevel_Raw"
-      if (ch === '"') {
-        advance()
-        let str = ''
-        while (i < code.length && code[i] !== '"') {
-          str += code[i]
-          advance()
-        }
-        if (i < code.length && code[i] === '"') {
-          advance()
-          tokens.push({ type: 'IDENTIFIER', value: str, line: startLine, col: startCol })
-        } else {
-          errors.push(`Line ${startLine}: Unclosed string literal '"'`)
-        }
-        continue
-      }
-
-      // Single-quoted character strings e.g. 'Pump Active'
-      if (ch === "'") {
-        advance()
-        let str = ''
-        while (i < code.length && code[i] !== "'") {
-          str += code[i]
-          advance()
-        }
-        if (i < code.length && code[i] === "'") {
-          advance()
-          tokens.push({ type: 'STRING', value: str, line: startLine, col: startCol })
-        } else {
-          errors.push(`Line ${startLine}: Unclosed string literal '\''`)
-        }
-        continue
-      }
-
-      // Time literal e.g. T#5s, T#500ms, TIME#1m
-      if (
-        (ch === 'T' || ch === 't') &&
-        (code.substring(i, i + 2).toUpperCase() === 'T#' || code.substring(i, i + 5).toUpperCase() === 'TIME#')
-      ) {
-        let timeStr = ''
-        while (i < code.length && /[A-Za-z0-9_#]/.test(code[i])) {
-          timeStr += code[i]
-          advance()
-        }
-        tokens.push({ type: 'TIME', value: timeStr, line: startLine, col: startCol })
-        continue
-      }
-
-      // Number literal (Integer or Real float)
-      if (/[0-9]/.test(ch)) {
-        let numStr = ''
-        let hasDot = false
-        while (i < code.length && (/[0-9]/.test(code[i]) || (code[i] === '.' && code[i + 1] !== '.'))) {
-          if (code[i] === '.') {
-            if (hasDot) break
-            hasDot = true
-          }
-          numStr += code[i]
-          advance()
-        }
-        tokens.push({
-          type: hasDot ? 'REAL' : 'NUMBER',
-          value: numStr,
-          line: startLine,
-          col: startCol
-        })
-        continue
-      }
-
-      // Identifiers & Keywords (allows leading #, %, letters, underscores)
-      if (/[a-zA-Z_#%]/.test(ch)) {
-        let idStr = ''
-        while (i < code.length && /[a-zA-Z0-9_#%.]/.test(code[i])) {
-          // If dot is part of range '..' stop
-          if (code[i] === '.' && code[i + 1] === '.') break
-          idStr += code[i]
-          advance()
-        }
-        const upper = idStr.toUpperCase()
-        if (SclLexer.KEYWORDS.has(upper)) {
-          tokens.push({ type: 'KEYWORD', value: upper, line: startLine, col: startCol })
-        } else {
-          tokens.push({ type: 'IDENTIFIER', value: idStr, line: startLine, col: startCol })
-        }
-        continue
-      }
-
-      // Unknown character fallback
-      errors.push(`Line ${line}, col ${col}: Unexpected character '${ch}'`)
-      advance()
-    }
-
-    tokens.push({ type: 'EOF', value: '', line, col })
-    return { tokens, errors }
-  }
-}
-
-// -----------------------------------------------------------------------------
-// SCL Parser (Recursive-Descent)
-// -----------------------------------------------------------------------------
-
-export class SclParser {
-  private tokens: SclToken[] = []
-  private pos = 0
-  public errors: string[] = []
-
-  constructor(tokens: SclToken[]) {
-    this.tokens = tokens
-  }
-
-  private current(): SclToken {
-    return this.tokens[this.pos] || { type: 'EOF', value: '', line: 0, col: 0 }
-  }
-
-  private peek(): SclToken {
-    return this.tokens[this.pos + 1] || { type: 'EOF', value: '', line: 0, col: 0 }
-  }
-
-  private advance(): SclToken {
-    const t = this.current()
-    if (this.pos < this.tokens.length - 1) this.pos++
-    return t
-  }
-
-  private matchKeyword(kw: string): boolean {
-    const cur = this.current()
-    if (cur.type === 'KEYWORD' && cur.value.toUpperCase() === kw.toUpperCase()) {
-      this.advance()
-      return true
-    }
-    return false
-  }
-
-  private matchOperator(op: string): boolean {
-    const cur = this.current()
-    if ((cur.type === 'OPERATOR' || cur.type === 'PUNCTUATION') && cur.value === op) {
-      this.advance()
-      return true
-    }
-    return false
-  }
-
-  private expect(expected: string): boolean {
-    const cur = this.current()
-    if (cur.value.toUpperCase() === expected.toUpperCase()) {
-      this.advance()
-      return true
-    }
-    this.errors.push(`Line ${cur.line}: Expected '${expected}', found '${cur.value}'`)
-    return false
-  }
-
-  private parseQualifiedIdentifier(): string {
-    let name = this.current().value
-    this.advance()
-
-    while (this.current().value === '.' || this.current().value === '[') {
-      if (this.current().value === '.') {
-        this.advance() // consume '.'
-        if (
-          this.current().type === 'IDENTIFIER' ||
-          this.current().type === 'KEYWORD' ||
-          this.current().type === 'NUMBER'
-        ) {
-          name += '.' + this.current().value
-          this.advance()
-        } else {
-          this.errors.push(`Line ${this.current().line}: Expected identifier after '.'`)
-          break
-        }
-      } else if (this.current().value === '[') {
-        this.advance() // consume '['
-        let idx = ''
-        while (this.current().type !== 'EOF' && this.current().value !== ']') {
-          idx += this.current().value
-          this.advance()
-        }
-        if (this.current().value === ']') this.advance()
-        name += `[${idx}]`
-      }
-    }
-    return name
-  }
-
-  public parseProgram(): SclStatement[] {
-    const statements: SclStatement[] = []
-    let inHeader = false
-
-    while (this.current().type !== 'EOF') {
-      const cur = this.current()
-
-      // Skip Block Headers: ORGANIZATION_BLOCK ... BEGIN ... END_ORGANIZATION_BLOCK
-      if (
-        cur.type === 'KEYWORD' &&
-        ['ORGANIZATION_BLOCK', 'FUNCTION_BLOCK', 'FUNCTION'].includes(cur.value)
-      ) {
-        this.advance()
-        // Skip block name and header tokens until BEGIN or VAR
-        while (this.current().type !== 'EOF' && !['BEGIN', 'VAR', 'VAR_INPUT', 'VAR_TEMP'].includes(this.current().value)) {
-          this.advance()
-        }
-        continue
-      }
-
-      if (cur.type === 'KEYWORD' && cur.value.startsWith('VAR')) {
-        inHeader = true
-        this.advance()
-        continue
-      }
-
-      if (cur.type === 'KEYWORD' && cur.value === 'END_VAR') {
-        inHeader = false
-        this.advance()
-        continue
-      }
-
-      if (inHeader) {
-        this.advance()
-        continue
-      }
-
-      if (cur.type === 'KEYWORD' && cur.value === 'BEGIN') {
-        this.advance()
-        continue
-      }
-
-      if (
-        cur.type === 'KEYWORD' &&
-        ['END_ORGANIZATION_BLOCK', 'END_FUNCTION_BLOCK', 'END_FUNCTION'].includes(cur.value)
-      ) {
-        this.advance()
-        break
-      }
-
-      const stmt = this.parseStatement()
-      if (stmt) {
-        statements.push(stmt)
-      } else {
-        // Skip to next semicolon to synchronize parser
-        while (this.current().type !== 'EOF' && this.current().value !== ';') {
-          this.advance()
-        }
-        if (this.current().value === ';') this.advance()
-      }
-    }
-
-    return statements
-  }
-
-  public parseStatement(): SclStatement | null {
-    const cur = this.current()
-
-    // 1. IF statement
-    if (this.matchKeyword('IF')) {
-      const startLine = cur.line
-      const cond = this.parseExpression()
-      this.expect('THEN')
-
-      const thenStmts: SclStatement[] = []
-      const elsifBranches: SclIfStatement['elsifBranches'] = []
-      let elseStmts: SclStatement[] | undefined = undefined
-
-      while (
-        this.current().type !== 'EOF' &&
-        !['ELSIF', 'ELSE', 'END_IF'].includes(this.current().value)
-      ) {
-        const s = this.parseStatement()
-        if (s) thenStmts.push(s)
-      }
-
-      while (this.matchKeyword('ELSIF')) {
-        const branchLine = this.current().line
-        const elsifCond = this.parseExpression()
-        this.expect('THEN')
-        const branchStmts: SclStatement[] = []
-        while (
-          this.current().type !== 'EOF' &&
-          !['ELSIF', 'ELSE', 'END_IF'].includes(this.current().value)
-        ) {
-          const s = this.parseStatement()
-          if (s) branchStmts.push(s)
-        }
-        elsifBranches.push({ condition: elsifCond, statements: branchStmts, line: branchLine })
-      }
-
-      if (this.matchKeyword('ELSE')) {
-        elseStmts = []
-        while (this.current().type !== 'EOF' && this.current().value !== 'END_IF') {
-          const s = this.parseStatement()
-          if (s) elseStmts.push(s)
-        }
-      }
-
-      this.expect('END_IF')
-      if (this.current().value === ';') this.advance()
-
-      return {
-        kind: 'if',
-        line: startLine,
-        condition: cond,
-        thenStatements: thenStmts,
-        elsifBranches,
-        elseStatements: elseStmts
-      }
-    }
-
-    // 2. CASE statement
-    if (this.matchKeyword('CASE')) {
-      const startLine = cur.line
-      const selector = this.parseExpression()
-      this.expect('OF')
-
-      const cases: SclCaseStatement['cases'] = []
-      let elseStmts: SclStatement[] | undefined = undefined
-
-      while (this.current().type !== 'EOF' && !['ELSE', 'END_CASE'].includes(this.current().value)) {
-        const caseLine = this.current().line
-        const vals: Array<number | { from: number; to: number }> = []
-
-        // Parse case values e.g. 1: or 2, 3: or 10..20:
-        while (this.current().type !== 'EOF' && this.current().value !== ':') {
-          const v = Number(this.current().value) || 0
-          this.advance()
-
-          if (this.current().value === '..') {
-            this.advance()
-            const vTo = Number(this.current().value) || v
-            this.advance()
-            vals.push({ from: v, to: vTo })
-          } else {
-            vals.push(v)
-          }
-
-          if (this.current().value === ',') this.advance()
-        }
-        this.expect(':')
-
-        const caseStmts: SclStatement[] = []
-        while (
-          this.current().type !== 'EOF' &&
-          !['ELSE', 'END_CASE'].includes(this.current().value) &&
-          !(this.current().type === 'NUMBER' && (this.peek().value === ':' || this.peek().value === ',' || this.peek().value === '..'))
-        ) {
-          const s = this.parseStatement()
-          if (s) caseStmts.push(s)
-        }
-
-        cases.push({ values: vals, statements: caseStmts, line: caseLine })
-      }
-
-      if (this.matchKeyword('ELSE')) {
-        elseStmts = []
-        while (this.current().type !== 'EOF' && this.current().value !== 'END_CASE') {
-          const s = this.parseStatement()
-          if (s) elseStmts.push(s)
-        }
-      }
-
-      this.expect('END_CASE')
-      if (this.current().value === ';') this.advance()
-
-      return {
-        kind: 'case',
-        line: startLine,
-        selector,
-        cases,
-        elseStatements: elseStmts
-      }
-    }
-
-    // 3. FOR loop
-    if (this.matchKeyword('FOR')) {
-      const startLine = cur.line
-      const iterVar = this.current().value
-      this.advance()
-      this.expect(':=')
-      const startExpr = this.parseExpression()
-      this.expect('TO')
-      const endExpr = this.parseExpression()
-      let stepExpr: SclExpression | undefined = undefined
-      if (this.matchKeyword('BY')) {
-        stepExpr = this.parseExpression()
-      }
-      this.expect('DO')
-
-      const body: SclStatement[] = []
-      while (this.current().type !== 'EOF' && this.current().value !== 'END_FOR') {
-        const s = this.parseStatement()
-        if (s) body.push(s)
-      }
-      this.expect('END_FOR')
-      if (this.current().value === ';') this.advance()
-
-      return {
-        kind: 'for',
-        line: startLine,
-        iterVar,
-        startExpr,
-        endExpr,
-        stepExpr,
-        body
-      }
-    }
-
-    // 4. WHILE loop
-    if (this.matchKeyword('WHILE')) {
-      const startLine = cur.line
-      const cond = this.parseExpression()
-      this.expect('DO')
-
-      const body: SclStatement[] = []
-      while (this.current().type !== 'EOF' && this.current().value !== 'END_WHILE') {
-        const s = this.parseStatement()
-        if (s) body.push(s)
-      }
-      this.expect('END_WHILE')
-      if (this.current().value === ';') this.advance()
-
-      return {
-        kind: 'while',
-        line: startLine,
-        condition: cond,
-        body
-      }
-    }
-
-    // 5. REPEAT loop
-    if (this.matchKeyword('REPEAT')) {
-      const startLine = cur.line
-      const body: SclStatement[] = []
-      while (this.current().type !== 'EOF' && this.current().value !== 'UNTIL') {
-        const s = this.parseStatement()
-        if (s) body.push(s)
-      }
-      this.expect('UNTIL')
-      const cond = this.parseExpression()
-      this.expect('END_REPEAT')
-      if (this.current().value === ';') this.advance()
-
-      return {
-        kind: 'repeat',
-        line: startLine,
-        condition: cond,
-        body
-      }
-    }
-
-    // 6. RETURN / EXIT
-    if (this.matchKeyword('RETURN')) {
-      if (this.current().value === ';') this.advance()
-      return { kind: 'return', line: cur.line }
-    }
-    if (this.matchKeyword('EXIT')) {
-      if (this.current().value === ';') this.advance()
-      return { kind: 'exit', line: cur.line }
-    }
-
-    // 7. Assignment or Function Call
-    if (cur.type === 'IDENTIFIER') {
-      const startLine = cur.line
-      const name = this.parseQualifiedIdentifier()
-
-      // Assignment: target := expression;
-      if (this.matchOperator(':=')) {
-        const expr = this.parseExpression()
-        if (this.current().value === ';') this.advance()
-        return {
-          kind: 'assign',
-          line: startLine,
-          target: name,
-          expression: expr
-        }
-      }
-
-      // Function Call statement: CallName(a := 1, b => 2);
-      if (this.matchOperator('(')) {
-        const args: Record<string, SclExpression> = {}
-        while (this.current().type !== 'EOF' && this.current().value !== ')') {
-          let paramName = ''
-          if (this.peek().value === ':=' || this.peek().value === '=>') {
-            paramName = this.current().value
-            this.advance()
-            this.advance() // skip := or =>
-          } else {
-            paramName = `arg_${Object.keys(args).length}`
-          }
-          const valExpr = this.parseExpression()
-          args[paramName] = valExpr
-          if (this.current().value === ',') this.advance()
-        }
-        this.expect(')')
-        if (this.current().value === ';') this.advance()
-
-        return {
-          kind: 'call',
-          line: startLine,
-          callee: name,
-          args
-        }
-      }
-    }
-
-    // Bare semicolon
-    if (this.current().value === ';') {
-      this.advance()
-      return null
-    }
-
-    this.advance()
-    return null
-  }
-
-  // Expression Parsing with Operator Precedence
-  public parseExpression(): SclExpression {
-    return this.parseLogicalOr()
-  }
-
-  private parseLogicalOr(): SclExpression {
-    let left = this.parseLogicalXor()
-    while (this.current().type === 'KEYWORD' && this.current().value === 'OR') {
-      const opLine = this.current().line
-      this.advance()
-      const right = this.parseLogicalXor()
-      left = { kind: 'binary', op: 'OR', left, right, line: opLine }
-    }
-    return left
-  }
-
-  private parseLogicalXor(): SclExpression {
-    let left = this.parseLogicalAnd()
-    while (this.current().type === 'KEYWORD' && this.current().value === 'XOR') {
-      const opLine = this.current().line
-      this.advance()
-      const right = this.parseLogicalAnd()
-      left = { kind: 'binary', op: 'XOR', left, right, line: opLine }
-    }
-    return left
-  }
-
-  private parseLogicalAnd(): SclExpression {
-    let left = this.parseComparison()
-    while (
-      (this.current().type === 'KEYWORD' && this.current().value === 'AND') ||
-      this.current().value === '&'
-    ) {
-      const opLine = this.current().line
-      this.advance()
-      const right = this.parseComparison()
-      left = { kind: 'binary', op: 'AND', left, right, line: opLine }
-    }
-    return left
-  }
-
-  private parseComparison(): SclExpression {
-    let left = this.parseAdditive()
-    const compOps = ['=', '<>', '<', '>', '<=', '>=']
-    while (compOps.includes(this.current().value)) {
-      const op = this.current().value
-      const opLine = this.current().line
-      this.advance()
-      const right = this.parseAdditive()
-      left = { kind: 'binary', op, left, right, line: opLine }
-    }
-    return left
-  }
-
-  private parseAdditive(): SclExpression {
-    let left = this.parseMultiplicative()
-    while (['+', '-'].includes(this.current().value)) {
-      const op = this.current().value
-      const opLine = this.current().line
-      this.advance()
-      const right = this.parseMultiplicative()
-      left = { kind: 'binary', op, left, right, line: opLine }
-    }
-    return left
-  }
-
-  private parseMultiplicative(): SclExpression {
-    let left = this.parseUnary()
-    while (
-      ['*', '/'].includes(this.current().value) ||
-      (this.current().type === 'KEYWORD' && this.current().value === 'MOD')
-    ) {
-      const op = this.current().value
-      const opLine = this.current().line
-      this.advance()
-      const right = this.parseUnary()
-      left = { kind: 'binary', op, left, right, line: opLine }
-    }
-    return left
-  }
-
-  private parseUnary(): SclExpression {
-    const cur = this.current()
-    if (cur.type === 'KEYWORD' && cur.value === 'NOT') {
-      this.advance()
-      return { kind: 'unary', op: 'NOT', expr: this.parseUnary(), line: cur.line }
-    }
-    if (cur.value === '-' || cur.value === '+') {
-      this.advance()
-      return { kind: 'unary', op: cur.value as '-' | '+', expr: this.parseUnary(), line: cur.line }
-    }
-    return this.parsePrimary()
-  }
-
-  private parsePrimary(): SclExpression {
-    const cur = this.current()
-
-    // Parentheses
-    if (this.matchOperator('(')) {
-      const expr = this.parseExpression()
-      this.expect(')')
-      return expr
-    }
-
-    // Literals
-    if (cur.type === 'NUMBER') {
-      this.advance()
-      return { kind: 'literal', value: Number(cur.value), raw: cur.value, line: cur.line }
-    }
-    if (cur.type === 'REAL') {
-      this.advance()
-      return { kind: 'literal', value: parseFloat(cur.value), raw: cur.value, line: cur.line }
-    }
-    if (cur.type === 'TIME') {
-      this.advance()
-      return { kind: 'literal', value: cur.value, raw: cur.value, line: cur.line }
-    }
-    if (cur.type === 'STRING') {
-      this.advance()
-      return { kind: 'literal', value: cur.value, raw: cur.value, line: cur.line }
-    }
-    if (cur.type === 'KEYWORD' && (cur.value === 'TRUE' || cur.value === 'FALSE')) {
-      this.advance()
-      return { kind: 'literal', value: cur.value === 'TRUE', raw: cur.value, line: cur.line }
-    }
-
-    // Function Call or Variable Identifier
-    if (cur.type === 'IDENTIFIER') {
-      const name = this.parseQualifiedIdentifier()
-
-      if (this.current().value === '(') {
-        this.advance()
-        const args: Record<string, SclExpression> = {}
-        while (this.current().type !== 'EOF' && this.current().value !== ')') {
-          let paramName = ''
-          if (this.peek().value === ':=' || this.peek().value === '=>') {
-            paramName = this.current().value
-            this.advance()
-            this.advance()
-          } else {
-            paramName = `arg_${Object.keys(args).length}`
-          }
-          const valExpr = this.parseExpression()
-          args[paramName] = valExpr
-          if (this.current().value === ',') this.advance()
-        }
-        this.expect(')')
-        return { kind: 'call_expr', callee: name, args, line: cur.line }
-      }
-
-      return { kind: 'variable', name, line: cur.line }
-    }
-
-    this.advance()
-    return { kind: 'literal', value: 0, raw: '0', line: cur.line }
-  }
-}
-
-// -----------------------------------------------------------------------------
-// SclInterpreter Main Facade & Runtime Evaluator
-// -----------------------------------------------------------------------------
 
 export class SclInterpreter {
-  // Edge trigger instance memory (R_TRIG / F_TRIG instances)
   private static edgeTriggerStates = new Map<string, { prevClk: boolean }>()
+  private static programCache = new Map<string, ParsedProgram>()
+  private static expressionCache = new Map<string, SclExpression | null>()
 
   public static resetEdgeStates(): void {
     this.edgeTriggerStates.clear()
+  }
+
+  private static parseCached(sclCode: string): ParsedProgram {
+    const cached = this.programCache.get(sclCode)
+    if (cached) return cached
+
+    const { tokens, errors: lexErrors } = SclLexer.tokenize(sclCode)
+    let program: ParsedProgram
+    if (lexErrors.length > 0) {
+      program = { statements: [], error: lexErrors.join('; ') }
+    } else {
+      const parser = new SclParser(tokens)
+      const statements = parser.parseProgram()
+      program = parser.errors.length > 0 ? { statements: [], error: parser.errors.join('; ') } : { statements }
+    }
+    if (this.programCache.size >= PARSE_CACHE_LIMIT) this.programCache.clear()
+    this.programCache.set(sclCode, program)
+    return program
   }
 
   /**
@@ -939,339 +109,503 @@ export class SclInterpreter {
     context: SclExecutionContext
   ): { success: boolean; error?: string } {
     try {
-      const { tokens, errors: lexErrors } = SclLexer.tokenize(sclCode)
-      if (lexErrors.length > 0) {
-        return { success: false, error: lexErrors.join('; ') }
-      }
+      const program = this.parseCached(sclCode)
+      if (program.error) return { success: false, error: program.error }
 
-      const parser = new SclParser(tokens)
-      const statements = parser.parseProgram()
-      if (parser.errors.length > 0) {
-        return { success: false, error: parser.errors.join('; ') }
+      const guard = { count: 0 }
+      for (const stmt of program.statements) {
+        const res = this.executeNode(stmt, context, guard)
+        if (res === 'RETURN') break
       }
-
-      for (const stmt of statements) {
-        this.executeNode(stmt, context)
-      }
-
       return { success: true }
     } catch (err: unknown) {
       return { success: false, error: (err as Error).message }
     }
   }
 
-  private static executeNode(
-    stmt: SclStatement,
-    context: SclExecutionContext,
-    loopGuard = { count: 0 }
-  ): 'NORMAL' | 'EXIT' | 'RETURN' {
+  private static runList(list: SclStatement[], context: SclExecutionContext, guard: { count: number }): ExecResult {
+    for (const s of list) {
+      const res = this.executeNode(s, context, guard)
+      if (res !== 'NORMAL') return res
+    }
+    return 'NORMAL'
+  }
+
+  private static countIteration(guard: { count: number }, line: number): void {
+    guard.count++
+    if (guard.count > MAX_LOOP_ITERATIONS) {
+      throw new Error(`Line ${line}: Loop exceeded ${MAX_LOOP_ITERATIONS} iterations and would trip the cycle watchdog`)
+    }
+  }
+
+  private static executeNode(stmt: SclStatement, context: SclExecutionContext, guard: { count: number }): ExecResult {
     switch (stmt.kind) {
       case 'assign': {
         const val = this.evaluateNode(stmt.expression, context)
-        context.setVar(stmt.target, val)
+        context.setVar(this.expandIndices(stmt.target, context), val, stmt.targetQuoted)
         if (context.lineValues) {
-          context.lineValues[stmt.line] =
-            typeof val === 'number' ? Math.round(val * 100) / 100 : String(val)
+          context.lineValues[stmt.line] = typeof val === 'number' ? Math.round(val * 100) / 100 : String(val)
         }
         return 'NORMAL'
       }
 
       case 'if': {
         const condVal = !!this.evaluateNode(stmt.condition, context)
-        if (context.lineValues) {
-          context.lineValues[stmt.line] = condVal ? 'TRUE' : 'FALSE'
-        }
+        if (context.lineValues) context.lineValues[stmt.line] = condVal ? 'TRUE' : 'FALSE'
+        if (condVal) return this.runList(stmt.thenStatements, context, guard)
 
-        if (condVal) {
-          for (const s of stmt.thenStatements) {
-            const res = this.executeNode(s, context, loopGuard)
-            if (res !== 'NORMAL') return res
-          }
-          return 'NORMAL'
-        }
-
-        // ELSIF branches
         for (const branch of stmt.elsifBranches) {
           const elsifCond = !!this.evaluateNode(branch.condition, context)
-          if (context.lineValues) {
-            context.lineValues[branch.line] = elsifCond ? 'TRUE' : 'FALSE'
-          }
-          if (elsifCond) {
-            for (const s of branch.statements) {
-              const res = this.executeNode(s, context, loopGuard)
-              if (res !== 'NORMAL') return res
-            }
-            return 'NORMAL'
-          }
+          if (context.lineValues) context.lineValues[branch.line] = elsifCond ? 'TRUE' : 'FALSE'
+          if (elsifCond) return this.runList(branch.statements, context, guard)
         }
-
-        // ELSE branch
-        if (stmt.elseStatements) {
-          for (const s of stmt.elseStatements) {
-            const res = this.executeNode(s, context, loopGuard)
-            if (res !== 'NORMAL') return res
-          }
-        }
-        return 'NORMAL'
+        return stmt.elseStatements ? this.runList(stmt.elseStatements, context, guard) : 'NORMAL'
       }
 
       case 'case': {
         const selVal = Number(this.evaluateNode(stmt.selector, context)) || 0
-        if (context.lineValues) {
-          context.lineValues[stmt.line] = selVal
-        }
+        if (context.lineValues) context.lineValues[stmt.line] = selVal
 
-        let matched = false
         for (const c of stmt.cases) {
-          const isMatch = c.values.some((v) => {
-            if (typeof v === 'number') return v === selVal
-            return selVal >= v.from && selVal <= v.to
-          })
-          if (isMatch) {
-            matched = true
-            for (const s of c.statements) {
-              const res = this.executeNode(s, context, loopGuard)
-              if (res !== 'NORMAL') return res
-            }
-            break
-          }
+          const isMatch = c.values.some((v) => (typeof v === 'number' ? v === selVal : selVal >= v.from && selVal <= v.to))
+          if (isMatch) return this.runList(c.statements, context, guard)
         }
-
-        if (!matched && stmt.elseStatements) {
-          for (const s of stmt.elseStatements) {
-            const res = this.executeNode(s, context, loopGuard)
-            if (res !== 'NORMAL') return res
-          }
-        }
-        return 'NORMAL'
+        return stmt.elseStatements ? this.runList(stmt.elseStatements, context, guard) : 'NORMAL'
       }
 
       case 'for': {
         const start = Number(this.evaluateNode(stmt.startExpr, context)) || 0
         const end = Number(this.evaluateNode(stmt.endExpr, context)) || 0
         const step = stmt.stepExpr ? Number(this.evaluateNode(stmt.stepExpr, context)) || 1 : 1
-        const MAX_LOOPS = 10000
 
         for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
-          loopGuard.count++
-          if (loopGuard.count > MAX_LOOPS) break
-
+          this.countIteration(guard, stmt.line)
           context.setVar(stmt.iterVar, i)
-          for (const s of stmt.body) {
-            const res = this.executeNode(s, context, loopGuard)
-            if (res === 'EXIT') return 'NORMAL'
-            if (res === 'RETURN') return 'RETURN'
-          }
+          const res = this.runList(stmt.body, context, guard)
+          if (res === 'EXIT') return 'NORMAL'
+          if (res === 'RETURN') return 'RETURN'
         }
         return 'NORMAL'
       }
 
       case 'while': {
-        const MAX_LOOPS = 10000
-        while (!!this.evaluateNode(stmt.condition, context)) {
-          loopGuard.count++
-          if (loopGuard.count > MAX_LOOPS) break
-
-          for (const s of stmt.body) {
-            const res = this.executeNode(s, context, loopGuard)
-            if (res === 'EXIT') return 'NORMAL'
-            if (res === 'RETURN') return 'RETURN'
-          }
+        while (this.evaluateNode(stmt.condition, context)) {
+          this.countIteration(guard, stmt.line)
+          const res = this.runList(stmt.body, context, guard)
+          if (res === 'EXIT') return 'NORMAL'
+          if (res === 'RETURN') return 'RETURN'
         }
         return 'NORMAL'
       }
 
       case 'repeat': {
-        const MAX_LOOPS = 10000
         do {
-          loopGuard.count++
-          if (loopGuard.count > MAX_LOOPS) break
-
-          for (const s of stmt.body) {
-            const res = this.executeNode(s, context, loopGuard)
-            if (res === 'EXIT') return 'NORMAL'
-            if (res === 'RETURN') return 'RETURN'
-          }
-        } while (!this.evaluateNode(stmt.condition, context))
+          this.countIteration(guard, stmt.line)
+          const res = this.runList(stmt.body, context, guard)
+          if (res === 'EXIT') return 'NORMAL'
+          if (res === 'RETURN') return 'RETURN'
+        } while (isFalsy(this.evaluateNode(stmt.condition, context)))
         return 'NORMAL'
       }
 
-      case 'call': {
-        this.executeCall(stmt.callee, stmt.args, context)
+      case 'call':
+        this.executeCall(stmt.callee, !!stmt.calleeQuoted, stmt.args, stmt.outputArgs || [], stmt.line, context)
         return 'NORMAL'
-      }
 
       case 'return':
         return 'RETURN'
 
       case 'exit':
         return 'EXIT'
+
+      case 'continue':
+        return 'CONTINUE'
+    }
+  }
+
+  /** Replaces index expressions in a name: arr[#i + 1] becomes arr[3]. */
+  private static expandIndices(name: string, context: SclExecutionContext): string {
+    if (!name.includes('[')) return name
+    let out = ''
+    let i = 0
+    while (i < name.length) {
+      if (name[i] !== '[') {
+        out += name[i++]
+        continue
+      }
+      let depth = 1
+      let j = i + 1
+      const parts: string[] = []
+      let cur = ''
+      for (; j < name.length && depth > 0; j++) {
+        const c = name[j]
+        if (c === '[') depth++
+        if (c === ']') {
+          depth--
+          if (depth === 0) break
+        }
+        if (c === ',' && depth === 1) {
+          parts.push(cur)
+          cur = ''
+        } else {
+          cur += c
+        }
+      }
+      parts.push(cur)
+      const values = parts.map((p) => {
+        const trimmed = p.trim()
+        return /^-?\d+$/.test(trimmed) ? trimmed : String(Math.trunc(Number(this.evaluateExpression(trimmed, context)) || 0))
+      })
+      out += `[${values.join(',')}]`
+      i = j + 1
+    }
+    return out
+  }
+
+  private static staticType(expr: SclExpression, context: SclExecutionContext): StaticType {
+    switch (expr.kind) {
+      case 'literal':
+        if (typeof expr.value === 'boolean') return 'bool'
+        if (expr.isTime) return 'int'
+        if (typeof expr.value !== 'number') return undefined
+        return /[.eE]/.test(expr.raw) ? 'real' : 'int'
+      case 'variable': {
+        const t = context.typeOf?.(expr.name, expr.quoted)?.toUpperCase()
+        if (!t) return undefined
+        if (t === 'REAL' || t === 'LREAL') return 'real'
+        return t === 'BOOL' ? 'bool' : 'int'
+      }
+      case 'unary':
+        return this.staticType(expr.expr, context)
+      case 'binary': {
+        if (['AND', 'OR', 'XOR'].includes(expr.op.toUpperCase())) return this.staticType(expr.left, context)
+        if (['=', '<>', '<', '>', '<=', '>='].includes(expr.op)) return 'bool'
+        const l = this.staticType(expr.left, context)
+        const r = this.staticType(expr.right, context)
+        if (l === 'real' || r === 'real') return 'real'
+        return l === 'int' && r === 'int' ? 'int' : undefined
+      }
+      case 'call_expr': {
+        const upper = expr.callee.toUpperCase()
+        const conv = upper.match(/_TO_([A-Z]+)$/)
+        if (conv) return conv[1] === 'REAL' || conv[1] === 'LREAL' ? 'real' : conv[1] === 'BOOL' ? 'bool' : 'int'
+        if (['ROUND', 'TRUNC', 'CEIL', 'FLOOR'].includes(upper)) return 'int'
+        if (['SQRT', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'EXP', 'LN', 'NORM_X', 'SQR'].includes(upper)) return 'real'
+        return undefined
+      }
     }
   }
 
   private static evaluateNode(expr: SclExpression, context: SclExecutionContext): unknown {
     switch (expr.kind) {
       case 'literal': {
-        if (typeof expr.value === 'string' && expr.value.toUpperCase().startsWith('T#')) {
-          return this.parseTimeLiteral(expr.value)
-        }
+        if (expr.isTime) return parseS7Time(String(expr.value)) ?? 0
         return expr.value
       }
 
-      case 'variable': {
-        const clean = expr.name.replace(/^"|"$/g, '')
-        return context.getVar(clean)
-      }
+      case 'variable':
+        return context.getVar(this.expandIndices(expr.name, context), expr.quoted)
 
       case 'unary': {
         const val = this.evaluateNode(expr.expr, context)
-        if (expr.op === 'NOT') return !val
+        if (expr.op === 'NOT') {
+          if (typeof val === 'number' && this.staticType(expr.expr, context) === 'int') return ~val
+          return !val
+        }
         if (expr.op === '-') return -(Number(val) || 0)
         return Number(val) || 0
       }
 
-      case 'binary': {
-        const left = this.evaluateNode(expr.left, context)
-        const right = this.evaluateNode(expr.right, context)
+      case 'binary':
+        return this.evaluateBinary(expr, context)
 
-        switch (expr.op.toUpperCase()) {
-          case 'AND':
-            return !!left && !!right
-          case 'OR':
-            return !!left || !!right
-          case 'XOR':
-            return (!!left && !right) || (!left && !!right)
-          case '=':
-            return left === right
-          case '<>':
-            return left !== right
-          case '<':
-            return Number(left) < Number(right)
-          case '>':
-            return Number(left) > Number(right)
-          case '<=':
-            return Number(left) <= Number(right)
-          case '>=':
-            return Number(left) >= Number(right)
-          case '+':
-            return (Number(left) || 0) + (Number(right) || 0)
-          case '-':
-            return (Number(left) || 0) - (Number(right) || 0)
-          case '*':
-            return (Number(left) || 0) * (Number(right) || 0)
-          case '/': {
-            const r = Number(right) || 0
-            return r !== 0 ? (Number(left) || 0) / r : 0
-          }
-          case 'MOD': {
-            const r = Number(right) || 0
-            return r !== 0 ? (Number(left) || 0) % r : 0
-          }
-          default:
-            return 0
-        }
-      }
-
-      case 'call_expr': {
-        return this.evaluateFunctionCall(expr.callee, expr.args, context)
-      }
+      case 'call_expr':
+        return this.evaluateFunctionCall(expr.callee, !!expr.calleeQuoted, expr.args, expr.line, context)
     }
   }
 
-  private static parseTimeLiteral(s: string): number {
-    const timeMatch = s.match(/T#(?:(\d+)h)?(?:(\d+)m(?:(?!s))?)?(?:(\d+)s)?(?:(\d+)ms)?/i)
-    if (!timeMatch) return 0
-    const h = parseInt(timeMatch[1] || '0', 10) * 3600000
-    const m = parseInt(timeMatch[2] || '0', 10) * 60000
-    const sec = parseInt(timeMatch[3] || '0', 10) * 1000
-    const ms = parseInt(timeMatch[4] || '0', 10)
-    return h + m + sec + ms
+  private static evaluateBinary(expr: Extract<SclExpression, { kind: 'binary' }>, context: SclExecutionContext): unknown {
+    const left = this.evaluateNode(expr.left, context)
+    const right = this.evaluateNode(expr.right, context)
+    const op = expr.op.toUpperCase()
+
+    switch (op) {
+      case 'AND':
+      case 'OR':
+      case 'XOR': {
+        // Bit operations on words stay numeric; anything else is logic
+        if (typeof left === 'number' && typeof right === 'number' && this.staticType(expr.left, context) === 'int') {
+          if (op === 'AND') return (left & right) >>> 0
+          if (op === 'OR') return (left | right) >>> 0
+          return (left ^ right) >>> 0
+        }
+        if (op === 'AND') return !!left && !!right
+        if (op === 'OR') return !!left || !!right
+        return !!left !== !!right
+      }
+      case '=':
+        return this.comparable(left) === this.comparable(right)
+      case '<>':
+        return this.comparable(left) !== this.comparable(right)
+      case '<':
+        return Number(left) < Number(right)
+      case '>':
+        return Number(left) > Number(right)
+      case '<=':
+        return Number(left) <= Number(right)
+      case '>=':
+        return Number(left) >= Number(right)
+      case '+':
+        return (Number(left) || 0) + (Number(right) || 0)
+      case '-':
+        return (Number(left) || 0) - (Number(right) || 0)
+      case '*':
+        return (Number(left) || 0) * (Number(right) || 0)
+      case '**':
+        return Math.pow(Number(left) || 0, Number(right) || 0)
+      case '/': {
+        const l = Number(left) || 0
+        const r = Number(right) || 0
+        const lt = this.staticType(expr.left, context)
+        const rt = this.staticType(expr.right, context)
+        if (lt === 'int' && rt === 'int') return r !== 0 ? Math.trunc(l / r) : 0
+        if (lt === 'real' || rt === 'real') return l / r
+        return r !== 0 ? l / r : 0
+      }
+      case 'MOD': {
+        const r = Number(right) || 0
+        return r !== 0 ? (Number(left) || 0) % r : 0
+      }
+      default:
+        throw new Error(`Line ${expr.line}: Unknown operator '${expr.op}'`)
+    }
+  }
+
+  private static comparable(value: unknown): unknown {
+    if (typeof value === 'boolean') return value ? 1 : 0
+    return value === undefined ? 0 : value
+  }
+
+  private static argExpr(args: Record<string, SclExpression>, name: string, position: number): SclExpression | undefined {
+    if (args[name]) return args[name]
+    const key = Object.keys(args).find((k) => k.toUpperCase() === name)
+    return key ? args[key] : args[`arg_${position}`]
+  }
+
+  private static numArg(
+    args: Record<string, SclExpression>,
+    name: string,
+    position: number,
+    fallback: number,
+    context: SclExecutionContext
+  ): number {
+    const expr = this.argExpr(args, name, position)
+    if (!expr) return fallback
+    return Number(this.evaluateNode(expr, context)) || 0
+  }
+
+  private static tryBlockCall(
+    funcName: string,
+    quoted: boolean,
+    args: Record<string, SclExpression>,
+    outputArgs: string[],
+    context: SclExecutionContext
+  ): { handled: boolean; returnValue?: unknown } {
+    if (!context.callBlock) return { handled: false }
+    if (context.canCall && !context.canCall(funcName, quoted)) return { handled: false }
+
+    const inputs: Record<string, unknown> = {}
+    const writers: Record<string, (value: unknown) => void> = {}
+    for (const [param, expr] of Object.entries(args)) {
+      const isOutput = outputArgs.includes(param)
+      if (!isOutput) inputs[param] = this.evaluateNode(expr, context)
+      if (expr.kind === 'variable') {
+        const targetName = this.expandIndices(expr.name, context)
+        const targetQuoted = expr.quoted
+        writers[param] = (value) => context.setVar(targetName, value, targetQuoted)
+      }
+    }
+    return context.callBlock({ name: funcName, quoted, inputs, writers })
   }
 
   private static executeCall(
     funcName: string,
+    quoted: boolean,
     args: Record<string, SclExpression>,
+    outputArgs: string[],
+    line: number,
     context: SclExecutionContext
   ): void {
-    const upper = funcName.toUpperCase()
+    const name = this.expandIndices(funcName, context)
+    const result = this.tryBlockCall(name, quoted, args, outputArgs, context)
+    if (result.handled) return
 
-    // 1. NORM_X
-    if (upper === 'NORM_X') {
-      const min = Number(this.evaluateNode(args['MIN'] || args['arg_0'], context)) || 0
-      const max = Number(this.evaluateNode(args['MAX'] || args['arg_1'], context)) || 27648
-      const val = Number(this.evaluateNode(args['VALUE'] || args['arg_2'], context)) || 0
-      const out = max !== min ? (val - min) / (max - min) : 0
-      const outVar = args['OUT'] || args['arg_3']
-      if (outVar && outVar.kind === 'variable') {
-        context.setVar(outVar.name, out)
-      }
-      return
-    }
+    const upper = name.toUpperCase()
 
-    // 2. SCALE_X
-    if (upper === 'SCALE_X') {
-      const min = Number(this.evaluateNode(args['MIN'] || args['arg_0'], context)) || 0
-      const max = Number(this.evaluateNode(args['MAX'] || args['arg_1'], context)) || 100
-      const val = Number(this.evaluateNode(args['VALUE'] || args['arg_2'], context)) || 0
-      const out = min + val * (max - min)
-      const outVar = args['OUT'] || args['arg_3']
-      if (outVar && outVar.kind === 'variable') {
-        context.setVar(outVar.name, out)
-      }
-      return
-    }
-
-    // 3. Edge triggers: R_TRIG and F_TRIG
     if (upper === 'R_TRIG' || upper === 'F_TRIG') {
-      const clk = !!this.evaluateNode(args['CLK'] || args['arg_0'], context)
-      const instKey = funcName
-      const state = this.edgeTriggerStates.get(instKey) || { prevClk: false }
+      // Without an instance the state belongs to this call site
+      const clk = !!this.evaluateNode(this.argExpr(args, 'CLK', 0) as SclExpression, context)
+      const key = `${upper}@${line}`
+      const state = this.edgeTriggerStates.get(key) || { prevClk: false }
       const q = upper === 'R_TRIG' ? clk && !state.prevClk : !clk && state.prevClk
       state.prevClk = clk
-      this.edgeTriggerStates.set(instKey, state)
-
-      const qVar = args['Q'] || args['arg_1']
-      if (qVar && qVar.kind === 'variable') {
-        context.setVar(qVar.name, q)
-      }
+      this.edgeTriggerStates.set(key, state)
+      const qVar = this.argExpr(args, 'Q', 1)
+      if (qVar && qVar.kind === 'variable') context.setVar(qVar.name, q, qVar.quoted)
       return
     }
 
-    // Delegate to context.callFunction if registered
+    if (upper === 'NORM_X' || upper === 'SCALE_X') {
+      const out = this.evaluateFunctionCall(name, quoted, args, line, context)
+      const outVar = this.argExpr(args, 'OUT', 3)
+      if (outVar && outVar.kind === 'variable') context.setVar(outVar.name, out, outVar.quoted)
+      return
+    }
+
+    if (this.hasBuiltin(upper)) {
+      this.evaluateFunctionCall(name, quoted, args, line, context)
+      return
+    }
+
     if (context.callFunction) {
       const evaluatedArgs: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(args)) {
-        evaluatedArgs[k] = this.evaluateNode(v, context)
-      }
-      context.callFunction(funcName, evaluatedArgs)
+      for (const [k, v] of Object.entries(args)) evaluatedArgs[k] = this.evaluateNode(v, context)
+      context.callFunction(name, evaluatedArgs)
+      return
     }
+
+    throw new Error(`Line ${line}: Unknown block or function '${name}'`)
+  }
+
+  private static hasBuiltin(upper: string): boolean {
+    return (
+      /_TO_/.test(upper) ||
+      [
+        'ABS', 'SQRT', 'SQR', 'MIN', 'MAX', 'LIMIT', 'SEL', 'MUX', 'NORM_X', 'SCALE_X', 'ROUND', 'TRUNC', 'CEIL',
+        'FLOOR', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'EXP', 'LN', 'SHL', 'SHR', 'ROL', 'ROR'
+      ].includes(upper)
+    )
   }
 
   private static evaluateFunctionCall(
     funcName: string,
+    quoted: boolean,
     args: Record<string, SclExpression>,
+    line: number,
     context: SclExecutionContext
   ): unknown {
-    const upper = funcName.toUpperCase()
+    const name = this.expandIndices(funcName, context)
+    const blockResult = this.tryBlockCall(name, quoted, args, [], context)
+    if (blockResult.handled) return blockResult.returnValue
 
-    if (upper === 'ABS') {
-      return Math.abs(Number(this.evaluateNode(args['IN'] || args['arg_0'], context)) || 0)
-    }
-    if (upper === 'SQRT') {
-      return Math.sqrt(Math.max(0, Number(this.evaluateNode(args['IN'] || args['arg_0'], context)) || 0))
-    }
-    if (upper === 'MIN') {
-      const a = Number(this.evaluateNode(args['IN1'] || args['arg_0'], context)) || 0
-      const b = Number(this.evaluateNode(args['IN2'] || args['arg_1'], context)) || 0
-      return Math.min(a, b)
-    }
-    if (upper === 'MAX') {
-      const a = Number(this.evaluateNode(args['IN1'] || args['arg_0'], context)) || 0
-      const b = Number(this.evaluateNode(args['IN2'] || args['arg_1'], context)) || 0
-      return Math.max(a, b)
+    const upper = name.toUpperCase()
+    const num = (argName: string, position: number, fallback = 0): number =>
+      this.numArg(args, argName, position, fallback, context)
+    const single = (): number => num('IN', 0)
+
+    const conversion = upper.match(/^([A-Z]+)_TO_([A-Z]+)$/)
+    if (conversion) {
+      const inExpr = this.argExpr(args, 'IN', 0)
+      const raw = inExpr ? this.evaluateNode(inExpr, context) : 0
+      const target = conversion[2]
+      if (target === 'BOOL') return typeof raw === 'number' ? (raw & 1) !== 0 : !!raw
+      const value = typeof raw === 'boolean' ? (raw ? 1 : 0) : Number(raw) || 0
+      if (target === 'REAL' || target === 'LREAL') return value
+      const isRealSource = conversion[1] === 'REAL' || conversion[1] === 'LREAL'
+      return wrapInteger(isRealSource ? roundHalfEven(value) : Math.trunc(value), target)
     }
 
-    return 0
+    switch (upper) {
+      case 'ABS':
+        return Math.abs(single())
+      case 'SQRT':
+        return Math.sqrt(Math.max(0, single()))
+      case 'SQR':
+        return single() * single()
+      case 'SIN':
+        return Math.sin(single())
+      case 'COS':
+        return Math.cos(single())
+      case 'TAN':
+        return Math.tan(single())
+      case 'ASIN':
+        return Math.asin(single())
+      case 'ACOS':
+        return Math.acos(single())
+      case 'ATAN':
+        return Math.atan(single())
+      case 'EXP':
+        return Math.exp(single())
+      case 'LN':
+        return Math.log(single())
+      case 'ROUND':
+        return roundHalfEven(single())
+      case 'TRUNC':
+        return Math.trunc(single())
+      case 'CEIL':
+        return Math.ceil(single())
+      case 'FLOOR':
+        return Math.floor(single())
+      case 'MIN':
+      case 'MAX': {
+        const values = Object.keys(args).map((k) => Number(this.evaluateNode(args[k], context)) || 0)
+        if (values.length === 0) return 0
+        return upper === 'MIN' ? Math.min(...values) : Math.max(...values)
+      }
+      case 'LIMIT': {
+        const mn = num('MN', 0)
+        const inVal = num('IN', 1)
+        const mx = num('MX', 2)
+        return Math.min(Math.max(inVal, mn), mx)
+      }
+      case 'SEL': {
+        const g = this.argExpr(args, 'G', 0)
+        const chosen = g && this.evaluateNode(g, context) ? this.argExpr(args, 'IN1', 2) : this.argExpr(args, 'IN0', 1)
+        return chosen ? this.evaluateNode(chosen, context) : 0
+      }
+      case 'MUX': {
+        const k = num('K', 0)
+        const chosen = this.argExpr(args, `IN${k}`, k + 1)
+        return chosen ? this.evaluateNode(chosen, context) : 0
+      }
+      case 'NORM_X': {
+        const min = num('MIN', 0)
+        const max = num('MAX', 1, 27648)
+        const val = num('VALUE', 2)
+        return max !== min ? (val - min) / (max - min) : 0
+      }
+      case 'SCALE_X': {
+        const min = num('MIN', 0)
+        const max = num('MAX', 1, 100)
+        const val = num('VALUE', 2)
+        return min + val * (max - min)
+      }
+      case 'SHL':
+      case 'SHR':
+      case 'ROL':
+      case 'ROR': {
+        const inExpr = this.argExpr(args, 'IN', 0)
+        const declared = inExpr?.kind === 'variable' ? context.typeOf?.(inExpr.name, inExpr.quoted)?.toUpperCase() : undefined
+        const width = BIT_WIDTHS[declared || ''] || 32
+        const mask = width === 32 ? 0xffffffff : (1 << width) - 1
+        const n = num('N', 1)
+        const value = (num('IN', 0) & mask) >>> 0
+        if (upper === 'SHL') return n >= width ? 0 : ((value << n) & mask) >>> 0
+        if (upper === 'SHR') return n >= width ? 0 : (value >>> n) >>> 0
+        const s = n % width
+        if (s === 0) return value
+        const left = upper === 'ROL' ? s : width - s
+        return (((value << left) | (value >>> (width - left))) & mask) >>> 0
+      }
+    }
+
+    if (context.callFunction) {
+      const evaluatedArgs: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(args)) evaluatedArgs[k] = this.evaluateNode(v, context)
+      return context.callFunction(name, evaluatedArgs)
+    }
+
+    throw new Error(`Line ${line}: Unknown block or function '${name}'`)
   }
 
   /**
@@ -1279,11 +613,20 @@ export class SclInterpreter {
    */
   public static evaluateExpression(exprStr: string, context: SclExecutionContext): unknown {
     if (!exprStr || !exprStr.trim()) return 0
-    const { tokens, errors } = SclLexer.tokenize(exprStr)
-    if (errors.length > 0) return 0
-    const parser = new SclParser(tokens)
-    const expr = parser.parseExpression()
-    return this.evaluateNode(expr, context)
+    let expr = this.expressionCache.get(exprStr)
+    if (expr === undefined) {
+      const { tokens, errors } = SclLexer.tokenize(exprStr)
+      if (errors.length > 0) {
+        expr = null
+      } else {
+        const parser = new SclParser(tokens)
+        expr = parser.parseExpression()
+        if (parser.errors.length > 0) expr = null
+      }
+      if (this.expressionCache.size >= PARSE_CACHE_LIMIT) this.expressionCache.clear()
+      this.expressionCache.set(exprStr, expr)
+    }
+    return expr ? this.evaluateNode(expr, context) : 0
   }
 
   /**
