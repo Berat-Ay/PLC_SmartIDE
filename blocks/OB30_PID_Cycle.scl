@@ -1,0 +1,34 @@
+// ============================================================
+// Block: OB30_PID_Cycle (Cyclic Interrupt 100ms)
+// Description: Deterministic PID loop for Dosing Header Pressure
+// ============================================================
+
+ORGANIZATION_BLOCK "OB30_PID_Cycle"
+TITLE = "Header Pressure Control"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_TEMP
+  PressureError : REAL;
+  PidOutput : REAL;
+END_VAR
+
+VAR CONSTANT
+  PROP_GAIN : REAL := 2.4;
+END_VAR
+
+BEGIN
+  // Compute Pressure Error from Setpoint and Feedback
+  #PressureError := 4.5 - "DB1_PlantData"."SystemPressureBar";
+  #PidOutput := #PressureError * #PROP_GAIN;
+
+  // Limit output command
+  IF #PidOutput > 10.0 THEN
+      #PidOutput := 10.0;
+  ELSIF #PidOutput < 0.0 THEN
+      #PidOutput := 0.0;
+  END_IF;
+
+  // Write to VFD Analog speed channel
+  "TankPressure_Bar" := #PidOutput;
+END_ORGANIZATION_BLOCK

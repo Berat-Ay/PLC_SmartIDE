@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-industrial-950 text-industrial-100 antialiased overflow-hidden;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Strict Zero-Radius Industrial CAD Rules */
+  *, ::before, ::after {
+    border-radius: 0px !important;
+  }
+
+  /* Custom Industrial CAD Scrollbars - Sharp 90-degree steel */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0b0d10;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #27272a;
+    border-radius: 0px;
+    border: 1px solid #18191c;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3f3f46;
+  }
+
+  /* Engineering table styling */
+  table {
+    border-collapse: collapse;
+  }
+}

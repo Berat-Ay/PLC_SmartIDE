@@ -1,0 +1,49 @@
+{
+  "id": "udt_pump_01",
+  "name": "UDT_Pump",
+  "fileName": "UDT_Pump.udt.json",
+  "description": "Standard industrial centrifugal pump data structure",
+  "members": [
+    {
+      "id": "m1",
+      "name": "StartCmd",
+      "dataType": "BOOL",
+      "defaultValue": "FALSE",
+      "comment": "Remote run command",
+      "calculatedOffset": "0.0"
+    },
+    {
+      "id": "m2",
+      "name": "StopCmd",
+      "dataType": "BOOL",
+      "defaultValue": "FALSE",
+      "comment": "Remote stop command",
+      "calculatedOffset": "0.1"
+    },
+    {
+      "id": "m3",
+      "name": "Fault",
+      "dataType": "BOOL",
+      "defaultValue": "FALSE",
+      "comment": "Overload / dry-run fault bit",
+      "calculatedOffset": "0.2"
+    },
+    {
+      "id": "m4",
+      "name": "PressureBar",
+      "dataType": "REAL",
+      "defaultValue": "0.0",
+      "comment": "Discharge pressure in bar",
+      "calculatedOffset": "2.0"
+    },
+    {
+      "id": "m5",
+      "name": "SpeedRaw",
+      "dataType": "INT",
+      "defaultValue": "0",
+      "comment": "VFD feedback speed (0..27648)",
+      "calculatedOffset": "6.0"
+    }
+  ],
+  "calculatedSizeInBytes": 8
+}

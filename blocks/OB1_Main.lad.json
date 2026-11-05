@@ -1,0 +1,228 @@
+{
+  "blockType": "OB",
+  "blockNumber": 1,
+  "name": "OB1_Main",
+  "fileName": "OB1_Main.lad.json",
+  "optimizedAccess": true,
+  "interface": {
+    "input": [],
+    "output": [],
+    "inOut": [],
+    "static": [],
+    "temp": [
+      {
+        "id": "v_temp_1",
+        "name": "CycleTemp",
+        "dataType": "INT",
+        "retain": false,
+        "accessibleFromHMI": false,
+        "comment": "Temporary scan index"
+      }
+    ],
+    "constant": []
+  },
+  "networks": [
+    {
+      "id": "net_1",
+      "networkNumber": 1,
+      "title": "Main Safety Circuit & Conveyor Interlock",
+      "comment": "Enables main conveyor only when E-Stop is intact (%I0.0) and plant is ready (%M10.0)",
+      "nodes": [
+        {
+          "id": "node_estop",
+          "kind": "contact",
+          "contactType": "NO_CONTACT",
+          "operand": "EmergencyStop"
+        },
+        {
+          "id": "node_ready",
+          "kind": "contact",
+          "contactType": "NO_CONTACT",
+          "operand": "Plant_Ready"
+        },
+        {
+          "id": "node_coil_conveyor_1",
+          "kind": "coil",
+          "coilType": "OUTPUT_COIL",
+          "operand": "MainConveyor_Run"
+        }
+      ],
+      "elements": [
+        {
+          "id": "el_1",
+          "kind": "contact",
+          "data": {
+            "type": "NO",
+            "operand": "EmergencyStop"
+          }
+        },
+        {
+          "id": "el_2",
+          "kind": "contact",
+          "data": {
+            "type": "NO",
+            "operand": "Plant_Ready"
+          }
+        },
+        {
+          "id": "el_3",
+          "kind": "coil",
+          "data": {
+            "type": "COIL",
+            "operand": "MainConveyor_Run"
+          }
+        }
+      ]
+    },
+    {
+      "id": "net_2",
+      "networkNumber": 2,
+      "title": "Hydraulic Startup Delay (IEC TON Timer)",
+      "comment": "Starts hydraulic booster pump after 5-second startup delay",
+      "nodes": [
+        {
+          "id": "node_pump_start",
+          "kind": "contact",
+          "contactType": "NO_CONTACT",
+          "operand": "HydraulicPump_Start"
+        },
+        {
+          "id": "node_ton_pump",
+          "kind": "timer",
+          "timerType": "TON",
+          "instanceDb": "DB2_TON_Pump",
+          "inOperand": "HydraulicPump_Start",
+          "ptOperand": "T#5s",
+          "qOperand": "HydraulicPump_Run",
+          "etOperand": "T#0ms",
+          "timePreset": "T#5s",
+          "timeElapsed": "T#0ms"
+        },
+        {
+          "id": "node_coil_pump",
+          "kind": "coil",
+          "coilType": "OUTPUT_COIL",
+          "operand": "HydraulicPump_Run"
+        }
+      ],
+      "elements": [
+        {
+          "id": "el_4",
+          "kind": "contact",
+          "data": {
+            "type": "NO",
+            "operand": "HydraulicPump_Start"
+          }
+        },
+        {
+          "id": "el_box_ton",
+          "kind": "box",
+          "data": {
+            "boxType": "TON",
+            "parameters": {
+              "PT": "T#5s",
+              "DB": "DB2_TON_Pump"
+            }
+          }
+        },
+        {
+          "id": "el_5",
+          "kind": "coil",
+          "data": {
+            "type": "COIL",
+            "operand": "HydraulicPump_Run"
+          }
+        }
+      ]
+    },
+    {
+      "id": "net_3",
+      "networkNumber": 3,
+      "title": "Manual Jog Mode (Intentional Double Coil for Auto-Refactor Demo)",
+      "comment": "Drives MainConveyor_Run via manual jog command, creating classic Double Coil conflict with Network 1",
+      "nodes": [
+        {
+          "id": "node_jog_cmd",
+          "kind": "contact",
+          "contactType": "NO_CONTACT",
+          "operand": "Manual_Jog_Cmd"
+        },
+        {
+          "id": "node_coil_conveyor_2",
+          "kind": "coil",
+          "coilType": "OUTPUT_COIL",
+          "operand": "MainConveyor_Run"
+        }
+      ],
+      "elements": [
+        {
+          "id": "el_6",
+          "kind": "contact",
+          "data": {
+            "type": "NO",
+            "operand": "Manual_Jog_Cmd"
+          }
+        },
+        {
+          "id": "el_7",
+          "kind": "coil",
+          "data": {
+            "type": "COIL",
+            "operand": "MainConveyor_Run"
+          }
+        }
+      ]
+    },
+    {
+      "id": "net_4",
+      "networkNumber": 4,
+      "title": "Analog Tank Level Normalization & Pressure Scaling",
+      "comment": "Normalizes raw analog channel %IW64 (0..27648) and scales to 0.0..10.0 Bar",
+      "nodes": [
+        {
+          "id": "node_norm_x",
+          "kind": "math",
+          "boxType": "NORM_X",
+          "in1": "TankLevel_Raw",
+          "in2": "27648",
+          "out": "TankPressure_Bar",
+          "dataType": "REAL"
+        },
+        {
+          "id": "node_scale_x",
+          "kind": "math",
+          "boxType": "SCALE_X",
+          "in1": "TankPressure_Bar",
+          "in2": "10.0",
+          "out": "TankPressure_Bar",
+          "dataType": "REAL"
+        }
+      ],
+      "elements": [
+        {
+          "id": "el_box_norm",
+          "kind": "box",
+          "data": {
+            "boxType": "NORM_X",
+            "parameters": {
+              "IN": "TankLevel_Raw",
+              "MAX": "27648"
+            }
+          }
+        },
+        {
+          "id": "el_box_scale",
+          "kind": "box",
+          "data": {
+            "boxType": "SCALE_X",
+            "parameters": {
+              "MAX": "10.0",
+              "OUT": "TankPressure_Bar"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "schemaVersion": "1.0.0"
+}

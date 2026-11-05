@@ -1,0 +1,12 @@
+{
+  "id": "proj_industrial_demo",
+  "name": "Chemical_Plant_Unit01",
+  "targetCpu": "Virtual S7-1200",
+  "firmwareVersion": "V4.6",
+  "schemaVersion": "1.0.0",
+  "author": "Antigravity Principal Architect",
+  "description": "Multi-pump chemical dosing and pressurized header control system with S7-1200 runtime & memory guard",
+  "createdAt": "2026-10-29T18:51:59.587Z",
+  "updatedAt": "2026-10-29T18:51:59.587Z",
+  "projectPath": "C:\\Users\\strau\\OneDrive\\Desktop\\PLC"
+}

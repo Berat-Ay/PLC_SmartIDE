@@ -1,0 +1,84 @@
+{
+  "id": "table_default",
+  "name": "default_tags",
+  "fileName": "default_tags.tags.json",
+  "tags": [
+    {
+      "id": "t1",
+      "name": "EmergencyStop",
+      "dataType": "BOOL",
+      "address": "%I0.0",
+      "comment": "Main Safety E-Stop button (NC)"
+    },
+    {
+      "id": "t2",
+      "name": "MainConveyor_Run",
+      "dataType": "BOOL",
+      "address": "%Q0.0",
+      "comment": "Conveyor contactor coil"
+    },
+    {
+      "id": "t3",
+      "name": "HydraulicPump_Start",
+      "dataType": "BOOL",
+      "address": "%I0.1",
+      "comment": "Hydraulic pump local push button"
+    },
+    {
+      "id": "t4",
+      "name": "HydraulicPump_Run",
+      "dataType": "BOOL",
+      "address": "%Q0.1",
+      "comment": "Hydraulic pump motor output"
+    },
+    {
+      "id": "t5",
+      "name": "TankLevel_Raw",
+      "dataType": "INT",
+      "address": "%IW64",
+      "comment": "Analog tank level transmitter 4..20mA"
+    },
+    {
+      "id": "t6",
+      "name": "TankPressure_Bar",
+      "dataType": "REAL",
+      "address": "%MD20",
+      "comment": "Scaled tank discharge pressure (0..10.0 Bar)"
+    },
+    {
+      "id": "t7",
+      "name": "Plant_Ready",
+      "dataType": "BOOL",
+      "address": "%M12.0",
+      "comment": "Plant interlock permissive flag"
+    },
+    {
+      "id": "t8",
+      "name": "Manual_Jog_Cmd",
+      "dataType": "BOOL",
+      "address": "%M12.1",
+      "comment": "Manual jog command"
+    },
+    {
+      "id": "t9",
+      "name": "Motor_Speed",
+      "dataType": "INT",
+      "address": "%MW10",
+      "comment": "Motor speed setpoint in RPM - occupies MB10..MB11"
+    },
+    {
+      "id": "t10",
+      "name": "Alarm_Silenced",
+      "dataType": "BOOL",
+      "address": "%M11.2",
+      "comment": "HMI buzzer silence acknowledged bit (Collides with MW10)"
+    },
+    {
+      "id": "t11",
+      "name": "Cycle_Counter",
+      "dataType": "DINT",
+      "address": "%MD24",
+      "comment": "Total production batch cycle count"
+    }
+  ]
+}

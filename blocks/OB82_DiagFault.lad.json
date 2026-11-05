@@ -1,0 +1,65 @@
+{
+  "blockType": "OB",
+  "blockNumber": 82,
+  "name": "OB82_DiagFault",
+  "fileName": "OB82_DiagFault.lad.json",
+  "optimizedAccess": true,
+  "interface": {
+    "input": [],
+    "output": [],
+    "inOut": [],
+    "static": [],
+    "temp": [
+      {
+        "id": "v_diag_info",
+        "name": "FaultChannel",
+        "dataType": "INT",
+        "retain": false,
+        "accessibleFromHMI": false,
+        "comment": "Channel reported by CPU"
+      }
+    ],
+    "constant": []
+  },
+  "networks": [
+    {
+      "id": "net_82_1",
+      "networkNumber": 1,
+      "title": "Analog Wire-Break Latch & Alarm Silence",
+      "comment": "Latches fault indication when diagnostic interrupt triggers",
+      "nodes": [
+        {
+          "id": "node_first_scan",
+          "kind": "contact",
+          "contactType": "NO_CONTACT",
+          "operand": "FirstScan"
+        },
+        {
+          "id": "node_alarm_silenced",
+          "kind": "coil",
+          "coilType": "OUTPUT_COIL",
+          "operand": "Alarm_Silenced"
+        }
+      ],
+      "elements": [
+        {
+          "id": "el_82_1",
+          "kind": "contact",
+          "data": {
+            "type": "NO",
+            "operand": "FirstScan"
+          }
+        },
+        {
+          "id": "el_82_2",
+          "kind": "coil",
+          "data": {
+            "type": "COIL",
+            "operand": "Alarm_Silenced"
+          }
+        }
+      ]
+    }
+  ],
+  "schemaVersion": "1.0.0"
+}

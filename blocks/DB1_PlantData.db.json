@@ -1,0 +1,71 @@
+{
+  "blockType": "DB",
+  "blockNumber": 1,
+  "name": "DB1_PlantData",
+  "fileName": "DB1_PlantData.db.json",
+  "dbType": "Global",
+  "optimizedAccess": false,
+  "variables": [
+    {
+      "id": "v1",
+      "name": "Pump1",
+      "dataType": "UDT_Pump",
+      "defaultValue": "",
+      "retain": true,
+      "accessibleFromHMI": true,
+      "comment": "Primary feed pump",
+      "calculatedOffset": "0.0"
+    },
+    {
+      "id": "v2",
+      "name": "Pump2",
+      "dataType": "UDT_Pump",
+      "defaultValue": "",
+      "retain": true,
+      "accessibleFromHMI": true,
+      "comment": "Standby booster pump",
+      "calculatedOffset": "8.0"
+    },
+    {
+      "id": "v3",
+      "name": "SystemPressureBar",
+      "dataType": "REAL",
+      "defaultValue": "4.5",
+      "retain": false,
+      "accessibleFromHMI": true,
+      "comment": "Header pressure",
+      "calculatedOffset": "16.0"
+    },
+    {
+      "id": "v4",
+      "name": "MasterMode",
+      "dataType": "INT",
+      "defaultValue": "1",
+      "retain": true,
+      "accessibleFromHMI": true,
+      "comment": "1=Auto, 2=Manual, 3=Maintenance",
+      "calculatedOffset": "20.0"
+    },
+    {
+      "id": "v5",
+      "name": "MaintenanceRequired",
+      "dataType": "BOOL",
+      "defaultValue": "FALSE",
+      "retain": false,
+      "accessibleFromHMI": true,
+      "comment": "Service reminder",
+      "calculatedOffset": "22.0"
+    },
+    {
+      "id": "v6",
+      "name": "GlobalAlarm",
+      "dataType": "BOOL",
+      "defaultValue": "FALSE",
+      "retain": false,
+      "accessibleFromHMI": true,
+      "comment": "Active plant horn",
+      "calculatedOffset": "22.1"
+    }
+  ],
+  "comment": "Global process storage for pumps, headers, and supervisory interlocks"
+}

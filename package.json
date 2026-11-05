@@ -1,0 +1,38 @@
+{
+  "name": "plc-next-ide",
+  "version": "1.0.0",
+  "description": "AI-First Industrial PLC Integrated Development Environment (Siemens S7 Architecture)",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "author": "Antigravity Architect",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "tsx src/tests/s7engine.test.ts && tsx src/tests/phase2_engine.test.ts && tsx src/tests/phase3_simulation.test.ts && tsx src/tests/phase4_ai_and_export.test.ts && tsx src/tests/phase5_compiler_and_collision.test.ts && tsx src/tests/phase6_dsl_compiler.test.ts && tsx src/tests/phase7_grid_layout.test.ts && tsx src/tests/phase8_s7_binary_memory.test.ts && tsx src/tests/phase9_bytecode_compiler.test.ts && tsx src/tests/phase10_hybrid_ai_and_rag.test.ts && tsx src/tests/phase11_parking_garage_and_cards.test.ts && tsx src/tests/phase12_blackbox_and_telemetry.test.ts",
+    "test:gui": "electron-vite build && node scripts/run-gui-audit.mjs",
+    "preview": "electron-vite preview"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "lucide-react": "^0.460.0",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "electron": "^33.2.0",
+    "electron-vite": "^2.3.0",
+    "playwright": "^1.64.1",
+    "postcss": "^8.4.49",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^3.4.15",
+    "tsx": "^4.23.15",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

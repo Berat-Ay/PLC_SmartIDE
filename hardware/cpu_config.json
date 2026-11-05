@@ -1,0 +1,279 @@
+{
+  "general": {
+    "cpuName": "CPU 1214C DC/DC/DC",
+    "cycleWatchdogTimeMs": 150,
+    "minCycleTimeEnabled": true,
+    "minCycleTimeMs": 1,
+    "retentiveMemory": {
+      "startByte": 0,
+      "byteCount": 2048
+    }
+  },
+  "systemMemory": {
+    "enabled": true,
+    "byteAddress": 1
+  },
+  "clockMemory": {
+    "enabled": true,
+    "byteAddress": 0
+  },
+  "digitalIO": {
+    "diStartByte": 0,
+    "dqStartByte": 0,
+    "diChannels": [
+      {
+        "channelIndex": 0,
+        "address": "%I0.0",
+        "name": "EmergencyStop",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": true,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Safety circuit channel (NC)"
+      },
+      {
+        "channelIndex": 1,
+        "address": "%I0.1",
+        "name": "HydraulicPump_Start",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 1"
+      },
+      {
+        "channelIndex": 2,
+        "address": "%I0.2",
+        "name": "TankLevel_HighSwitch",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 2"
+      },
+      {
+        "channelIndex": 3,
+        "address": "%I0.3",
+        "name": "DI_Ch_3",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 3"
+      },
+      {
+        "channelIndex": 4,
+        "address": "%I0.4",
+        "name": "DI_Ch_4",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 4"
+      },
+      {
+        "channelIndex": 5,
+        "address": "%I0.5",
+        "name": "DI_Ch_5",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 5"
+      },
+      {
+        "channelIndex": 6,
+        "address": "%I0.6",
+        "name": "DI_Ch_6",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 6"
+      },
+      {
+        "channelIndex": 7,
+        "address": "%I0.7",
+        "name": "DI_Ch_7",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 7"
+      },
+      {
+        "channelIndex": 8,
+        "address": "%I1.0",
+        "name": "DI_Ch_8",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 8"
+      },
+      {
+        "channelIndex": 9,
+        "address": "%I1.1",
+        "name": "DI_Ch_9",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 9"
+      },
+      {
+        "channelIndex": 10,
+        "address": "%I1.2",
+        "name": "DI_Ch_10",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 10"
+      },
+      {
+        "channelIndex": 11,
+        "address": "%I1.3",
+        "name": "DI_Ch_11",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 11"
+      },
+      {
+        "channelIndex": 12,
+        "address": "%I1.4",
+        "name": "DI_Ch_12",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 12"
+      },
+      {
+        "channelIndex": 13,
+        "address": "%I1.5",
+        "name": "DI_Ch_13",
+        "filterDelay": "3.2 ms",
+        "enableRisingEdgeInterrupt": false,
+        "enableFallingEdgeInterrupt": false,
+        "comment": "Digital input channel 13"
+      }
+    ],
+    "dqChannels": [
+      {
+        "channelIndex": 0,
+        "address": "%Q0.0",
+        "name": "MainConveyor_Run",
+        "comment": "Digital output channel 0"
+      },
+      {
+        "channelIndex": 1,
+        "address": "%Q0.1",
+        "name": "HydraulicPump_Run",
+        "comment": "Digital output channel 1"
+      },
+      {
+        "channelIndex": 2,
+        "address": "%Q0.2",
+        "name": "DQ_Ch_2",
+        "comment": "Digital output channel 2"
+      },
+      {
+        "channelIndex": 3,
+        "address": "%Q0.3",
+        "name": "DQ_Ch_3",
+        "comment": "Digital output channel 3"
+      },
+      {
+        "channelIndex": 4,
+        "address": "%Q0.4",
+        "name": "DQ_Ch_4",
+        "comment": "Digital output channel 4"
+      },
+      {
+        "channelIndex": 5,
+        "address": "%Q0.5",
+        "name": "DQ_Ch_5",
+        "comment": "Digital output channel 5"
+      },
+      {
+        "channelIndex": 6,
+        "address": "%Q0.6",
+        "name": "DQ_Ch_6",
+        "comment": "Digital output channel 6"
+      },
+      {
+        "channelIndex": 7,
+        "address": "%Q0.7",
+        "name": "DQ_Ch_7",
+        "comment": "Digital output channel 7"
+      },
+      {
+        "channelIndex": 8,
+        "address": "%Q1.0",
+        "name": "DQ_Ch_8",
+        "comment": "Digital output channel 8"
+      },
+      {
+        "channelIndex": 9,
+        "address": "%Q1.1",
+        "name": "DQ_Ch_9",
+        "comment": "Digital output channel 9"
+      }
+    ]
+  },
+  "analogIO": {
+    "aiChannels": [
+      {
+        "channelIndex": 0,
+        "address": "%IW64",
+        "name": "TankLevel_Raw",
+        "measurementType": "0..10 V",
+        "scalingNote": "0..27648 Nominal Range",
+        "smoothing": "Medium",
+        "wireBreakCheck": true,
+        "overflowUnderflowCheck": true,
+        "triggerOb82OnFault": true,
+        "comment": "Analog input channel 0 (0..10V)"
+      },
+      {
+        "channelIndex": 1,
+        "address": "%IW66",
+        "name": "ReactorTemp_Raw",
+        "measurementType": "0..10 V",
+        "scalingNote": "0..27648 Nominal Range",
+        "smoothing": "Weak",
+        "wireBreakCheck": false,
+        "overflowUnderflowCheck": true,
+        "triggerOb82OnFault": false,
+        "comment": "Analog input channel 1 (0..10V)"
+      }
+    ],
+    "aqChannels": []
+  },
+  "organizationBlocks": [
+    {
+      "blockNumber": 1,
+      "name": "Main [OB1]",
+      "type": "Cyclic",
+      "enabled": true,
+      "priority": 1,
+      "description": "Main continuous cyclic program execution loop"
+    },
+    {
+      "blockNumber": 100,
+      "name": "Startup [OB100]",
+      "type": "Startup",
+      "enabled": true,
+      "priority": 1,
+      "description": "Executed once upon transition from STOP to RUN"
+    },
+    {
+      "blockNumber": 30,
+      "name": "Cyclic_Interrupt_100ms [OB30]",
+      "type": "CyclicInterrupt",
+      "enabled": true,
+      "cycleTimeMs": 100,
+      "phaseOffsetMs": 0,
+      "priority": 7,
+      "description": "Deterministic 100ms cyclic interrupt for PID header control"
+    },
+    {
+      "blockNumber": 82,
+      "name": "Diag_Error_Interrupt [OB82]",
+      "type": "DiagnosticInterrupt",
+      "enabled": true,
+      "priority": 24,
+      "description": "Hardware diagnostic interrupt triggered by wire-break or analog overflow"
+    }
+  ]
+}

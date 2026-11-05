@@ -1,0 +1,40 @@
+// ============================================================
+// Block: FB1_PumpControl
+// Description: Reusable standard pump control function block
+// ============================================================
+
+FUNCTION_BLOCK "FB1_PumpControl"
+TITLE = "Centrifugal Pump Sequencer"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+  AutoStart : BOOL;
+  AutoStop : BOOL;
+  InterlockOk : BOOL;
+END_VAR
+
+VAR_OUTPUT
+  RunCmd : BOOL;
+  FaultActive : BOOL;
+END_VAR
+
+VAR
+  RunState : BOOL;
+  OperatingHours : DINT;
+END_VAR
+
+BEGIN
+  // Interlock verification
+  IF NOT InterlockOk THEN
+    RunState := FALSE;
+    FaultActive := TRUE;
+  ELSIF AutoStart AND NOT AutoStop THEN
+    RunState := TRUE;
+    FaultActive := FALSE;
+  ELSIF AutoStop THEN
+    RunState := FALSE;
+  END_IF;
+
+  RunCmd := RunState;
+END_FUNCTION_BLOCK
