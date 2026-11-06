@@ -21,6 +21,7 @@ import {
 } from '@shared/types/blocks'
 import { UdtDefinition, UdtMember } from '@shared/types/types'
 import { TagDefinition } from '@shared/types/tags'
+import { effectiveInterface, emptyInterface, parseSourceBlock } from '@shared/scl/sourceBlock'
 
 export interface AgentToolCall {
   tool: string
@@ -53,7 +54,7 @@ export interface ToolBatchExecutionResult {
   stagedChangeset?: StagedFileChange[]
 }
 
-interface ProjectSnapshot {
+export interface ProjectSnapshot {
   tags: ReturnType<typeof useTagStore.getState>['tagTables']
   udts: ReturnType<typeof useBlockStore.getState>['udts']
   dataBlocks: ReturnType<typeof useBlockStore.getState>['dataBlocks']
@@ -61,9 +62,16 @@ interface ProjectSnapshot {
   sclBlocks: ReturnType<typeof useBlockStore.getState>['sclBlocks']
 }
 
+// These names become file names and S7 identifiers
+function isPlainBlockName(name: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
+}
+
 export class PlcAgentTools {
   private static instance: PlcAgentTools | null = null
   private lastSnapshot: ProjectSnapshot | null = null
+  // While set, file writes wait here, so a turn that gets undone leaves nothing on disk
+  private heldDiskWrites: Array<{ relPath: string; content: string }> | null = null
 
   private constructor() { }
 
@@ -78,6 +86,10 @@ export class PlcAgentTools {
    * Safe bi-directional disk sync via electronApi if running in desktop app
    */
   private syncFileToDisk(relPath: string, content: string): void {
+    if (this.heldDiskWrites) {
+      this.heldDiskWrites.push({ relPath, content })
+      return
+    }
     try {
       const projectPath = useProjectStore.getState().projectPath
       useProjectStore.getState().noteLocalWrite()
@@ -97,19 +109,79 @@ export class PlcAgentTools {
     }
   }
 
-  /**
-   * Capture project snapshot before applying mutations
-   */
-  public captureSnapshot(): void {
+  public holdDiskWrites(): void {
+    this.heldDiskWrites = []
+  }
+
+  public releaseDiskWrites(): void {
+    const held = this.heldDiskWrites || []
+    this.heldDiskWrites = null
+    for (const write of held) this.syncFileToDisk(write.relPath, write.content)
+  }
+
+  public discardDiskWrites(): void {
+    this.heldDiskWrites = null
+  }
+
+  public takeSnapshot(): ProjectSnapshot {
     const tagState = useTagStore.getState()
     const blockState = useBlockStore.getState()
-    this.lastSnapshot = {
+    return {
       tags: structuredClone(tagState.tagTables || []),
       udts: structuredClone(blockState.udts || []),
       dataBlocks: structuredClone(blockState.dataBlocks || []),
       ladBlocks: structuredClone(blockState.ladBlocks || []),
       sclBlocks: structuredClone(blockState.sclBlocks || [])
     }
+  }
+
+  public restoreSnapshot(snapshot: ProjectSnapshot): void {
+    useTagStore.getState().setTagTables(snapshot.tags)
+    useBlockStore.setState({
+      udts: snapshot.udts,
+      dataBlocks: snapshot.dataBlocks,
+      ladBlocks: snapshot.ladBlocks,
+      sclBlocks: snapshot.sclBlocks
+    })
+  }
+
+  /** Sets what Undo Turn goes back to. */
+  public setUndoSnapshot(snapshot: ProjectSnapshot): void {
+    this.lastSnapshot = snapshot
+  }
+
+  /**
+   * Capture project snapshot before applying mutations
+   */
+  public captureSnapshot(): void {
+    this.lastSnapshot = this.takeSnapshot()
+  }
+
+  /** The project state the model needs in order to change a project instead of guessing at it. */
+  public describeProjectForModel(): string {
+    const blocks = useBlockStore.getState()
+    const ob1 = blocks.ladBlocks.find((b) => b.blockType === 'OB' && b.blockNumber === 1)
+    return JSON.stringify({
+      targetCpu: useProjectStore.getState().metadata?.targetCpu,
+      tags: useTagStore.getState().tagTables.flatMap((t) => t.tags.map((x) => `${x.name} ${x.address} ${x.dataType}`)),
+      udts: blocks.udts.map((u) => u.name),
+      dataBlocks: blocks.dataBlocks.map((d) => `${d.name} (DB${d.blockNumber})`),
+      ladBlocks: blocks.ladBlocks.map((b) => `${b.name} (${b.blockType}${b.blockNumber})`),
+      sclBlocks: blocks.sclBlocks.map((b) => `${b.name} (${b.blockType}${b.blockNumber})`),
+      ob1Networks: (ob1?.networks || []).map((n) => n.title || `Network ${n.networkNumber}`)
+    })
+  }
+
+  /** Smallest free number. FB, FC and DB numbers are separate ranges on a real CPU. */
+  private nextBlockNumber(kind: 'FB' | 'FC' | 'DB'): number {
+    const blocks = useBlockStore.getState()
+    const used =
+      kind === 'DB'
+        ? blocks.dataBlocks.map((b) => b.blockNumber)
+        : [...blocks.ladBlocks, ...blocks.sclBlocks].filter((b) => b.blockType === kind).map((b) => b.blockNumber)
+    let number = 1
+    while (used.includes(number)) number++
+    return number
   }
 
   /**
@@ -246,15 +318,18 @@ export class PlcAgentTools {
           if (current) {
             blockStore.updateSclBlock(current.fileName, { code: change.afterContent })
           } else {
-            blockStore.addSclBlock({
+            const kind = parseSourceBlock(change.afterContent).kind === 'FB' ? 'FB' : 'FC'
+            const added: SclBlockDefinition = {
               name,
               fileName,
-              blockType: 'FC',
-              blockNumber: Math.floor(Math.random() * 100) + 1,
+              blockType: kind,
+              blockNumber: this.nextBlockNumber(kind),
               optimizedAccess: true,
-              interface: { input: [], output: [], inOut: [], temp: [], static: [], constant: [] },
+              interface: emptyInterface(),
               code: change.afterContent
-            })
+            }
+            added.interface = effectiveInterface(added)
+            blockStore.addSclBlock(added)
           }
           this.syncFileToDisk(change.path, change.afterContent)
           uiStore.openTab({
@@ -285,6 +360,9 @@ export class PlcAgentTools {
     switch (call.tool) {
       case 'read_project_overview':
         return this.toolReadProjectOverview()
+
+      case 'read_block':
+        return this.toolReadBlock(call.params)
 
       case 'manage_plc_tags':
         return this.toolManagePlcTags(call.params, mode, staged)
@@ -340,6 +418,20 @@ export class PlcAgentTools {
         sclBlocks: blocks.sclBlocks.map((s) => s.name)
       }
     }
+  }
+
+  // Tool: read_block
+  private toolReadBlock(params: Record<string, unknown>): AgentToolResult {
+    const name = String(params.name || '').toLowerCase()
+    const blocks = useBlockStore.getState()
+    const scl = blocks.sclBlocks.find((b) => b.name.toLowerCase() === name)
+    const found = scl
+      ? scl.code
+      : [...blocks.ladBlocks, ...blocks.dataBlocks, ...blocks.udts].find((b) => b.name.toLowerCase() === name)
+    if (!found) {
+      return { tool: 'read_block', success: false, message: `No block or UDT named '${params.name}'.` }
+    }
+    return { tool: 'read_block', success: true, message: `Read ${params.name}.`, data: found }
   }
 
   // Tool 2: manage_plc_tags
@@ -458,6 +550,9 @@ export class PlcAgentTools {
     if (!name || !fields) {
       return { tool: 'create_or_update_udt', success: false, message: 'Missing name or fields for UDT.' }
     }
+    if (!isPlainBlockName(name)) {
+      return { tool: 'create_or_update_udt', success: false, message: `'${name}' is not a valid UDT name.` }
+    }
 
     const members: UdtMember[] = fields.map((f, i) => ({
       id: `member_${i}`,
@@ -487,9 +582,9 @@ export class PlcAgentTools {
     }
 
     const blockStore = useBlockStore.getState()
-    const exists = blockStore.udts.some((u) => u.name === name)
-    if (exists) {
-      blockStore.updateUdt(udt.id, udt)
+    const existing = blockStore.udts.find((u) => u.name === name)
+    if (existing) {
+      blockStore.updateUdt(existing.id, { ...udt, id: existing.id })
     } else {
       blockStore.addUdt(udt)
     }
@@ -514,6 +609,10 @@ export class PlcAgentTools {
     if (!name) {
       return { tool: 'create_or_update_db', success: false, message: 'Missing name for DB.' }
     }
+    if (!isPlainBlockName(name)) {
+      return { tool: 'create_or_update_db', success: false, message: `'${name}' is not a valid DB name.` }
+    }
+    const existingDb = useBlockStore.getState().dataBlocks.find((d) => d.name === name)
 
     const variables: BlockVariable[] = variablesRaw.map((v, i) => ({
       id: `var_${i}`,
@@ -526,31 +625,29 @@ export class PlcAgentTools {
     }))
 
     const db: DataBlockDefinition = {
-      id: `db_${name.toLowerCase()}`,
+      id: existingDb?.id || `db_${name.toLowerCase()}`,
       blockType: 'DB',
-      blockNumber: Math.floor(Math.random() * 100) + 1,
+      blockNumber: existingDb?.blockNumber ?? this.nextBlockNumber('DB'),
       name,
-      fileName: `${name}.db.json`,
+      fileName: existingDb?.fileName || `${name}.db.json`,
       dbType: 'Global',
       optimizedAccess: params.isOptimized !== false,
       variables
     }
 
     if (mode === 'diff-view') {
-      const existing = useBlockStore.getState().dataBlocks.find((d) => d.name === name)
       staged.push({
         path: `/blocks/${db.fileName}`,
         title: `DB: ${name}`,
         fileType: 'db',
-        beforeContent: existing ? JSON.stringify(existing, null, 2) : '// New DB (Does not exist yet)',
+        beforeContent: existingDb ? JSON.stringify(existingDb, null, 2) : '// New DB (Does not exist yet)',
         afterContent: JSON.stringify(db, null, 2)
       })
       return { tool: 'create_or_update_db', success: true, message: `DB ${name} staged in Diff-View.` }
     }
 
     const blockStore = useBlockStore.getState()
-    const exists = blockStore.dataBlocks.some((d) => d.name === name)
-    if (exists) {
+    if (existingDb) {
       blockStore.updateDataBlock(db.fileName, db)
     } else {
       blockStore.addDataBlock(db)
@@ -617,20 +714,36 @@ export class PlcAgentTools {
     if (!name) {
       return { tool: 'create_or_update_scl_block', success: false, message: 'Missing name for SCL.' }
     }
-
-    const blockType = (params.blockType as 'OB' | 'FC' | 'FB') || 'FC'
-    const sclBlock: SclBlockDefinition = {
-      name,
-      fileName: `${name}.scl`,
-      blockType,
-      blockNumber: Math.floor(Math.random() * 100) + 1,
-      optimizedAccess: true,
-      interface: { input: [], output: [], inOut: [], temp: [], static: [], constant: [] },
-      code
+    if (!isPlainBlockName(name)) {
+      return { tool: 'create_or_update_scl_block', success: false, message: `'${name}' is not a valid block name.` }
     }
 
+    const fail = (message: string): AgentToolResult => ({ tool: 'create_or_update_scl_block', success: false, message })
+    const parsed = parseSourceBlock(code)
+    if (!parsed.hasHeader || (parsed.kind !== 'FB' && parsed.kind !== 'FC' && parsed.kind !== 'OB')) {
+      return fail(`sourceCode of ${name} must be a full source, starting with FUNCTION_BLOCK or FUNCTION and its VAR sections.`)
+    }
+    if (parsed.name !== name) {
+      return fail(`sourceCode names the block '${parsed.name}', but the name parameter is '${name}'.`)
+    }
+    const existing = useBlockStore.getState().sclBlocks.find((b) => b.name === name)
+    // A new OB needs an event and number the agent cannot choose safely
+    if (parsed.kind === 'OB' && !existing) {
+      return fail(`The agent cannot add a new OB. Use an FB or FC for ${name}.`)
+    }
+    const blockType = parsed.kind
+    const sclBlock: SclBlockDefinition = {
+      name,
+      fileName: existing?.fileName || `${name}.scl`,
+      blockType,
+      blockNumber: existing?.blockNumber ?? this.nextBlockNumber(blockType as 'FB' | 'FC'),
+      optimizedAccess: parsed.optimizedAccess ?? true,
+      interface: emptyInterface(),
+      code
+    }
+    sclBlock.interface = effectiveInterface(sclBlock)
+
     if (mode === 'diff-view') {
-      const existing = useBlockStore.getState().sclBlocks.find((b) => b.name === name)
       staged.push({
         path: `/blocks/${sclBlock.fileName}`,
         title: `SCL: ${name}`,
@@ -642,8 +755,7 @@ export class PlcAgentTools {
     }
 
     const blockStore = useBlockStore.getState()
-    const exists = blockStore.sclBlocks.some((b) => b.name === name)
-    if (exists) {
+    if (existing) {
       blockStore.updateSclBlock(sclBlock.fileName, sclBlock)
     } else {
       blockStore.addSclBlock(sclBlock)

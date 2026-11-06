@@ -2924,7 +2924,7 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       })
       console.log('  -> Parking garage tags check:', parkingTagsCheck)
       if (!parkingTagsCheck.passed) {
-        throw new Error(`Missing expected parking garage tags: ${JSON.stringify(parkingTagsCheck.missing)}`)
+        throw new Error(`Missing expected parking garage tags: ${JSON.stringify(parkingTagsCheck.missing)}. Agent said: ${lastMessageText}`)
       }
       console.log('  ✅ PASS: 8 canonical conflict-free S7 tags allocated for parking system!')
 

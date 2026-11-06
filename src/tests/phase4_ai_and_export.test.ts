@@ -147,7 +147,7 @@ END_FUNCTION_BLOCK`
 
   const broken = await tools.executeToolBatch(
     [
-      { tool: 'create_or_update_scl_block', params: { name: 'FB_Broken', blockType: 'FB', sourceCode: '#Undeclared := TRUE;' } },
+      { tool: 'create_or_update_scl_block', params: { name: 'FB_Broken', blockType: 'FB', sourceCode: 'FUNCTION_BLOCK "FB_Broken"\nBEGIN\n  #Undeclared := TRUE;\nEND_FUNCTION_BLOCK' } },
       { tool: 'run_compiler_and_self_heal', params: {} }
     ],
     'auto-apply'
@@ -173,7 +173,7 @@ async function testDiffViewAndRevert() {
         tool: 'create_or_update_scl_block',
         params: {
           name: 'FC_TestStagedLogic',
-          code: '// Staged code\n"MainConveyor_Run" := TRUE;'
+          code: 'FUNCTION "FC_TestStagedLogic" : Void\nBEGIN\n  // Staged code\n  "MainConveyor_Run" := TRUE;\nEND_FUNCTION'
         }
       }
     ],
@@ -206,7 +206,11 @@ async function testDiffViewAndRevert() {
     [
       {
         tool: 'create_or_update_scl_block',
-        params: { name: 'FB_ValveControl', blockType: 'FB', sourceCode: '// Updated\n#EmergencyStop := TRUE;' }
+        params: {
+          name: 'FB_ValveControl',
+          blockType: 'FB',
+          sourceCode: 'FUNCTION_BLOCK "FB_ValveControl"\nVAR_INPUT\n  EmergencyStop : Bool;\nEND_VAR\nBEGIN\n  // Updated\n  #EmergencyStop := TRUE;\nEND_FUNCTION_BLOCK'
+        }
       }
     ],
     'diff-view'

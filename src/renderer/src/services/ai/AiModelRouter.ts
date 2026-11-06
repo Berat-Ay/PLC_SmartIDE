@@ -83,6 +83,38 @@ export interface AiConfig {
   language: 'auto' | 'en' | 'tr'
 }
 
+const MAX_AGENT_ROUNDS = 6
+const READ_ONLY_TOOLS = new Set(['read_project_overview', 'read_block'])
+// What the model may call. Hardware, plant scripts, undo and deleting stay with the user.
+const AGENT_TOOLS = new Set([
+  ...READ_ONLY_TOOLS,
+  'manage_plc_tags',
+  'create_or_update_udt',
+  'create_or_update_db',
+  'create_or_update_scl_block'
+])
+
+interface GeminiContent {
+  role: 'user' | 'model'
+  parts: Array<{ text: string }>
+}
+
+interface AgentModelReply {
+  explanation: string
+  toolCalls: AgentToolCall[]
+  circuit?: AiCircuitSynthesisPayload
+  problems: string[]
+  rawJson?: string
+}
+
+function hasEmptyNetwork(networks: AiCircuitSynthesisPayload['networks']): boolean {
+  return networks.some((n) => !n.isSclNetwork && (n.nodes || []).length === 0)
+}
+
+function signalAborted(err: unknown): boolean {
+  return (err as { name?: string })?.name === 'AbortError' || String(err).includes('cancelled')
+}
+
 export interface AgentExecutionResponse {
   replyText: string
   tier: AiTier
@@ -1046,6 +1078,11 @@ export class AiModelRouter {
     }>
   } {
     const normalizedNetworks = normalizeAiGeneratedNetworks(payload.networks || [])
+    if (normalizedNetworks.length === 0 || hasEmptyNetwork(normalizedNetworks)) {
+      throw new Error('The model returned an empty network, so the project was not changed.')
+    }
+    if (mode === 'auto-apply') PlcAgentTools.getInstance().captureSnapshot()
+    const tablesBefore = structuredClone(useTagStore.getState().tagTables)
     const effectivePayload = this.optimizeAndCleanGeneratedAst({
       ...payload,
       networks: normalizedNetworks
@@ -1072,17 +1109,15 @@ export class AiModelRouter {
         const newTagNames = new Set((effectivePayload.tagsToUpsert || []).map((t) => t.name.toLowerCase()))
         const newTagAddrs = new Set((effectivePayload.tagsToUpsert || []).map((t) => t.address.toLowerCase()))
 
-        // Gather all other referenced operands/addresses in other LAD blocks
-        const otherReferencedOps = new Set<string>()
-        const allOtherBlocks = useBlockStore.getState().ladBlocks.filter((b) => b.blockNumber !== 1 && b.name !== 'OB1_Main')
-        for (const blk of allOtherBlocks) {
-          for (const net of blk.networks || []) {
-            for (const n of net.nodes || []) {
-              if ((n as unknown as { operand?: string }).operand) otherReferencedOps.add(String((n as unknown as { operand?: string }).operand).toLowerCase())
-              if ((n as unknown as { address?: string }).address) otherReferencedOps.add(String((n as unknown as { address?: string }).address).toLowerCase())
-            }
-          }
-        }
+        // A tag stays if anything outside OB1 mentions it, at any depth of a network or in SCL source.
+        // A false match only keeps a tag, while a missed one would break that block.
+        const blockState = useBlockStore.getState()
+        const otherProgramText = [
+          JSON.stringify(blockState.ladBlocks.filter((b) => !(b.blockType === 'OB' && b.blockNumber === 1) && b.name !== 'OB1_Main')),
+          ...blockState.sclBlocks.map((b) => b.code)
+        ]
+          .join('\n')
+          .toLowerCase()
 
         const currentTable = tagStore.tagTables.find((t) => t.id === tableId)
         if (currentTable) {
@@ -1090,7 +1125,7 @@ export class AiModelRouter {
             const nameLower = t.name.toLowerCase()
             const addrLower = t.address.toLowerCase()
             if (newTagNames.has(nameLower) || newTagAddrs.has(addrLower)) return false
-            if (otherReferencedOps.has(nameLower) || otherReferencedOps.has(addrLower)) return false
+            if (otherProgramText.includes(nameLower) || otherProgramText.includes(addrLower)) return false
             return true
           })
           for (const t of tagsToRemove) {
@@ -1139,6 +1174,24 @@ export class AiModelRouter {
       afterContent: string
     }> | undefined = undefined
 
+    // Diff-View changes nothing until it is approved, so tag edits become staged files too
+    const stagedTags: NonNullable<AgentExecutionResponse['stagedChangeset']> = []
+    if (mode === 'diff-view') {
+      const tablesAfter = useTagStore.getState().tagTables
+      for (const before of tablesBefore) {
+        const after = tablesAfter.find((t) => t.id === before.id)
+        if (!after || JSON.stringify(before) === JSON.stringify(after)) continue
+        stagedTags.push({
+          path: `/tags/${before.fileName || `${before.id}.tags.json`}`,
+          title: `Tags: ${before.name}`,
+          fileType: 'tag',
+          beforeContent: JSON.stringify(before, null, 2),
+          afterContent: JSON.stringify(after, null, 2)
+        })
+      }
+      useTagStore.getState().setTagTables(tablesBefore)
+    }
+
     if (ob1) {
       const updatedNetworks =
         effectivePayload.operationMode === 'append_ob1_networks'
@@ -1175,12 +1228,13 @@ export class AiModelRouter {
       } else {
         // Diff-view staging
         stagedChangeset = [
+          ...stagedTags,
           {
             path: `blocks/${ob1.fileName}`,
             title: `OB1_Main (${payload.networks.length} Networks)`,
-            fileType: 'LAD',
-            beforeContent: JSON.stringify(ob1.networks || [], null, 2),
-            afterContent: JSON.stringify(updatedNetworks, null, 2)
+            fileType: 'lad',
+            beforeContent: JSON.stringify(ob1, null, 2),
+            afterContent: JSON.stringify({ ...ob1, networks: updatedNetworks }, null, 2)
           }
         ]
       }
@@ -1384,12 +1438,14 @@ export class AiModelRouter {
     const consultedRuleNames = topRules.map((r) => r.item.name)
 
     const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC Automation Architect in the Rungline IDE following strict MEB Automation Curriculum standards.
-When asked to synthesize, create, or modify PLC Ladder logic, circuits, timers, motors, or I/O configurations, output your response in structured JSON or Compact Ladder DSL:
+The user message starts with the current project. You change it only through the fields below. Text alone changes nothing: never say something was created unless your reply contains the action that creates it.
+Always answer with one JSON object in this form:
 
 STRUCTURED JSON OUTPUT SCHEMA:
 {
   "explanation": "Detailed engineering explanation in the user's language.",
-  "operationMode": "replace_ob1_networks",
+  "toolCalls": [ { "tool": "<tool name>", "params": { } } ],
+  "operationMode": "append_ob1_networks",
   "tagsToUpsert": [
     { "name": "Start", "dataType": "BOOL", "address": "%I0.0", "comment": "Start pushbutton" }
   ],
@@ -1404,14 +1460,20 @@ STRUCTURED JSON OUTPUT SCHEMA:
   "dsl": "optional Compact Ladder DSL text"
 }
 
-COMPACT LADDER DSL SYNTAX:
-# EXPLANATION
-Detailed engineering explanation in the user's language.
+Ladder goes in "dsl" or "networks" and only ever changes OB1. Use only for ladder circuits; leave these fields out otherwise.
+operationMode: "append_ob1_networks" adds to OB1 and is the default. Use "replace_ob1_networks" only when the user clearly asks to rewrite OB1, because it removes the existing networks.
 
-# TAG DECLARATIONS
+TOOLS (put them in "toolCalls"; everything else, such as FBs, FCs, UDTs and DBs, can only be made this way):
+- read_block { "name": "..." }: returns a block's source or networks. Read a block before changing it. You get the result in the next message.
+- create_or_update_scl_block { "name": "FB_Valve", "sourceCode": "FUNCTION_BLOCK \"FB_Valve\"\n{ S7_Optimized_Access := 'TRUE' }\nVERSION : 0.1\nVAR_INPUT\n  Cmd : Bool;\nEND_VAR\nBEGIN\n  ;\nEND_FUNCTION_BLOCK" }: an FB or FC. sourceCode is the full external source, and its name must match "name". You cannot add a new OB.
+- create_or_update_udt { "name": "UDT_Valve", "fields": [ { "name": "Open", "dataType": "BOOL", "comment": "..." } ] }
+- create_or_update_db { "name": "DB_Plant", "variables": [ { "name": "Level", "dataType": "REAL", "initialValue": "0.0", "comment": "..." } ] }: a global DB.
+- manage_plc_tags { "action": "upsert", "tags": [ { "name": "Start", "dataType": "BOOL", "address": "%I0.0", "comment": "..." } ] }
+
+Your whole reply is applied, then the project is compiled. If tools or the compiler report errors, everything from that reply is undone and you get the errors, so send the complete corrected answer again. If you cannot do something, say so in "explanation" instead of inventing a result.
+
+COMPACT LADDER DSL SYNTAX (for the "dsl" field):
 TAG <Name> <Address> <DataType> "<Comment>"
-
-# NETWORK DEFINITIONS
 NW 1 "<Title>": <EXPRESSION>
 NW 2 "<Title>": <EXPRESSION>
 
@@ -1430,6 +1492,7 @@ CRITICAL MEB INDUSTRIAL RULES:
 3. MOTOR SEAL-IN: Network 1 has Start NO parallel with Motor NO, series with Stop NC and T1.Q NC, driving Motor coil. Network 2 has Motor NO driving TON T1.
 4. ZERO DUMMY %M TAGS: Do not declare dummy %M tags for timer done flags.
 5. INDICATOR LAMPS & LEDS: If the user requests indicator lamps/LEDs (e.g. green LED when motor runs, red LED when motor stops), assign distinct safe addresses (e.g. Green LED %Q0.1, Red LED %Q0.2) and add dedicated networks: Network 3 (Motor NO driving Green LED coil) and Network 4 (Motor NC driving Red LED coil). NEVER assign duplicate addresses to different tags.
+FIELD WIRING: A contact tests the input bit, not the physical button. A stop button wired normally closed reads 1 at rest, so it needs an NO contact in ladder. Use an NC contact for it only when the button is wired normally open. If the wiring is not stated, say which one you assumed.
 6. PARKING GARAGE / BARRIER AUTOMATION:
    - Giris_Kart (%I0.0), Giris_Fotosel (%I0.1), Ust_Limit (%I0.2), Alt_Limit (%I0.3), Cikis_Fotosel (%I0.4)
    - Kapi_Yukari_Motor (%Q0.0), Kapi_Asagi_Motor (%Q0.1), Otopark_Dolu_Tabela (%Q0.2)
@@ -1440,356 +1503,449 @@ Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.
 If the prompt is purely informational without ladder logic, provide an explanation directly.`
 
     const cleanKey = (this.config.geminiApiKey || '').trim()
-    let rawText = ''
-    let lastError: Error | null = null
-    let successfulModel = ''
     let attemptedAutoDiscovery = false
 
-    for (let i = 0; i < candidateModels.length; i++) {
-      const modelToTry = candidateModels[i]
-      if (signal?.aborted) throw new Error('Synthesis cancelled by user.')
+    const missingModels: string[] = []
+    const requestModel = async (contents: GeminiContent[]): Promise<string> => {
+      let rawText = ''
+      let lastError: Error | null = null
+      let successfulModel = ''
 
-      const cleanModelId = modelToTry.trim().replace(/^models\//i, '')
-      const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelId}:generateContent`
+      for (let i = 0; i < candidateModels.length; i++) {
+        const modelToTry = candidateModels[i]
+        if (signal?.aborted) throw new Error('Synthesis cancelled by user.')
 
-      // Fresh 90-second timeout controller per candidate model attempt
-      const modelController = new AbortController()
-      let modelTimedOut = false
-      const modelTimeoutId = setTimeout(() => {
-        modelTimedOut = true
-        modelController.abort()
-      }, 90000)
+        const cleanModelId = modelToTry.trim().replace(/^models\//i, '')
+        const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelId}:generateContent`
 
-      const onExternalAbort = () => {
-        modelController.abort()
-      }
-      if (signal) {
-        if (signal.aborted) {
-          clearTimeout(modelTimeoutId)
-          throw new Error('Synthesis cancelled by user.')
+        // Fresh 90-second timeout controller per candidate model attempt
+        const modelController = new AbortController()
+        let modelTimedOut = false
+        const modelTimeoutId = setTimeout(() => {
+          modelTimedOut = true
+          modelController.abort()
+        }, 90000)
+
+        const onExternalAbort = () => {
+          modelController.abort()
         }
-        signal.addEventListener('abort', onExternalAbort)
-      }
-
-      const attemptFetch = async (includeThinkingConfig: boolean) => {
-        const generationConfig: Record<string, any> = {
-          temperature: 0.1,
-          maxOutputTokens: 8192,
-          responseMimeType: 'application/json'
-        }
-        if (includeThinkingConfig) {
-          generationConfig.thinkingConfig = { thinkingBudget: 0 }
+        if (signal) {
+          if (signal.aborted) {
+            clearTimeout(modelTimeoutId)
+            throw new Error('Synthesis cancelled by user.')
+          }
+          signal.addEventListener('abort', onExternalAbort)
         }
 
-        return fetch(requestUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey },
-          signal: modelController.signal,
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{ text: systemInstructionText }]
-            },
-            contents: [
-              {
-                role: 'user',
-                parts: [{ text: prompt }]
-              }
-            ],
-            generationConfig
+        const attemptFetch = async (includeThinkingConfig: boolean) => {
+          const generationConfig: Record<string, any> = {
+            temperature: 0.1,
+            maxOutputTokens: 8192,
+            responseMimeType: 'application/json'
+          }
+          if (includeThinkingConfig) {
+            generationConfig.thinkingConfig = { thinkingBudget: 0 }
+          }
+
+          return fetch(requestUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey },
+            signal: modelController.signal,
+            body: JSON.stringify({
+              systemInstruction: {
+                parts: [{ text: systemInstructionText }]
+              },
+              contents,
+              generationConfig
+            })
           })
-        })
-      }
-
-      try {
-        let response = await attemptFetch(true)
-
-        // If HTTP 400 occurred and thinkingConfig was passed, retry once without thinkingConfig
-        if (response.status === 400) {
-          const errBody = await response.text()
-          BlackBoxLogger.getInstance().log(
-            'AI_FALLBACK_OR_RETRY',
-            `Candidate model ${cleanModelId} rejected thinkingConfig (HTTP 400). Retrying without thinkingConfig...`,
-            { model: cleanModelId, status: 400, errorBody: errBody }
-          )
-          response = await attemptFetch(false)
         }
 
-        if (!response.ok) {
-          const errStatus = response.status
-          const errorBodyText = await response.text()
-          BlackBoxLogger.getInstance().log(
-            'AI_FALLBACK_OR_RETRY',
-            `Candidate model ${cleanModelId} returned HTTP ${errStatus}`,
-            {
-              model: cleanModelId,
-              status: errStatus,
-              url: requestUrl.replace(cleanKey, '***'),
-              errorBody: errorBodyText
-            }
-          )
+        try {
+          let response = await attemptFetch(true)
 
-          // Live Self-Healing Model Discovery on HTTP 404
-          if (errStatus === 404 && !attemptedAutoDiscovery && cleanKey) {
-            attemptedAutoDiscovery = true
+          // If HTTP 400 occurred and thinkingConfig was passed, retry once without thinkingConfig
+          if (response.status === 400) {
+            const errBody = await response.text()
             BlackBoxLogger.getInstance().log(
               'AI_FALLBACK_OR_RETRY',
-              `HTTP 404 encountered for model ${cleanModelId}. Initiating live /v1beta/models auto-discovery...`,
-              { model: cleanModelId }
+              `Candidate model ${cleanModelId} rejected thinkingConfig (HTTP 400). Retrying without thinkingConfig...`,
+              { model: cleanModelId, status: 400, errorBody: errBody }
             )
-            try {
-              const discRes = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cleanKey)}`,
-                { signal: modelController.signal }
-              )
-              if (discRes.ok) {
-                const discData = await discRes.json()
-                const rawModels: Array<{
-                  name: string
-                  displayName?: string
-                  description?: string
-                  supportedGenerationMethods?: string[]
-                }> = discData.models || []
+            response = await attemptFetch(false)
+          }
 
-                const filtered: DiscoveredModel[] = rawModels
-                  .filter((m) => {
-                    const hasGen =
-                      Array.isArray(m.supportedGenerationMethods) &&
-                      m.supportedGenerationMethods.includes('generateContent')
-                    if (!hasGen) return false
-                    const cId = m.name.replace(/^models\//, '')
-                    return isStrictGeminiTextModel(cId)
-                  })
-                  .map((m) => {
-                    const cId = m.name.replace(/^models\//, '')
-                    return {
-                      id: cId,
-                      displayName: m.displayName || cId,
-                      description: m.description
-                    }
-                  })
-
-                const sorted = sortGeminiModels(filtered)
-                if (sorted.length > 0) {
-                  this.config.availableModels = sorted
-                  this.config.selectedModelId = sorted[0].id
-                  this.saveConfig()
-
-                  for (const dm of sorted) {
-                    if (!candidateModels.includes(dm.id)) {
-                      candidateModels.push(dm.id)
-                    }
-                  }
-
-                  BlackBoxLogger.getInstance().log(
-                    'AI_FALLBACK_OR_RETRY',
-                    `Auto-discovery healed models: ${sorted.length} models loaded. Top model: ${sorted[0].id}`,
-                    { topModels: sorted.slice(0, 5).map((m) => m.id) }
-                  )
-                }
+          if (!response.ok) {
+            const errStatus = response.status
+            const errorBodyText = await response.text()
+            BlackBoxLogger.getInstance().log(
+              'AI_FALLBACK_OR_RETRY',
+              `Candidate model ${cleanModelId} returned HTTP ${errStatus}`,
+              {
+                model: cleanModelId,
+                status: errStatus,
+                url: requestUrl.replace(cleanKey, '***'),
+                errorBody: errorBodyText
               }
-            } catch (discErr) {
-              console.warn('Live model auto-discovery failed:', discErr)
+            )
+
+            if (errStatus === 404) missingModels.push(cleanModelId)
+
+            // Live Self-Healing Model Discovery on HTTP 404
+            if (errStatus === 404 && !attemptedAutoDiscovery && cleanKey) {
+              attemptedAutoDiscovery = true
+              BlackBoxLogger.getInstance().log(
+                'AI_FALLBACK_OR_RETRY',
+                `HTTP 404 encountered for model ${cleanModelId}. Initiating live /v1beta/models auto-discovery...`,
+                { model: cleanModelId }
+              )
+              try {
+                const discRes = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+                  headers: { 'x-goog-api-key': cleanKey },
+                  signal: modelController.signal
+                })
+                if (discRes.ok) {
+                  const discData = await discRes.json()
+                  const rawModels: Array<{
+                    name: string
+                    displayName?: string
+                    description?: string
+                    supportedGenerationMethods?: string[]
+                  }> = discData.models || []
+
+                  const filtered: DiscoveredModel[] = rawModels
+                    .filter((m) => {
+                      const hasGen =
+                        Array.isArray(m.supportedGenerationMethods) &&
+                        m.supportedGenerationMethods.includes('generateContent')
+                      if (!hasGen) return false
+                      const cId = m.name.replace(/^models\//, '')
+                      return isStrictGeminiTextModel(cId)
+                    })
+                    .map((m) => {
+                      const cId = m.name.replace(/^models\//, '')
+                      return {
+                        id: cId,
+                        displayName: m.displayName || cId,
+                        description: m.description
+                      }
+                    })
+
+                  const sorted = sortGeminiModels(filtered)
+                  if (sorted.length > 0) {
+                    this.config.availableModels = sorted
+                    this.config.selectedModelId = sorted[0].id
+                    this.saveConfig()
+
+                    for (const dm of sorted) {
+                      if (!candidateModels.includes(dm.id)) {
+                        candidateModels.push(dm.id)
+                      }
+                    }
+
+                    BlackBoxLogger.getInstance().log(
+                      'AI_FALLBACK_OR_RETRY',
+                      `Auto-discovery healed models: ${sorted.length} models loaded. Top model: ${sorted[0].id}`,
+                      { topModels: sorted.slice(0, 5).map((m) => m.id) }
+                    )
+                  }
+                }
+              } catch (discErr) {
+                console.warn('Live model auto-discovery failed:', discErr)
+              }
             }
+
+            lastError = new Error(`Gemini API HTTP Error on ${cleanModelId}: ${errStatus} ${errorBodyText}`)
+            continue
           }
 
-          lastError = new Error(`Gemini API HTTP Error on ${cleanModelId}: ${errStatus} ${errorBodyText}`)
-          continue
-        }
-
-        const data = await response.json()
-        rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-        if (rawText) {
-          successfulModel = cleanModelId
-          break
-        }
-      } catch (fetchErr: unknown) {
-        if (
-          signal?.aborted ||
-          (fetchErr as { name?: string })?.name === 'AbortError' ||
-          String(fetchErr).includes('cancelled')
-        ) {
-          if (modelTimedOut) {
-            throw new Error(`Gemini API call to model ${cleanModelId} timed out after 90 seconds.`)
+          const data = await response.json()
+          rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+          if (rawText) {
+            successfulModel = cleanModelId
+            break
           }
-          throw fetchErr
-        }
-        BlackBoxLogger.getInstance().log(
-          'AI_FALLBACK_OR_RETRY',
-          `Candidate model ${cleanModelId} failed: ${fetchErr}. Retrying next in chain...`,
-          { model: cleanModelId, error: String(fetchErr) }
-        )
-        lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr))
-      } finally {
-        clearTimeout(modelTimeoutId)
-        if (signal) {
-          signal.removeEventListener('abort', onExternalAbort)
-        }
-      }
-    }
-
-    if (!rawText) {
-      const finalErr = lastError || new Error('No candidate Gemini model produced a response.')
-      BlackBoxLogger.getInstance().log('AI_ERROR', `All candidate Gemini models failed: ${finalErr.message}`, {
-        candidateModels,
-        error: String(finalErr)
-      })
-      throw finalErr
-    }
-
-    const elapsedMs = Date.now() - startMs
-    BlackBoxLogger.getInstance().log(
-      'AI_RAW_RESPONSE',
-      `Gemini API Response received from ${successfulModel} (${elapsedMs}ms, ${rawText.length} chars)`,
-      { model: successfulModel, elapsedMs, rawSnippet: rawText.substring(0, 500), rawFull: rawText }
-    )
-
-    // 1. Resilient JSON Block extraction first (for responseMimeType: application/json)
-    const jsonExtract = this.extractValidJsonBlock(rawText)
-    if (jsonExtract && jsonExtract.json) {
-      const parsed = jsonExtract.json as AiCircuitSynthesisPayload & { dsl?: string }
-
-      // Check if JSON includes compact DSL
-      if (parsed.dsl && typeof parsed.dsl === 'string') {
-        const dslResult = LadderDslCompiler.compileLadderDslToAst(parsed.dsl)
-        if (dslResult.success && dslResult.networks.length > 0) {
-          const normalizedNws = normalizeAiGeneratedNetworks(dslResult.networks)
-          const circuitPayload: AiCircuitSynthesisPayload = {
-            explanation: parsed.explanation || dslResult.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL.',
-            operationMode: parsed.operationMode || 'replace_ob1_networks',
-            tagsToUpsert: dslResult.tags.map((t) => ({
-              name: t.name,
-              dataType: t.dataType as any,
-              address: t.address,
-              comment: t.comment
-            })),
-            networks: normalizedNws
+        } catch (fetchErr: unknown) {
+          if (
+            signal?.aborted ||
+            (fetchErr as { name?: string })?.name === 'AbortError' ||
+            String(fetchErr).includes('cancelled')
+          ) {
+            if (modelTimedOut) {
+              throw new Error(`Gemini API call to model ${cleanModelId} timed out after 90 seconds.`)
+            }
+            throw fetchErr
           }
-          const result = this.applyCircuitPayload(circuitPayload, mode)
           BlackBoxLogger.getInstance().log(
-            'AI_PARSE_AND_AST_INJECTION',
-            `Compact Ladder DSL compiled: ${normalizedNws.length} networks, ${dslResult.tags.length} tags`,
-            { networks: normalizedNws.length, tags: dslResult.tags.length }
+            'AI_FALLBACK_OR_RETRY',
+            `Candidate model ${cleanModelId} failed: ${fetchErr}. Retrying next in chain...`,
+            { model: cleanModelId, error: String(fetchErr) }
           )
-          return {
-            replyText: result.summaryText,
-            tier,
-            providerUsed: 'gemini',
-            toolCallsExecuted: [],
-            toolResults: [],
-            ragRulesConsulted: consultedRuleNames,
-            stagedChangeset: result.stagedChangeset,
-            rawTraceSnippet: rawText.substring(0, 300),
-            rawJson: jsonExtract.raw
+          lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr))
+        } finally {
+          clearTimeout(modelTimeoutId)
+          if (signal) {
+            signal.removeEventListener('abort', onExternalAbort)
           }
         }
       }
 
-      if (parsed && Array.isArray(parsed.networks) && parsed.networks.length > 0) {
-        const normalizedNetworks = normalizeAiGeneratedNetworks(parsed.networks)
-        const tags = Array.isArray(parsed.tagsToUpsert) ? parsed.tagsToUpsert : []
-        const circuitPayload: AiCircuitSynthesisPayload = {
-          explanation: parsed.explanation || 'Synthesized Ladder Logic via Google Gemini.',
-          operationMode: parsed.operationMode || 'replace_ob1_networks',
-          tagsToUpsert: tags,
-          networks: normalizedNetworks
-        }
-        const result = this.applyCircuitPayload(circuitPayload, mode)
-        BlackBoxLogger.getInstance().log(
-          'AI_PARSE_AND_AST_INJECTION',
-          `Extracted JSON payload: ${normalizedNetworks.length} networks, ${tags.length} tags`,
-          { networks: normalizedNetworks.length, tags: tags.length }
-        )
-        return {
-          replyText: result.summaryText,
-          tier,
-          providerUsed: 'gemini',
-          toolCallsExecuted: [],
-          toolResults: [],
-          ragRulesConsulted: consultedRuleNames,
-          stagedChangeset: result.stagedChangeset,
-          rawTraceSnippet: rawText.substring(0, 300),
-          rawJson: jsonExtract.raw
-        }
-      } else if (parsed && parsed.explanation) {
-        return {
-          replyText: parsed.explanation,
-          tier,
-          providerUsed: 'gemini',
-          toolCallsExecuted: [],
-          toolResults: [],
-          rawTraceSnippet: rawText.substring(0, 300)
-        }
+      if (!rawText) {
+        const finalErr = lastError || new Error('No candidate Gemini model produced a response.')
+        BlackBoxLogger.getInstance().log('AI_ERROR', `All candidate Gemini models failed: ${finalErr.message}`, {
+          candidateModels,
+          error: String(finalErr)
+        })
+        throw finalErr
+      }
+
+      // A model the API no longer serves is not tried again on every request
+      if (missingModels.includes(this.config.selectedModelId)) {
+        this.config.selectedModelId = successfulModel
+        this.saveConfig()
+      }
+      for (const missing of missingModels) {
+        const index = candidateModels.indexOf(missing)
+        if (index !== -1) candidateModels.splice(index, 1)
+      }
+
+      BlackBoxLogger.getInstance().log(
+        'AI_RAW_RESPONSE',
+        `Gemini API Response received from ${successfulModel} (${Date.now() - startMs}ms, ${rawText.length} chars)`,
+        { model: successfulModel, rawSnippet: rawText.substring(0, 500), rawFull: rawText }
+      )
+      return rawText
+    }
+
+    return this.runAgentTurn(prompt, tier, mode, isTurkish, consultedRuleNames, requestModel)
+  }
+
+  /** Reads one model reply. Problems go back to the model instead of reaching the project. */
+  private interpretModelReply(rawText: string): AgentModelReply {
+    const reply: AgentModelReply = { explanation: '', toolCalls: [], problems: [] }
+    let dslErrors: string[] = []
+    const fromDsl = (text: string): AiCircuitSynthesisPayload | undefined => {
+      const compiled = LadderDslCompiler.compileLadderDslToAst(text)
+      if (!compiled.success || compiled.networks.length === 0) {
+        dslErrors = compiled.errors
+        return undefined
+      }
+      return {
+        explanation: compiled.explanation || '',
+        operationMode: this.defaultCircuitMode(),
+        tagsToUpsert: compiled.tags.map((t) => ({
+          name: t.name,
+          dataType: t.dataType as any,
+          address: t.address,
+          comment: t.comment
+        })),
+        networks: normalizeAiGeneratedNetworks(compiled.networks)
       }
     }
 
-    // 2. Direct Ladder DSL compilation if returned in plain text format
-    if (
-      rawText.includes('# NETWORK DEFINITIONS') ||
-      rawText.includes('NW ') ||
-      rawText.includes('SERIES(') ||
-      rawText.includes('# TAG DECLARATIONS') ||
-      rawText.includes('TAG ')
-    ) {
-      const cleanDsl = rawText
-        .replace(/^```[a-zA-Z0-9_-]*\r?\n/gm, '')
-        .replace(/```$/gm, '')
-        .trim()
+    const extracted = this.extractValidJsonBlock(rawText)
+    if (extracted?.json && typeof extracted.json === 'object') {
+      const parsed = extracted.json as Partial<AiCircuitSynthesisPayload> & { dsl?: unknown; toolCalls?: unknown }
+      reply.explanation = typeof parsed.explanation === 'string' ? parsed.explanation : ''
+      reply.rawJson = extracted.raw
 
-      const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl)
-      if (dslResult.success && dslResult.networks.length > 0) {
-        const normalizedNetworks = normalizeAiGeneratedNetworks(dslResult.networks)
-        const circuitPayload: AiCircuitSynthesisPayload = {
-          explanation: dslResult.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL Engine.',
-          operationMode: 'replace_ob1_networks',
-          tagsToUpsert: dslResult.tags.map((t) => ({
-            name: t.name,
-            dataType: t.dataType as any,
-            address: t.address,
-            comment: t.comment
-          })),
-          networks: normalizedNetworks
-        }
-        const result = this.applyCircuitPayload(circuitPayload, mode)
-        BlackBoxLogger.getInstance().log(
-          'AI_PARSE_AND_AST_INJECTION',
-          `Compact Ladder DSL compiled: ${normalizedNetworks.length} networks, ${dslResult.tags.length} tags`,
-          { networks: normalizedNetworks.length, tags: dslResult.tags.length }
-        )
-        return {
-          replyText: result.summaryText,
-          tier,
-          providerUsed: 'gemini',
-          toolCallsExecuted: [],
-          toolResults: [],
-          ragRulesConsulted: consultedRuleNames,
-          stagedChangeset: result.stagedChangeset,
-          rawTraceSnippet: rawText.substring(0, 300),
-          rawJson: JSON.stringify(circuitPayload, null, 2)
+      for (const call of Array.isArray(parsed.toolCalls) ? parsed.toolCalls : []) {
+        const tool = String(call?.tool)
+        const params = call?.params && typeof call.params === 'object' ? call.params : {}
+        const isAllowedTagAction = tool !== 'manage_plc_tags' || params.action === 'upsert'
+        if (!AGENT_TOOLS.has(tool) || !isAllowedTagAction) {
+          reply.problems.push(`Tool '${tool}' with these parameters is not available to you.`)
+        } else {
+          reply.toolCalls.push({ tool, params })
         }
       }
+
+      if (typeof parsed.dsl === 'string' && parsed.dsl.trim()) {
+        reply.circuit = fromDsl(parsed.dsl)
+        if (!reply.circuit) reply.problems.push(`The "dsl" field did not compile: ${dslErrors.join('; ') || 'it has no networks'}`)
+      } else if (Array.isArray(parsed.networks) && parsed.networks.length > 0) {
+        reply.circuit = {
+          explanation: '',
+          operationMode: this.defaultCircuitMode(),
+          tagsToUpsert: Array.isArray(parsed.tagsToUpsert) ? parsed.tagsToUpsert : [],
+          networks: normalizeAiGeneratedNetworks(parsed.networks)
+        }
+      }
+      if (reply.circuit) {
+        reply.circuit.explanation = reply.explanation || reply.circuit.explanation || 'Synthesized Ladder Logic via Google Gemini.'
+        if (parsed.operationMode === 'replace_ob1_networks' || parsed.operationMode === 'append_ob1_networks') {
+          reply.circuit.operationMode = parsed.operationMode
+        }
+        if (hasEmptyNetwork(reply.circuit.networks)) {
+          reply.circuit = undefined
+          reply.problems.push('A network has no instructions. FBs, FCs and UDTs need tools, not networks.')
+        }
+      }
+      return reply
     }
 
-    // 3. Conversational explanation or unparsed response
-    if (
-      prompt.toLowerCase().includes('devre') ||
-      prompt.toLowerCase().includes('circuit') ||
-      prompt.toLowerCase().includes('motor') ||
-      prompt.toLowerCase().includes('otopark') ||
-      prompt.toLowerCase().includes('parking')
-    ) {
-      BlackBoxLogger.getInstance().log('AI_PARSE_ERROR', 'Model text did not contain valid Ladder DSL or JSON blocks', {
-        rawSnippet: rawText.substring(0, 500)
-      })
+    const text = rawText.trim()
+    if (text.startsWith('{') || text.startsWith('```')) {
+      reply.problems.push('Your reply was not valid JSON and may have been cut off. Send a shorter, complete JSON object.')
+      return reply
     }
+    if (/^(# NETWORK DEFINITIONS|# TAG DECLARATIONS|NW \d|TAG )/m.test(text)) {
+      reply.circuit = fromDsl(text)
+      if (reply.circuit) {
+        reply.explanation = reply.circuit.explanation
+        reply.circuit.explanation = reply.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL Engine.'
+        return reply
+      }
+    }
+    reply.explanation = text
+    return reply
+  }
 
-    return {
-      replyText: rawText || 'Model produced empty response.',
+  /**
+   * Model, tools and compiler in a loop. A reply is applied as a whole and kept only if it compiles
+   * without new errors. Otherwise the project goes back to where it was and the model gets the errors.
+   */
+  private async runAgentTurn(
+    prompt: string,
+    tier: AiTier,
+    mode: 'auto-apply' | 'diff-view',
+    isTurkish: boolean,
+    ragRulesConsulted: string[],
+    requestModel: (contents: GeminiContent[]) => Promise<string>
+  ): Promise<AgentExecutionResponse> {
+    const tools = PlcAgentTools.getInstance()
+    const turnStart = tools.takeSnapshot()
+    const errorsBefore = new Set(tools.runCompilerVerification().errors)
+    const contents: GeminiContent[] = [
+      { role: 'user', parts: [{ text: `CURRENT PROJECT:\n${tools.describeProjectForModel()}\n\nUSER REQUEST:\n${prompt}` }] }
+    ]
+    const executed: AgentToolCall[] = []
+    const toolResults: AgentToolResult[] = []
+    let lastProblems: string[] = []
+    let rawText = ''
+    let rawJson: string | undefined
+
+    const respond = (fields: Partial<AgentExecutionResponse> & { replyText: string }): AgentExecutionResponse => ({
       tier,
       providerUsed: 'gemini',
-      toolCallsExecuted: [],
-      toolResults: [],
-      rawTraceSnippet: rawText.substring(0, 300)
+      toolCallsExecuted: executed,
+      toolResults,
+      ragRulesConsulted,
+      rawTraceSnippet: rawText.substring(0, 300),
+      rawJson,
+      ...fields
+    })
+
+    for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
+      rawText = await requestModel(contents)
+      contents.push({ role: 'model', parts: [{ text: rawText }] })
+      const reply = this.interpretModelReply(rawText)
+      rawJson = reply.rawJson
+
+      if (reply.problems.length > 0) {
+        lastProblems = reply.problems
+        contents.push({ role: 'user', parts: [{ text: `Nothing was applied.\n${reply.problems.join('\n')}` }] })
+        continue
+      }
+
+      const writes = reply.toolCalls.filter((c) => !READ_ONLY_TOOLS.has(c.tool))
+      const changesProject = writes.length > 0 || reply.circuit !== undefined
+
+      // Only reads: answer them and let the model go on
+      if (reply.toolCalls.length > 0 && !changesProject) {
+        const reads = await tools.executeToolBatch(reply.toolCalls, mode)
+        executed.push(...reply.toolCalls)
+        toolResults.push(...reads.results)
+        contents.push({ role: 'user', parts: [{ text: `TOOL RESULTS:\n${JSON.stringify(reads.results)}` }] })
+        continue
+      }
+
+      if (!changesProject) {
+        const note = isTurkish ? 'Projede değişiklik yapılmadı.' : 'No changes were made to the project.'
+        return respond({ replyText: `${reply.explanation || rawText}\n\n*${note}*` })
+      }
+
+      // Apply the whole reply
+      const problems: string[] = []
+      const lines: string[] = []
+      const staged: NonNullable<AgentExecutionResponse['stagedChangeset']> = []
+      if (mode === 'auto-apply') tools.holdDiskWrites()
+      try {
+        if (reply.toolCalls.length > 0) {
+          const batch = await tools.executeToolBatch(reply.toolCalls, mode)
+          executed.push(...reply.toolCalls)
+          toolResults.push(...batch.results)
+          staged.push(...(batch.stagedChangeset || []))
+          for (const result of batch.results) {
+            if (!result.success) problems.push(`${result.tool}: ${result.message}`)
+            else if (!READ_ONLY_TOOLS.has(result.tool)) lines.push(`- ${result.message}`)
+          }
+        }
+        if (reply.circuit && problems.length === 0) {
+          const applied = this.applyCircuitPayload(reply.circuit, mode)
+          lines.unshift(applied.summaryText)
+          staged.push(...(applied.stagedChangeset || []))
+        } else if (!reply.circuit && reply.explanation) {
+          lines.unshift(reply.explanation, '')
+        }
+
+        if (mode === 'diff-view' && problems.length === 0) {
+          const note = isTurkish
+            ? 'Derleyici kontrolü onaydan sonra çalışır.'
+            : 'The compiler check runs after you approve the changes.'
+          return respond({ replyText: `${lines.join('\n')}\n\n*${note}*`, stagedChangeset: staged })
+        }
+
+        if (problems.length === 0) {
+          const report = tools.runCompilerVerification()
+          const newErrors = report.errors.filter((e) => !errorsBefore.has(e))
+          problems.push(...newErrors)
+          if (newErrors.length === 0) {
+            tools.releaseDiskWrites()
+            tools.setUndoSnapshot(turnStart)
+            const older = report.errors.length
+              ? ` ${report.errors.length} error(s) were already in the project before this change.`
+              : ''
+            return respond({
+              replyText: `${lines.join('\n')}\n\n**Compiler:** no new errors, ${report.warnings.length} warning(s).${older}`,
+              compilerVerification: { success: report.success, message: report.message }
+            })
+          }
+        }
+      } catch (err) {
+        if (signalAborted(err)) {
+          tools.discardDiskWrites()
+          tools.restoreSnapshot(turnStart)
+          throw err
+        }
+        problems.push(err instanceof Error ? err.message : String(err))
+      }
+
+      tools.discardDiskWrites()
+      tools.restoreSnapshot(turnStart)
+      lastProblems = problems
+      BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Agent reply undone, round ${round + 1}`, { problems })
+      contents.push({
+        role: 'user',
+        parts: [{ text: `Your reply was undone because of these errors. Send the complete corrected answer.\n${problems.join('\n')}` }]
+      })
     }
+
+    const details = lastProblems.map((p) => `- ${p}`).join('\n')
+    return respond({
+      replyText: isTurkish
+        ? `Model ${MAX_AGENT_ROUNDS} denemede çalışan bir sonuç üretemedi. Projede değişiklik yapılmadı.\n\n${details}`
+        : `The model did not reach a working result in ${MAX_AGENT_ROUNDS} attempts. The project was not changed.\n\n${details}`,
+      isError: true,
+      errorDetails: details
+    })
+  }
+
+  /** Adding is the safe default: replacing is only for an empty OB1 or an explicit request. */
+  private defaultCircuitMode(): AiCircuitSynthesisPayload['operationMode'] {
+    const ob1 = useBlockStore.getState().ladBlocks.find((b) => (b.blockType === 'OB' && b.blockNumber === 1) || b.name === 'OB1_Main')
+    const hasLogic = (ob1?.networks || []).some((n) => (n.nodes || []).length > 0)
+    return hasLogic ? 'append_ob1_networks' : 'replace_ob1_networks'
   }
 
   /**
@@ -1848,7 +2004,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
       if (dslResult.success && dslResult.networks.length > 0) {
         const circuitPayload: AiCircuitSynthesisPayload = {
           explanation: dslResult.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL Engine.',
-          operationMode: 'replace_ob1_networks',
+          operationMode: this.defaultCircuitMode(),
           tagsToUpsert: dslResult.tags.map((t) => ({
             name: t.name,
             dataType: t.dataType as any,
@@ -1985,7 +2141,7 @@ Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.`
         if (dslResult.success && dslResult.networks.length > 0) {
           const circuitPayload: AiCircuitSynthesisPayload = {
             explanation: dslResult.explanation || 'Synthesized Ladder Logic via Local Ollama Model.',
-            operationMode: 'replace_ob1_networks',
+            operationMode: this.defaultCircuitMode(),
             tagsToUpsert: dslResult.tags.map((t) => ({
               name: t.name,
               dataType: t.dataType as any,
