@@ -61,3 +61,7 @@ Gerçek CPU'dan farklı veya doğrulanmamış davranışlar:
 - Silinen bloklar diskte kalır, elle silinmesi gerekir
 - Arayüz tablosu bir kaynağı yeniden yazarken bildirim bölümleri arasındaki yorumlar kaybolur
 - Gemini bağlantısı gerçek bir anahtarla denenmedi
+
+## Geri bildirim
+
+Önerilerinizi ve bulduğunuz hataları [Issues](https://github.com/Berat-Ay/PLC_SmartIDE/issues) üzerinden paylaşırsanız çok sevinirim.
