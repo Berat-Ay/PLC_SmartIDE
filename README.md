@@ -90,3 +90,7 @@ Gerçek CPU'dan farklı veya doğrulanmamış davranışlar:
 [MIT](LICENSE)
 
 Kodun büyük bölümü yapay zekâ araçlarıyla (Claude) yazıldı. Commit geçmişinde `Co-Authored-By` satırlarıyla görülebilir.
+
+## Geri bildirim
+
+Önerilerinizi ve bulduğunuz hataları [Issues](https://github.com/Berat-Ay/PLC_SmartIDE/issues) üzerinden paylaşırsanız çok sevinirim.
