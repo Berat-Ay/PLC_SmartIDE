@@ -28,3 +28,6 @@ yarn-error.log*
 # TIA test package and the built bridge
 tia-package/
 tools/tia-bridge/TiaBridge.exe
+
+# Screenshots shared while reviewing the GUI
+ScreenShots/

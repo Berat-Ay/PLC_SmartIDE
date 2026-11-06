@@ -109,6 +109,11 @@ ipcMain.handle('project:saveFile', async (_, projectDir: string, relPath: string
   return await FileEngine.saveSingleFile(projectDir, relPath, content)
 })
 
+ipcMain.handle('project:trashFile', async (_, projectDir: string, relPath: string) => {
+  assertProjectRoot(projectDir)
+  return await FileEngine.moveToTrash(projectDir, relPath)
+})
+
 ipcMain.handle('project:loadDemo', async (_, customDir?: string) => {
   const targetDir = customDir || path.join(os.tmpdir(), 'Virtual_S7_Plant_Demo')
   registerProjectRoot(targetDir)

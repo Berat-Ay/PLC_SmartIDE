@@ -159,8 +159,8 @@ function testMagneticDropZoneLookup() {
   const layout = LadderGridLayoutEngine.layoutNetwork(net, 0, 1100)
   assert.ok(layout.dropZones.length >= 2, 'Has at least 2 drop targets (before & after contact)')
 
-  // Search near drop zone 0 (around x=64, y=65)
-  const nearest = LadderGridLayoutEngine.findNearestDropTarget(layout.dropZones, 70, 68, 60)
+  // Search near drop zone 0 (around x=64, y=90)
+  const nearest = LadderGridLayoutEngine.findNearestDropTarget(layout.dropZones, 70, 93, 60)
   assert.ok(nearest, 'Found nearest drop zone within 60px snap radius')
   assert.strictEqual(nearest.target.insertIndex, 0, 'Target is insertIndex 0')
 

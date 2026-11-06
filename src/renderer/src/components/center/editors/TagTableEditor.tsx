@@ -104,19 +104,19 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
   }
 
   return (
-    <div className="h-full flex flex-col bg-industrial-900 select-none text-xs">
+    <div className="cq h-full flex flex-col bg-industrial-900 select-none text-xs overflow-hidden">
       {/* Table Toolbar */}
-      <div className="h-10 px-3 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="font-semibold text-industrial-100">
+      <div className="h-10 shrink-0 px-3 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between gap-3 whitespace-nowrap">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="font-semibold text-industrial-100 truncate">
             {isAllTags ? 'All PLC Tags (Unified View)' : `Tag Table: ${activeTable?.name}`}
           </span>
-          <span className="text-[11px] text-industrial-400 bg-industrial-850 px-2 py-0.5 rounded border border-industrial-750">
+          <span className="under-720:hidden shrink-0 text-[11px] text-industrial-400 bg-industrial-850 px-2 py-0.5 rounded border border-industrial-750">
             {tagsToDisplay.length} Tags Total
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           {visibleCollisionsCount > 0 ? (
             <button
               data-testid="resolve-overlaps-btn"
@@ -125,12 +125,14 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
               className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-500 rounded shadow transition-all animate-pulse"
             >
               <Wand2 className="w-3.5 h-3.5" />
-              <span>Resolve All Overlaps ({visibleCollisionsCount})</span>
+              <span>
+                <span className="under-720:hidden">Resolve All Overlaps </span>({visibleCollisionsCount})
+              </span>
             </button>
           ) : (
             <div className="flex items-center gap-1 text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Memory Guard: No Overlaps</span>
+              <span className="under-600:hidden">Memory Guard: No Overlaps</span>
             </div>
           )}
 
@@ -146,17 +148,18 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
 
       {/* Collision Alert Banner */}
       {visibleCollisionsCount > 0 && (
-        <div data-testid="collision-alert-banner" className="px-3 py-2 bg-amber-950/40 border-b border-amber-800/80 flex items-center justify-between text-amber-200">
+        <div data-testid="collision-alert-banner" className="shrink-0 px-3 py-2 bg-amber-950/40 border-b border-amber-800/80 flex items-center justify-between gap-3 text-amber-200">
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
             <span>
-              <strong>S7 Memory Overlap Detected:</strong> {visibleCollisionsCount} tag(s) occupy overlapping physical memory coordinates. Click "Auto-Assign Safe Address" to resolve.
+              <strong>S7 Memory Overlap Detected:</strong> {visibleCollisionsCount} tag(s) occupy overlapping physical memory coordinates.
+              <span className="under-900:hidden"> Click "Auto-Assign Safe Address" to resolve.</span>
             </span>
           </div>
           <button
             data-testid="fix-all-overlaps-banner-btn"
             onClick={resolveAllOverlaps}
-            className="text-xs underline text-amber-300 hover:text-white font-medium cursor-pointer"
+            className="shrink-0 text-xs underline text-amber-300 hover:text-white font-medium cursor-pointer"
           >
             Fix All Now
           </button>

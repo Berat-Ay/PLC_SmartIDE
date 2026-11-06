@@ -50,7 +50,7 @@ export function normalizeS7Address(rawInput: string): S7AddressNormalizationResu
     clean = clean.slice(1)
   }
 
-  // 1a. Native Timer / Counter Instance Sub-bit & Sub-word Addressing (MEB & TIA Portal Standards)
+  // 1a. Native Timer / Counter Instance Sub-bit & Sub-word Addressing (as in TIA Portal)
   // Timers: T1, T1.Q, T1.IN, T1.ET, T1.PT or IEC_Timer_0_DB.Q
   const timerSubMatch = clean.match(/^([A-Za-z0-9_]+)\.(Q|IN|ET|PT)$/i)
   if (timerSubMatch) {

@@ -286,7 +286,8 @@ export class PlcRuntimeEngine {
     SclInterpreter.resetEdgeStates()
   }
 
-  public start(): void {
+  /** With manualScans the caller drives the cycle through scanOnce and no timers are started. */
+  public start(options: { manualScans?: boolean } = {}): void {
     if (this.state === 'RUN') return
 
     this.blockInfoCache = new WeakMap()
@@ -303,7 +304,7 @@ export class PlcRuntimeEngine {
     this.applyForces()
 
     this.runOb(100)
-    if ((this.state as RuntimeOperatingState) !== 'RUN') return
+    if ((this.state as RuntimeOperatingState) !== 'RUN' || options.manualScans) return
 
     const minCycle = this.projectPayload?.hardware?.general?.minCycleTimeEnabled
       ? this.projectPayload.hardware.general.minCycleTimeMs
@@ -318,6 +319,11 @@ export class PlcRuntimeEngine {
       const period = config?.cycleTimeMs || DEFAULT_INTERRUPT_MS
       this.interruptHandles.push(setInterval(() => this.runCyclicInterrupt(number), period))
     }
+  }
+
+  /** Runs one main cycle. For a CPU started with manualScans. */
+  public scanOnce(): void {
+    this.runCyclicScan()
   }
 
   private clearTimers(): void {

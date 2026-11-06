@@ -126,11 +126,11 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
   return (
     <div
       data-testid="instruction-favorites-ribbon"
-      className="h-9 bg-[#111215] border-b border-[#27272a] flex items-center justify-between px-2 text-xs select-none gap-2 shrink-0 z-30"
+      className="h-9 bg-[#111215] border-b border-[#27272a] flex items-center justify-between px-2 text-xs select-none gap-2 shrink-0 z-30 overflow-hidden"
     >
       {/* 6 Core TIA Portal Favorites + Pinned Custom Instructions */}
-      <div className="flex items-center gap-1 overflow-x-auto scrollbar-none py-1">
-        <span className="text-[10px] font-mono font-bold text-industrial-400 uppercase tracking-wider px-1 border-r border-[#27272a] mr-1 hidden sm:inline">
+      <div className="flex items-center gap-1 overflow-x-auto scrollbar-none py-1 min-w-0">
+        <span className="under-720:hidden text-[10px] font-mono font-bold text-industrial-400 uppercase tracking-wider px-1 border-r border-[#27272a] mr-1">
           Fav
         </span>
 
@@ -150,7 +150,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             <line x1="18" y1="4" x2="18" y2="16" />
             <line x1="18" y1="10" x2="26" y2="10" />
           </svg>
-          <span className="text-[10px] font-mono font-bold text-industrial-300">NO</span>
+          <span className="under-800:hidden text-[10px] font-mono font-bold text-industrial-300">NO</span>
         </button>
 
         {/* 2. Normally Closed Contact (NC) */}
@@ -170,7 +170,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             <line x1="18" y1="4" x2="18" y2="16" />
             <line x1="18" y1="10" x2="26" y2="10" />
           </svg>
-          <span className="text-[10px] font-mono font-bold text-industrial-300">NC</span>
+          <span className="under-800:hidden text-[10px] font-mono font-bold text-industrial-300">NC</span>
         </button>
 
         {/* 3. Output Coil (Coil) */}
@@ -189,7 +189,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             <path d="M 18 4 A 8 8 0 0 1 18 16" />
             <line x1="20" y1="10" x2="26" y2="10" />
           </svg>
-          <span className="text-[10px] font-mono font-bold text-industrial-300">Coil</span>
+          <span className="under-800:hidden text-[10px] font-mono font-bold text-industrial-300">Coil</span>
         </button>
 
         {/* 4. Empty Instruction Box ([??]) */}
@@ -210,7 +210,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             </text>
             <line x1="22" y1="10" x2="26" y2="10" />
           </svg>
-          <span className="text-[10px] font-mono font-bold text-industrial-300">[??]</span>
+          <span className="under-800:hidden text-[10px] font-mono font-bold text-industrial-300">[??]</span>
         </button>
 
         {/* 5. Open Parallel Branch */}
@@ -227,7 +227,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             <line x1="2" y1="5" x2="26" y2="5" />
             <path d="M 10 5 L 10 15 L 26 15" />
           </svg>
-          <span className="text-[10px] font-mono font-bold text-industrial-300">Open</span>
+          <span className="under-800:hidden text-[10px] font-mono font-bold text-industrial-300">Open</span>
         </button>
 
         {/* 6. Close Parallel Branch */}
@@ -241,7 +241,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             <line x1="2" y1="5" x2="26" y2="5" />
             <path d="M 2 15 L 18 15 L 18 5" />
           </svg>
-          <span className="text-[10px] font-mono font-bold text-industrial-300">Close</span>
+          <span className="under-800:hidden text-[10px] font-mono font-bold text-industrial-300">Close</span>
         </button>
 
         {/* Pinned Custom Favorites */}
@@ -278,7 +278,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             data-testid="btn-zoom-50"
             onClick={() => setCanvasZoom(0.5)}
             title="Zoom to 50%"
-            className={`px-1 h-6 flex items-center text-[9.5px] font-mono font-bold transition-colors ${Math.abs(canvasZoom - 0.5) < 0.05 ? 'bg-[#1f242d] text-cyan-400' : 'text-industrial-400 hover:text-white'
+            className={`under-600:hidden px-1 h-6 flex items-center text-[9.5px] font-mono font-bold transition-colors ${Math.abs(canvasZoom - 0.5) < 0.05 ? 'bg-[#1f242d] text-cyan-400' : 'text-industrial-400 hover:text-white'
               }`}
           >
             50%
@@ -287,7 +287,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             data-testid="btn-zoom-75"
             onClick={() => setCanvasZoom(0.75)}
             title="Zoom to 75%"
-            className={`px-1 h-6 flex items-center text-[9.5px] font-mono font-bold transition-colors ${Math.abs(canvasZoom - 0.75) < 0.05 ? 'bg-[#1f242d] text-cyan-400' : 'text-industrial-400 hover:text-white'
+            className={`under-600:hidden px-1 h-6 flex items-center text-[9.5px] font-mono font-bold transition-colors ${Math.abs(canvasZoom - 0.75) < 0.05 ? 'bg-[#1f242d] text-cyan-400' : 'text-industrial-400 hover:text-white'
               }`}
           >
             75%
@@ -305,7 +305,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
             data-testid="btn-zoom-125"
             onClick={() => setCanvasZoom(1.25)}
             title="Zoom to 125%"
-            className={`px-1 h-6 flex items-center text-[9.5px] font-mono font-bold transition-colors ${Math.abs(canvasZoom - 1.25) < 0.05 ? 'bg-[#1f242d] text-cyan-400' : 'text-industrial-400 hover:text-white'
+            className={`under-600:hidden px-1 h-6 flex items-center text-[9.5px] font-mono font-bold transition-colors ${Math.abs(canvasZoom - 1.25) < 0.05 ? 'bg-[#1f242d] text-cyan-400' : 'text-industrial-400 hover:text-white'
               }`}
           >
             125%
@@ -336,7 +336,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
           className="h-7 px-2.5 flex items-center gap-1 text-[11px] font-mono font-semibold bg-[#181a1f] hover:bg-[#242730] border border-[#27272a] text-[#00a3a6] hover:text-white transition-colors rounded-none"
         >
           <Plus className="w-3.5 h-3.5" />
-          <span className="hidden md:inline">Network</span>
+          <span className="under-900:hidden">Network</span>
         </button>
         <button
           data-testid="ribbon-add-scl-network"
@@ -345,7 +345,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
           className="h-7 px-2.5 flex items-center gap-1 text-[11px] font-mono font-semibold bg-[#181a1f] hover:bg-[#242730] border border-[#27272a] text-blue-400 hover:text-white transition-colors rounded-none"
         >
           <Code className="w-3.5 h-3.5" />
-          <span className="hidden md:inline">SCL</span>
+          <span className="under-900:hidden">SCL</span>
         </button>
       </div>
     </div>

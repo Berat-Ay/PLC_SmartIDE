@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import {
   X,
   Cpu,
@@ -20,6 +20,14 @@ interface TabBarProps {
 
 export const TabBar: React.FC<TabBarProps> = ({ currentActiveTabId, onSelectTab }) => {
   const { tabs, closeTab, isSplitView, toggleSplitView } = useUIStore()
+  const stripRef = useRef<HTMLDivElement>(null)
+
+  // The strip has no scrollbar, so the active tab is brought into view and the wheel scrolls sideways
+  useEffect(() => {
+    stripRef.current
+      ?.querySelector('[data-active="true"]')
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [currentActiveTabId, tabs.length])
 
   const getTabIcon = (tab: EditorTab) => {
     switch (tab.type) {
@@ -46,8 +54,15 @@ export const TabBar: React.FC<TabBarProps> = ({ currentActiveTabId, onSelectTab 
   }
 
   return (
-    <div className="h-9 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between select-none px-1 overflow-x-auto text-xs">
-      <div className="flex items-center gap-0.5 overflow-x-auto flex-1 h-full scrollbar-none">
+    <div className="cq h-9 shrink-0 bg-industrial-950 border-b border-industrial-800 select-none text-xs">
+    <div className="h-full flex items-center justify-between px-1 overflow-hidden">
+      <div
+        ref={stripRef}
+        onWheel={(e) => {
+          e.currentTarget.scrollLeft += e.deltaY
+        }}
+        className="flex items-center gap-0.5 overflow-x-auto flex-1 min-w-0 h-full scrollbar-none"
+      >
         {tabs.map((tab) => {
           const isActive = tab.id === currentActiveTabId
 
@@ -57,7 +72,7 @@ export const TabBar: React.FC<TabBarProps> = ({ currentActiveTabId, onSelectTab 
               data-testid={`editor-tab-${tab.id}`}
               data-active={isActive ? 'true' : 'false'}
               onClick={() => onSelectTab(tab.id)}
-              className={`h-full flex items-center gap-2 px-3 border-r border-industrial-850 cursor-pointer transition-colors max-w-[200px] group ${isActive
+              className={`h-full flex items-center gap-2 px-3 border-r border-industrial-850 cursor-pointer transition-colors shrink-0 max-w-[200px] group ${isActive
                   ? 'bg-industrial-900 text-industrial-100 border-t-2 border-t-siemens-cyan font-medium'
                   : 'text-industrial-400 hover:text-industrial-200 hover:bg-industrial-900/40 border-t-2 border-t-transparent'
                 }`}
@@ -84,13 +99,14 @@ export const TabBar: React.FC<TabBarProps> = ({ currentActiveTabId, onSelectTab 
         <button
           onClick={toggleSplitView}
           title={isSplitView ? 'Close Split View' : 'Split Editor Side-by-Side'}
-          className={`px-2 py-1 mx-1 rounded text-xs flex items-center gap-1 transition-colors ${isSplitView ? 'bg-industrial-800 text-cyan-300' : 'text-industrial-400 hover:text-white hover:bg-industrial-800'
+          className={`shrink-0 px-2 py-1 mx-1 rounded text-xs flex items-center gap-1 transition-colors ${isSplitView ? 'bg-industrial-800 text-cyan-300' : 'text-industrial-400 hover:text-white hover:bg-industrial-800'
             }`}
         >
           <Columns className="w-3.5 h-3.5" />
-          <span className="text-[10px]">{isSplitView ? 'Single View' : 'Split View'}</span>
+          <span className="under-600:hidden text-[10px]">{isSplitView ? 'Single View' : 'Split View'}</span>
         </button>
       )}
+    </div>
     </div>
   )
 }

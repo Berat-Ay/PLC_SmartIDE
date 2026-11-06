@@ -241,7 +241,20 @@ async function runTests() {
 
   // Prompt that previously triggered fake EmergencyStop diagnostic interceptor
   const parkingPrompt = '10 araçlık otopark sistemi yap. kapı yukarı motoru çalışmazsa neden diye sormadan otopark bariyerini kur'
+  const realFetch = globalThis.fetch
+  router.updateConfig({ provider: 'gemini', geminiApiKey: 'test-key' })
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        candidates: [
+          { content: { parts: [{ text: JSON.stringify({ explanation: 'Otopark bariyer sistemi', dsl: parkingDsl }) }] } }
+        ]
+      }),
+      { status: 200 }
+    )) as typeof fetch
   const agentRes = await router.executePrompt(parkingPrompt, 'fast-flash', 'auto-apply')
+  globalThis.fetch = realFetch
+  router.updateConfig({ geminiApiKey: '' })
 
   assert(!agentRes.replyText.includes('EmergencyStop (%I0.0) kontağı FALSE'), 'Fake diagnostic interceptor permanently eliminated!')
   assert(agentRes.replyText.includes('Otopark') || agentRes.replyText.includes('otopark') || agentRes.replyText.includes('Bariyer'), 'Correctly synthesized Otopark system')

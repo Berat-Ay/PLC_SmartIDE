@@ -19,6 +19,9 @@ import { Bot, Layers } from 'lucide-react'
 import { AiModelRouter } from './services/ai/AiModelRouter'
 
 const EXTERNAL_WRITE_QUIET_MS = 2000
+// The docks may not take so much of the window that the editor cannot show a toolbar
+const LEFT_DOCK_MAX_SHARE = 0.22
+const RIGHT_DOCK_MAX_SHARE = 0.28
 
 if (typeof window !== 'undefined') {
   ;(window as any).useProjectStore = useProjectStore
@@ -60,7 +63,8 @@ export const App: React.FC = () => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizingLeft) return
       const delta = e.clientX - startXLeftRef.current
-      const newWidth = Math.min(420, Math.max(180, startWidthLeftRef.current + delta))
+      const limit = Math.min(420, window.innerWidth * LEFT_DOCK_MAX_SHARE)
+      const newWidth = Math.min(limit, Math.max(180, startWidthLeftRef.current + delta))
       setLeftDockWidth(newWidth)
     }
 
@@ -85,7 +89,8 @@ export const App: React.FC = () => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizingRight) return
       const delta = startXRightRef.current - e.clientX
-      const newWidth = Math.min(540, Math.max(260, startWidthRightRef.current + delta))
+      const limit = Math.min(540, window.innerWidth * RIGHT_DOCK_MAX_SHARE)
+      const newWidth = Math.min(limit, Math.max(260, startWidthRightRef.current + delta))
       setRightDockWidth(newWidth)
     }
 
@@ -163,8 +168,11 @@ export const App: React.FC = () => {
       <div className="flex-1 flex overflow-hidden">
         {/* Left Dock: Project Tree with Drag Resizer */}
         {!leftDockCollapsed && (
-          <aside style={{ width: leftDockWidth }} className="h-full shrink-0 flex overflow-hidden">
-            <div className="flex-1 h-full overflow-hidden">
+          <aside
+            style={{ width: `min(${leftDockWidth}px, ${LEFT_DOCK_MAX_SHARE * 100}vw)` }}
+            className="h-full shrink-0 flex overflow-hidden"
+          >
+            <div className="flex-1 min-w-0 h-full overflow-hidden">
               <ProjectTree />
             </div>
             {/* Splitter resize handle on right border */}
@@ -180,7 +188,7 @@ export const App: React.FC = () => {
         )}
 
         {/* Center Workspace: Multi-tab & Split-view Editors */}
-        <main className="flex-1 h-full overflow-hidden">
+        <main className="flex-1 min-w-0 h-full overflow-hidden">
           <EditorWorkspace />
         </main>
 
@@ -209,7 +217,7 @@ export const App: React.FC = () => {
         ) : (
           <aside
             data-testid="right-dock-container"
-            style={{ width: rightDockWidth }}
+            style={{ width: `min(${rightDockWidth}px, ${RIGHT_DOCK_MAX_SHARE * 100}vw)` }}
             className="h-full shrink-0 flex overflow-hidden flex-col bg-[#111215]"
           >
             {/* Splitter resize handle on left border */}
@@ -222,7 +230,7 @@ export const App: React.FC = () => {
                 }}
                 className="w-1 h-full bg-[#27272a] hover:bg-cyan-500 cursor-col-resize shrink-0 transition-colors"
               />
-              <div className="flex-1 h-full flex flex-col overflow-hidden">
+              <div className="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
                 {/* TIA Portal Task Card Tabs Header */}
                 <div className="h-7 bg-[#14161b] border-b border-[#27272a] flex items-center px-1 gap-1 shrink-0">
                   <button

@@ -23,18 +23,20 @@ export const DoubleCoilBanner: React.FC<DoubleCoilBannerProps> = ({ block, confl
   }
 
   return (
-    <div className="bg-amber-950/80 border-b border-amber-600 px-4 py-2 text-xs flex flex-col gap-1.5 select-none animate-in fade-in duration-200">
+    <div className="shrink-0 bg-amber-950/80 border-b border-amber-600 px-4 py-2 text-xs flex flex-col gap-1.5 select-none animate-in fade-in duration-200">
       {conflicts.map((c) => (
-        <div key={c.normalizedOperand} className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2 text-amber-200">
+        <div key={c.normalizedOperand} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
+          <div className="flex items-center gap-2 text-amber-200 min-w-0 flex-1 basis-[220px]">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />
             <span>
-              <strong>Double Coil Syndrome Detected:</strong> Standard assignment coil on operand{' '}
-              <span className="font-mono font-bold text-white bg-amber-900/60 px-1.5 py-0.5 rounded border border-amber-700">
+              <strong>Double Coil Syndrome Detected:</strong>{' '}
+              <span className="under-720:hidden">Standard assignment coil on operand </span>
+              <span className="font-mono font-bold text-white bg-amber-900/60 px-1.5 py-0.5 rounded border border-amber-700 [overflow-wrap:anywhere]">
                 "{c.operand}"
               </span>{' '}
               is driven in Networks{' '}
-              <strong className="text-white">{c.networkNumbers.join(' & ')}</strong>. The cyclic scan will overwrite earlier logic!
+              <strong className="text-white">{c.networkNumbers.join(' & ')}</strong>.{' '}
+              <span className="under-900:hidden">The cyclic scan will overwrite earlier logic!</span>
             </span>
           </div>
 
@@ -44,7 +46,8 @@ export const DoubleCoilBanner: React.FC<DoubleCoilBannerProps> = ({ block, confl
             title="Automatically generate intermediate booleans and an OR-mapped output network"
           >
             <Zap className="w-3.5 h-3.5 fill-current" />
-            <span>1-Click Auto-Merge Coils</span>
+            <span className="under-720:hidden">1-Click Auto-Merge Coils</span>
+            <span className="over-720:hidden">Auto-Merge</span>
           </button>
         </div>
       ))}

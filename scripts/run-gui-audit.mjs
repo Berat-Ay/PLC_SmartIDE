@@ -1,3 +1,4 @@
+import os from 'os'
 /**
  * Real-Window Playwright Electron GUI Debugger & Self-Healing Verification Runner
  * Stage E: Industrial CAD GUI Overhaul, Zero-Radius Architecture, Startup Wizard,
@@ -25,6 +26,8 @@ console.log('===============================================================')
 console.log(`Project root: ${projectRoot}`)
 console.log(`Artifacts directory: ${artifactsDir}`)
 
+const PARKING_DSL = "# TAG DECLARATIONS\nTAG Giris_Kart %I0.0 BOOL \"Giriş Kart Okuyucu (NO)\"\nTAG Giris_Fotosel %I0.1 BOOL \"Giriş Güvenlik Fotoseli\"\nTAG Ust_Limit %I0.2 BOOL \"Bariyer Üst Limit Sınır Anahtarı\"\nTAG Alt_Limit %I0.3 BOOL \"Bariyer Alt Limit Sınır Anahtarı\"\nTAG Cikis_Fotosel %I0.4 BOOL \"Çıkış Araç Algılama Fotoseli\"\nTAG Kapi_Yukari_Motor %Q0.0 BOOL \"Bariyer Kapı Yukarı Açma Motoru\"\nTAG Kapi_Asagi_Motor %Q0.1 BOOL \"Bariyer Kapı Aşağı Kapatma Motoru\"\nTAG Otopark_Dolu_Tabela %Q0.2 BOOL \"Otopark Dolu Işıklı Tabela\"\n\n# NETWORK DEFINITIONS\nNW 1 \"Bariyer Açma ve Emniyet Geri Açılma (Motor %Q0.0)\": SERIES( PARALLEL( SERIES( CMP_LT(C1.CV, 10), NO(Giris_Kart) ), SERIES( NO(Kapi_Asagi_Motor), NO(Giris_Fotosel) ), NO(Kapi_Yukari_Motor) ), NC(Ust_Limit), NC(Kapi_Asagi_Motor), COIL(Kapi_Yukari_Motor) )\nNW 2 \"Araç Giriş/Çıkış Sayacı (CTUD C1, PV=10)\": SERIES( N_TRIG(Giris_Fotosel), CTUD(C1, PV=10, CD=Cikis_Fotosel) )\nNW 3 \"7 Saniye Otomatik Kapanma Zamanlayıcısı (TON T1)\": SERIES( NO(Ust_Limit), TON(T1, PT=T#7s) )\nNW 4 \"Bariyer Aşağı Kapatma Motoru (%Q0.1)\": SERIES( PARALLEL( NO(T1.Q), NO(Kapi_Asagi_Motor) ), NC(Alt_Limit), NC(Giris_Fotosel), NC(Kapi_Yukari_Motor), COIL(Kapi_Asagi_Motor) )\nNW 5 \"Otopark Dolu Tabelası Kontrolü (%Q0.2)\": SERIES( CMP_GE(C1.CV, 10), COIL(Otopark_Dolu_Tabela) )"
+
 async function runGuiAudit() {
   const auditResults = {
     timestamp: new Date().toISOString(),
@@ -44,12 +47,19 @@ async function runGuiAudit() {
     const launchEnv = { ...process.env, NODE_ENV: 'test' }
     delete launchEnv.ELECTRON_RUN_AS_NODE
 
+    // Runs with its own settings folder, so the audit cannot overwrite the user's stored API keys
+    const auditUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'rungline-audit-'))
     electronApp = await electron.launch({
       executablePath: electronPath,
-      args: ['.'],
+      args: ['.', `--user-data-dir=${auditUserData}`],
       cwd: projectRoot,
       env: launchEnv
     })
+
+    const activeUserData = await electronApp.evaluate(({ app }) => app.getPath('userData'))
+    if (path.resolve(activeUserData) !== path.resolve(auditUserData)) {
+      throw new Error(`The audit must not use the real settings folder, got ${activeUserData}`)
+    }
 
     const window = await electronApp.firstWindow()
 
@@ -71,23 +81,46 @@ async function runGuiAudit() {
     await window.addInitScript(defineAuditStart)
     await window.evaluate(defineAuditStart)
 
-    // Earlier scenarios replace or delete tags on purpose. OB30 of the demo still needs this one.
+    // The agent needs a real model, so these scenarios answer Gemini requests inside the renderer.
+    // They test the path from the panel to the project. They say nothing about what a model would answer.
+    const useFakeGemini = (reply) =>
+      window.evaluate((body) => {
+        if (!window.__realFetch) window.__realFetch = window.fetch
+        window.fetch = async (url, init) => {
+          if (!String(url).includes('generativelanguage.googleapis.com')) return window.__realFetch(url, init)
+          return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          })
+        }
+        window.plcTestContext.AiModelRouter.getInstance().updateConfig({ provider: 'gemini', geminiApiKey: 'audit-fake-key' })
+      }, reply)
+    const removeFakeGemini = () =>
+      window.evaluate(() => {
+        if (window.__realFetch) window.fetch = window.__realFetch
+        window.plcTestContext.AiModelRouter.getInstance().updateConfig({ provider: 'gemini', geminiApiKey: '' })
+      })
+    const hasTag = (name) =>
+      window.waitForFunction(
+        (tagName) => window.plcTestContext.useTagStore.getState().tagTables.some((t) => t.tags.some((x) => x.name === tagName)),
+        name,
+        { timeout: 8000 }
+      )
+
+    // Earlier scenarios replace or delete tags on purpose. The demo blocks still need these two.
+    // The addresses are free ones, so restoring them does not add a memory overlap.
     const restoreDemoTag = () =>
       window.evaluate(() => {
         const tagStore = window.plcTestContext.useTagStore.getState()
-        const hasTag = tagStore.tagTables.some((table) => table.tags.some((t) => t.name === 'TankPressure_Bar'))
-        if (hasTag) return
+        const needed = [
+          { id: 'audit_t1', name: 'TankPressure_Bar', dataType: 'REAL', address: '%MD40', comment: 'Restored by the audit' },
+          { id: 'audit_t2', name: 'Alarm_Silenced', dataType: 'BOOL', address: '%M44.0', comment: 'Restored by the audit' }
+        ]
+        const exists = (name) => tagStore.tagTables.some((table) => table.tags.some((t) => t.name === name))
+        const missing = needed.filter((tag) => !exists(tag.name))
+        if (missing.length === 0) return
         const [first, ...others] = tagStore.tagTables
-        tagStore.setTagTables([
-          {
-            ...first,
-            tags: [
-              ...first.tags,
-              { id: 't6', name: 'TankPressure_Bar', dataType: 'REAL', address: '%MD20', comment: 'Restored by the audit' }
-            ]
-          },
-          ...others
-        ])
+        tagStore.setTagTables([{ ...first, tags: [...first.tags, ...missing] }, ...others])
       })
     await window.waitForLoadState('domcontentloaded')
     console.log(' Window loaded. Setting viewport to 1440x900...')
@@ -450,9 +483,9 @@ async function runGuiAudit() {
       const vb = svg.viewBox.baseVal
       const vbWidth = vb.width || 1100
       const vbHeight = vb.height || 145
-      // Drop candidate after contact is at x=195, y=65. Test proximity at x=200 (5px distance < 60px snap radius)
+      // Drop candidate after contact is at x=195, y=90. Test proximity at x=200 (5px distance < 60px snap radius)
       const clientX = rect.left + (rect.width * 200) / vbWidth
-      const clientY = rect.top + (rect.height * 65) / vbHeight
+      const clientY = rect.top + (rect.height * 90) / vbHeight
 
       let event
       try {
@@ -796,27 +829,26 @@ async function runGuiAudit() {
     await window.waitForTimeout(200)
     console.log('  -> AI Agent mode set to [Auto-Apply].')
 
-    // Submit prompt: "Create a new UDT_Valve, add Valve tags without memory overlap, create FB_ValveControl in SCL, and verify compiler"
+    // These two scenarios only test the agent path, so they put the project back afterwards
+    await window.evaluate(() => {
+      const { useBlockStore, useTagStore } = window.plcTestContext
+      window.__beforeAgentScenarios = {
+        ladBlocks: structuredClone(useBlockStore.getState().ladBlocks),
+        tagTables: structuredClone(useTagStore.getState().tagTables)
+      }
+    })
+    await useFakeGemini({
+      explanation: 'Valve circuit',
+      operationMode: 'append_ob1_networks',
+      dsl: 'TAG Valve_Open_Req %I0.4 BOOL "Open request"\nTAG Valve_OpenCmd %Q0.3 BOOL "Open solenoid"\nNW 1 "Valve": SERIES( NO(Valve_Open_Req), COIL(Valve_OpenCmd) )'
+    })
     const inputPrompt = window.locator('[data-testid="agent-input-prompt"]')
-    await inputPrompt.fill('Create a new UDT_Valve, add Valve tags without memory overlap, create FB_ValveControl in SCL, and verify compiler')
+    await inputPrompt.fill('Add a valve open circuit')
     const submitBtn = window.locator('[data-testid="agent-submit-prompt"]')
-    console.log('  -> Submitting complex automation prompt to AI Agent...')
+    console.log('  -> Submitting prompt to the AI agent with a simulated Gemini reply...')
     await submitBtn.click()
-
-    // Wait for agent execution response
-    const agentMsg = window.locator('text=Compiler Verified: 0 Errors')
-    await agentMsg.waitFor({ state: 'visible', timeout: 8000 })
-    console.log('  -> Agent finished synthesis and compiler self-healing with 0 errors!')
-
-    // Verify Tab opened for FB_ValveControl
-    const valveTab = window.locator('text=FB_ValveControl').first()
-    await valveTab.waitFor({ state: 'visible', timeout: 3000 })
-    console.log('  -> Center Workspace automatically opened tab for FB_ValveControl.')
-
-    // Verify Left Tree shows UDT_Valve and FB_ValveControl
-    const treeUdtValve = window.locator('text=UDT_Valve').first()
-    await treeUdtValve.waitFor({ state: 'visible', timeout: 3000 })
-    console.log('  -> UDT_Valve indexed in Left Project Tree.')
+    await hasTag('Valve_OpenCmd')
+    console.log('  -> The reply reached the project: tag and network were applied.')
 
     // Capture Screenshot 7: AI Agent Auto-Apply
     const shot7 = path.join(artifactsDir, 'gui-audit-07-ai-agent-auto-apply.png')
@@ -843,7 +875,12 @@ async function runGuiAudit() {
     console.log('  -> Switched Agent mode to [Diff-View Approval].')
 
     // Submit update prompt
-    await inputPrompt.fill('Update FB_ValveControl with emergency close override')
+    await useFakeGemini({
+      explanation: 'Valve close circuit',
+      operationMode: 'append_ob1_networks',
+      dsl: 'TAG Valve_Close_Req %I0.5 BOOL "Close request"\nTAG Valve_CloseCmd %Q0.4 BOOL "Close solenoid"\nNW 1 "Valve close": SERIES( NO(Valve_Close_Req), COIL(Valve_CloseCmd) )'
+    })
+    await inputPrompt.fill('Add a valve close circuit')
     console.log('  -> Submitting mutation prompt in Diff-View mode...')
     await submitBtn.click()
 
@@ -872,6 +909,14 @@ async function runGuiAudit() {
     // Verify Diff modal is closed
     const isDiffGone = await diffModal.isHidden()
     console.log(`  -> Diff modal closed: ${isDiffGone}`)
+    await hasTag('Valve_CloseCmd')
+    await removeFakeGemini()
+    await window.evaluate(() => {
+      const { useBlockStore, useTagStore } = window.plcTestContext
+      const saved = window.__beforeAgentScenarios
+      useBlockStore.setState({ ladBlocks: saved.ladBlocks })
+      useTagStore.getState().setTagTables(saved.tagTables)
+    })
 
     auditResults.scenarios.push({
       scenario: 'Scenario 8',
@@ -1255,8 +1300,8 @@ async function runGuiAudit() {
       await copyTraceBtn.waitFor({ state: 'visible', timeout: 3000 })
       console.log('  ✅ PASS: [Copy Error Trace] button verified on diagnostic card.')
 
-      // Compile canonical MEB 10s Timer circuit via Compact Ladder DSL Compiler
-      console.log('  -> Injecting canonical MEB 10s timer circuit via Compact Ladder DSL Engine...')
+      // Compile a 10s timer circuit via Compact Ladder DSL Compiler
+      console.log('  -> Injecting 10s timer circuit via Compact Ladder DSL Engine...')
       await window.evaluate(() => {
         const dsl = `
 # TAG DECLARATIONS
@@ -1270,7 +1315,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
 `
         const dslResult = window.plcTestContext.LadderDslCompiler.compileLadderDslToAst(dsl)
         window.plcTestContext.AiModelRouter.getInstance().applyCircuitPayload({
-          explanation: 'Canonical MEB 10-Second Timer Motor Circuit',
+          explanation: '10-Second Timer Motor Circuit',
           operationMode: 'replace_ob1_networks',
           tagsToUpsert: dslResult.tags,
           networks: dslResult.networks
@@ -1284,7 +1329,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     await scenario11Ob1Tab.waitFor({ state: 'visible', timeout: 5000 })
     console.log('  -> OB1_Main active tab verified.')
 
-    // 5. Verify synthesized tags in useTagStore (MEB Standard: zero %M dummy tags!)
+    // 5. Verify synthesized tags in useTagStore (no %M tags that only copy a timer)
     const synthesizedTags = await window.evaluate(() => {
       const tagStore = window.plcTestContext.useTagStore.getState()
       const allTags = tagStore.tagTables.flatMap((t) => t.tags)
@@ -1299,7 +1344,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     if (!synthesizedTags.hasStart || !synthesizedTags.hasStop || !synthesizedTags.hasMotor || !synthesizedTags.hasNoDummyTimer) {
       throw new Error(`Synthesized tags violation in useTagStore: ${JSON.stringify(synthesizedTags)}`)
     }
-    console.log('  -> Canonical MEB tags verified with zero dummy %M flags!')
+    console.log('  -> Tags verified with no %M copies of a timer!')
 
     // 6. Verify synthesized Ladder Networks rendered on Canvas
     const canvasNetworksInfo = await window.evaluate(() => {
@@ -1316,9 +1361,9 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     })
     console.log(`  -> OB1_Main network metrics:`, canvasNetworksInfo)
     if (canvasNetworksInfo.count !== 2 || canvasNetworksInfo.net1TripOperand !== 'T1.Q' || canvasNetworksInfo.net2NodesLength !== 2) {
-      throw new Error(`MEB AST verification failed: ${JSON.stringify(canvasNetworksInfo)}`)
+      throw new Error(`AST verification failed: ${JSON.stringify(canvasNetworksInfo)}`)
     }
-    console.log('  -> 2 Canonical MEB Networks verified with native T1.Q addressing!')
+    console.log('  -> 2 networks verified with native T1.Q addressing!')
 
     // 7. Verify Live Simulation & Native T1.Q Execution
     console.log('  -> Testing Live Simulation with synthesized latching timer circuit...')
@@ -1384,13 +1429,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     console.log(`  📸 Screenshot 11 saved: ${shot11}`)
     auditResults.screenshots.push(shot11)
 
-    // Restore provider to offline_local for subsequent deterministic test scenarios
-    await window.evaluate(() => {
-      window.plcTestContext.AiModelRouter.getInstance().updateConfig({
-        provider: 'offline_local',
-        geminiApiKey: ''
-      })
-    })
+    await removeFakeGemini()
 
     auditResults.scenarios.push({
       scenario: 'Scenario 11',
@@ -1565,14 +1604,14 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     })
 
     // =========================================================================
-    // SCENARIO 13: MEB Curriculum RAG Trainer Modal, Rule Extraction & Persistent Memory
+    // SCENARIO 13: Patterns and Notes Modal, Saving a Note
     // =========================================================================
     console.log('\n---------------------------------------------------------------')
-    console.log(' SCENARIO 13: MEB Curriculum RAG Trainer Modal & Persistent Rule Extraction')
+    console.log(' SCENARIO 13: Patterns and Notes Modal, Saving a Note')
     console.log('---------------------------------------------------------------')
 
     // 1. Open RAG Book Trainer Modal
-    console.log('  -> Opening MEB Rule Trainer modal via header button...')
+    console.log('  -> Opening patterns and notes modal via header button...')
     const openTrainerBtn = window.locator('[data-testid="btn-open-book-trainer"]')
     await openTrainerBtn.click()
     await window.waitForTimeout(300)
@@ -1591,7 +1630,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     // 3. Extract New Curriculum Rule
     console.log('  -> Inputting textbook rule text into extractor...')
     const ragInput = window.locator('[data-testid="rag-book-input"]')
-    await ragInput.fill('MEB PLC Section 5.1: High-Pressure Hydraulic Safety System. Outflow valve must only open after pump interlock is confirmed. Timer T3 regulates minimum pressurization dwell (T#8s) using native T3.Q trip contact.')
+    await ragInput.fill('Plant note: High-Pressure Hydraulic Safety System. Outflow valve must only open after pump interlock is confirmed. Timer T3 regulates minimum pressurization dwell (T#8s) using native T3.Q trip contact.')
 
     const extractBtn = window.locator('[data-testid="btn-extract-rag-rules"]')
     await extractBtn.click()
@@ -1618,7 +1657,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
 
     auditResults.scenarios.push({
       scenario: 'Scenario 13',
-      title: 'MEB Curriculum RAG Trainer Modal, Rule Extraction & Persistent Memory',
+      title: 'Patterns and Notes Modal, Saving a Note',
       passed: true
     })
 
@@ -1672,6 +1711,18 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     }
     console.log('  -> Zero ghost targets during RUN + Monitor verified!')
 
+    // A filter's region follows the bounding box, so a filter on a straight wire makes the wire vanish
+    const vanishingWires = await window.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="ladder-network-svg"] [filter]')].filter((el) => {
+        const box = el.getBBox()
+        return box.width === 0 || box.height === 0
+      }).length
+    )
+    if (vanishingWires > 0) {
+      throw new Error(`${vanishingWires} straight wires carry an SVG filter and do not paint during Monitor`)
+    }
+    console.log('  -> Every wire paints during RUN + Monitor!')
+
     // Capture Screenshot 14: Zero Ghost Targets & Live Ladder
     const shot14 = path.join(artifactsDir, 'gui-audit-14-zero-ghost-drop-targets.png')
     await window.screenshot({ path: shot14, fullPage: true })
@@ -1690,8 +1741,8 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     console.log(' SCENARIO 15: REAL-TIME TIMER ET ACCUMULATION & T1.Q MOTOR CUTOFF')
     console.log('---------------------------------------------------------------')
 
-    // 1. Synthesize MEB 10s Timer Motor Circuit into OB1 via Compact Ladder DSL
-    console.log('  -> Synthesizing MEB 10-second auto-stop motor circuit into OB1 via Compact Ladder DSL...')
+    // 1. Synthesize a 10s Timer Motor Circuit into OB1 via Compact Ladder DSL
+    console.log('  -> Synthesizing 10-second auto-stop motor circuit into OB1 via Compact Ladder DSL...')
     await window.evaluate(() => {
       const dsl = `
 # TAG DECLARATIONS
@@ -1705,7 +1756,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
 `
       const dslResult = window.plcTestContext.LadderDslCompiler.compileLadderDslToAst(dsl)
       window.plcTestContext.AiModelRouter.getInstance().applyCircuitPayload({
-        explanation: 'Canonical MEB 10-Second Timer Motor Circuit',
+        explanation: '10-Second Timer Motor Circuit',
         operationMode: 'replace_ob1_networks',
         tagsToUpsert: dslResult.tags,
         networks: dslResult.networks
@@ -2063,7 +2114,7 @@ NW 4 "Motor Stopped Red Indicator LED": SERIES( NC(Motor_Run), COIL(Kirmizi_Led)
 `
       const dslResult = window.plcTestContext.LadderDslCompiler.compileLadderDslToAst(dsl)
       const res = window.plcTestContext.AiModelRouter.getInstance().applyCircuitPayload({
-        explanation: 'Created Canonical MEB 10-Second Auto-Stop Latching Motor Circuit with Yesil_Led (%Q0.1) and Kirmizi_Led (%Q0.2)',
+        explanation: 'Created 10-Second Auto-Stop Latching Motor Circuit with Yesil_Led (%Q0.1) and Kirmizi_Led (%Q0.2)',
         operationMode: 'replace_ob1_networks',
         tagsToUpsert: dslResult.tags,
         networks: dslResult.networks
@@ -2673,20 +2724,21 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await modal.waitFor({ timeout: 5000 })
 
       // Verify 4 Providers exist
-      const btnOffline = window.locator('[data-testid="provider-btn-offline-local"]')
+      if ((await window.locator('[data-testid="provider-btn-offline-local"]').count()) !== 0) {
+        throw new Error('The removed offline engine must not be offered')
+      }
       const btnGemini = window.locator('[data-testid="provider-btn-gemini"]')
       const btnOllama = window.locator('[data-testid="provider-btn-ollama"]')
       const btnOpenAI = window.locator('[data-testid="provider-btn-openai"]')
 
       if (
-        (await btnOffline.count()) === 0 ||
         (await btnGemini.count()) === 0 ||
         (await btnOllama.count()) === 0 ||
         (await btnOpenAI.count()) === 0
       ) {
-        throw new Error('Expected 4 authentic providers in AI Settings Modal')
+        throw new Error('Expected 3 providers in AI Settings Modal')
       }
-      console.log('  ✅ PASS: 4 Providers verified (Offline S7, Google Gemini, Local Ollama, OpenAI)')
+      console.log('  ✅ PASS: 3 providers verified (Google Gemini, Local Ollama, OpenAI)')
 
       // 3. Switch to Local Ollama
       await btnOllama.click()
@@ -2727,16 +2779,16 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await window.waitForTimeout(700)
       console.log('  ✅ PASS: Local Ollama configuration saved.')
 
-      // 6. Open MEB Book Trainer Modal
+      // 6. Open the patterns and notes modal
       await window.locator('[data-testid="btn-open-book-trainer"]').click()
       await window.waitForTimeout(400)
 
       const trainerModal = window.locator('[data-testid="rag-book-trainer-modal"]')
       await trainerModal.waitFor({ timeout: 5000 })
-      console.log('  ✅ PASS: MEB Book Trainer Modal opened.')
+      console.log('  ✅ PASS: Patterns and notes modal opened.')
 
       // 7. Extract and persist custom curriculum rule
-      await window.locator('[data-testid="rag-rule-name-input"]').fill('MEB_StarDelta_Timer_Rule')
+      await window.locator('[data-testid="rag-rule-name-input"]').fill('StarDelta_Timer_Note')
       await window.locator('[data-testid="rag-book-input"]').fill('Yıldız üçgen yol vermede T1 zamanlayıcısı 5 saniye sonra yıldız kontaktörünü açıp üçgen kontaktörünü devreye alır.')
       await window.locator('[data-testid="btn-extract-rag-rules"]').click()
       await window.waitForTimeout(500)
@@ -2753,6 +2805,11 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await window.waitForTimeout(400)
 
       // 9. Send prompt and verify RAG consultation badge
+      await useFakeGemini({
+        explanation: 'Motor',
+        operationMode: 'replace_ob1_networks',
+        dsl: 'TAG Start_Btn %I0.0 BOOL "Start"\nTAG Motor_Run %Q0.0 BOOL "Motor"\nNW 1 "Motor": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), COIL(Motor_Run) )'
+      })
       await window.locator('[data-testid="agent-input-prompt"]').fill('10 saniye sonra duran mühürlemeli motor devresi')
       await window.locator('[data-testid="agent-submit-prompt"]').click()
       await window.waitForTimeout(1000)
@@ -2761,10 +2818,10 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await ragBadge.waitFor({ timeout: 6000 })
       const badgeText = await ragBadge.textContent()
       console.log(`  -> Agent RAG Consultation Badge: "${badgeText}"`)
-      if (!badgeText.includes('RAG Context') && !badgeText.includes('MEB_')) {
+      if (!badgeText.includes('RAG Context') && !badgeText.includes('auto_stop')) {
         throw new Error(`Expected RAG Context badge, got: "${badgeText}"`)
       }
-      console.log('  ✅ PASS: Semantic RAG Consultation Badge rendered with consulted MEB rules!')
+      console.log('  ✅ PASS: Semantic RAG Consultation Badge rendered with the consulted patterns!')
 
       // 10. Verify Coil Diagnostic & 1-Click Force Bit
       await window.evaluate(() => {
@@ -2794,12 +2851,18 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await forceBitBtn.click()
       await window.waitForTimeout(500)
 
-      const forced = await window.evaluate(() => {
+      const { forced, forcedAddress, startTags } = await window.evaluate(() => {
         const rt = window.plcTestContext.useRuntimeStore.getState()
-        return rt.engine.getVariable('Start_PB') || rt.engine.getVariable('%I0.1') || rt.engine.getVariable('%I0.0')
+        const tags = window.plcTestContext.useTagStore.getState().tagTables.flatMap((t) => t.tags)
+        const forcedAddress = tags.find((t) => t.name === 'Start_Btn')?.address
+        return {
+          forced: forcedAddress ? rt.engine.getVariable(forcedAddress) : undefined,
+          forcedAddress,
+          startTags: tags.filter((t) => t.address.startsWith('%I0.')).map((t) => `${t.name}=${t.address}`)
+        }
       })
-      console.log(`  -> Forced bit (Start_PB / %I0.1) value: ${forced}`)
-      if (!forced) {
+      console.log(`  -> Forced bit Start_Btn (${forcedAddress}) value: ${forced}. Input tags: ${startTags.join(', ')}`)
+      if (forced !== true) {
         throw new Error('Expected blocking bit to be forced TRUE')
       }
       console.log('  ✅ PASS: 1-Click [Force Bit for Test] executed successfully in S7 binary memory!')
@@ -2831,9 +2894,8 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
         ui.setRightActiveTab('agent')
         ui.setAgentMode('auto-apply')
         ui.setCanvasZoom(1.0)
-        const router = window.plcTestContext.AiModelRouter.getInstance()
-        router.updateConfig({ provider: 'offline_local' })
       })
+      await useFakeGemini({ explanation: 'Otopark bariyer sistemi', operationMode: 'replace_ob1_networks', dsl: PARKING_DSL })
       await window.waitForTimeout(300)
 
       const zoomVal = await window.evaluate(() => window.plcTestContext.useUIStore.getState().canvasZoom)
@@ -2880,7 +2942,7 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       })
       console.log('  -> Parking garage tags check:', parkingTagsCheck)
       if (!parkingTagsCheck.passed) {
-        throw new Error(`Missing expected parking garage tags: ${JSON.stringify(parkingTagsCheck.missing)}`)
+        throw new Error(`Missing expected parking garage tags: ${JSON.stringify(parkingTagsCheck.missing)}. Agent said: ${lastMessageText}`)
       }
       console.log('  ✅ PASS: 8 canonical conflict-free S7 tags allocated for parking system!')
 
@@ -2968,6 +3030,30 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       }
       await window.waitForTimeout(400)
       console.log('  ✅ PASS: Floating toolbar [NO] toggle restored contact!')
+
+      // A click on empty canvas clears the selection and its toolbar
+      const emptySpot = await window.evaluate(() => {
+        // A rung can be wider or taller than the window, so look for a visible point that only hits the SVG itself
+        const svg = document.querySelector('[data-testid="contact-selection-toolbar"]').closest('svg')
+        const box = svg.getBoundingClientRect()
+        for (let y = box.bottom - 4; y > box.top; y -= 8) {
+          for (let x = box.left + 60; x < box.right; x += 16) {
+            if (document.elementFromPoint(x, y) === svg) return { x, y }
+          }
+        }
+        return null
+      })
+      if (!emptySpot) throw new Error('No empty canvas spot is visible next to the selected contact!')
+      await window.mouse.click(emptySpot.x, emptySpot.y)
+      await window.waitForTimeout(200)
+      if ((await toolbar.count()) !== 0) {
+        const hit = await window.evaluate(({ x, y }) => {
+          const el = document.elementFromPoint(x, y)
+          return `${el?.tagName} ${el?.getAttribute('data-testid') || ''}`
+        }, emptySpot)
+        throw new Error(`Selection toolbar stayed open after a click on empty canvas at ${emptySpot.x},${emptySpot.y} (${hit})!`)
+      }
+      console.log('  ✅ PASS: Click on empty canvas cleared the selection toolbar!')
 
       // 9. Live softPLC Runtime Execution & Verification of C1.CV >= 10 -> Otopark_Dolu_Tabela
       console.log('  -> Verifying softPLC live execution of CTUD & CMP_GE logic...')
@@ -3182,6 +3268,113 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       throw new Error('DomVisualInspector visual layout violation')
     }
     console.log('  ✅ PASS: 0 Visual Overlaps, 0 False Diagnostics, 0 Text Collisions!')
+
+    console.log('\n===============================================================')
+    console.log(' SCENARIO 29: Deleting a Block Asks First and Moves its File to .trash')
+    console.log('===============================================================')
+    const trashProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rungline-audit-trash-'))
+    const trashBlockFile = 'DB99_AuditTrash.db.json'
+    const trashBlock = {
+      blockType: 'DB',
+      blockNumber: 99,
+      name: 'DB99_AuditTrash',
+      fileName: trashBlockFile,
+      dbType: 'Global',
+      optimizedAccess: true,
+      variables: []
+    }
+    const previousProjectPath = await window.evaluate(
+      async ({ dir, block }) => {
+        const { useBlockStore, useProjectStore } = window.plcTestContext
+        const previous = useProjectStore.getState().projectPath
+        await window.electronApi.openProject(dir)
+        await window.electronApi.saveProjectFile(dir, `blocks/${block.fileName}`, JSON.stringify(block, null, 2))
+        useProjectStore.setState({ projectPath: dir })
+        useBlockStore.setState((state) => ({ dataBlocks: [...state.dataBlocks, block] }))
+        return previous
+      },
+      { dir: trashProjectDir, block: trashBlock }
+    )
+    const liveFile = path.join(trashProjectDir, 'blocks', trashBlockFile)
+    const trashRow = window.locator('div.group', { hasText: 'DB99_AuditTrash' }).last()
+    const trashButton = trashRow.locator('[data-testid="tree-delete-block"]')
+    const blockInStore = () =>
+      window.evaluate(
+        (name) => window.plcTestContext.useBlockStore.getState().dataBlocks.some((b) => b.name === name),
+        trashBlock.name
+      )
+    await trashRow.waitFor({ state: 'visible', timeout: 8000 })
+    await trashRow.hover()
+
+    // Cancel keeps everything
+    let confirmText = ''
+    window.once('dialog', (dialog) => {
+      confirmText = dialog.message()
+      dialog.dismiss()
+    })
+    await trashButton.click()
+    await window.waitForTimeout(500)
+    if (!confirmText.includes('DB99_AuditTrash') || !confirmText.includes('.trash')) {
+      throw new Error(`The delete question did not name the block and .trash: ${confirmText}`)
+    }
+    if (!(await blockInStore()) || !fs.existsSync(liveFile)) {
+      throw new Error('Cancelling the delete question still removed the block or its file')
+    }
+    console.log('  ✅ PASS: Cancel keeps the block and its file')
+
+    // Accept moves the file and removes the block
+    window.once('dialog', (dialog) => dialog.accept())
+    await trashRow.hover()
+    await trashButton.click()
+    await window.waitForFunction(
+      (name) => !window.plcTestContext.useBlockStore.getState().dataBlocks.some((b) => b.name === name),
+      trashBlock.name,
+      { timeout: 8000 }
+    )
+    const trashedFiles = fs.readdirSync(path.join(trashProjectDir, '.trash'))
+    if (fs.existsSync(liveFile) || !trashedFiles.some((f) => f.endsWith(trashBlockFile))) {
+      throw new Error(`The file did not move to .trash. Found: ${trashedFiles.join(', ')}`)
+    }
+    // The file watcher sees the move too, and must not bring the block back
+    await window.waitForTimeout(1500)
+    if (await blockInStore()) throw new Error('The file watcher brought the deleted block back')
+    console.log('  ✅ PASS: Accept removes the block and moves its file to .trash')
+
+    await window.evaluate((previous) => window.plcTestContext.useProjectStore.setState({ projectPath: previous }), previousProjectPath)
+    fs.rmSync(trashProjectDir, { recursive: true, force: true })
+
+    console.log('\n===============================================================')
+    console.log(' SCENARIO 30: Stored API Keys Survive Saves at the Same Time')
+    console.log('===============================================================')
+    const secretsFile = path.join(auditUserData, 'secrets.json')
+    const concurrentResult = await window.evaluate(async () => {
+      const api = window.electronApi
+      await Promise.all([api.setSecret('geminiApiKey', 'audit-gemini-value'), api.setSecret('openaiApiKey', '')])
+      await Promise.all(
+        Array.from({ length: 20 }, (_, i) => api.setSecret(i % 2 ? 'openaiApiKey' : 'geminiApiKey', `audit-value-${i}`))
+      )
+      return { gemini: await api.getSecret('geminiApiKey'), openai: await api.getSecret('openaiApiKey') }
+    })
+    if (concurrentResult.gemini !== 'audit-value-18' || concurrentResult.openai !== 'audit-value-19') {
+      throw new Error(`Keys saved at the same time were lost: ${JSON.stringify(concurrentResult)}`)
+    }
+    JSON.parse(fs.readFileSync(secretsFile, 'utf-8'))
+    console.log('  ✅ PASS: Saves at the same time keep both keys and a valid file')
+
+    // The damaged shape this bug left behind on a real machine
+    fs.writeFileSync(secretsFile, '{}geminiApiKey":"damaged"}', 'utf-8')
+    const repairResult = await window.evaluate(async () => {
+      const api = window.electronApi
+      const afterDamage = await api.getSecret('geminiApiKey')
+      await api.setSecret('geminiApiKey', 'audit-after-damage')
+      return { afterDamage, saved: await api.getSecret('geminiApiKey') }
+    })
+    if (repairResult.afterDamage !== null || repairResult.saved !== 'audit-after-damage') {
+      throw new Error(`A damaged key file blocked saving: ${JSON.stringify(repairResult)}`)
+    }
+    await window.evaluate(() => window.electronApi.setSecret('geminiApiKey', ''))
+    await window.evaluate(() => window.electronApi.setSecret('openaiApiKey', ''))
+    console.log('  ✅ PASS: A damaged key file no longer blocks saving a key again')
 
     auditResults.passed = true
     const reportPath = path.join(artifactsDir, 'gui_audit_report.json')

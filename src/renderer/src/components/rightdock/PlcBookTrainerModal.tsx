@@ -20,43 +20,33 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
   const handleExtractAndSave = () => {
     const trimmed = inputText.trim()
     if (!trimmed) {
-      setNotification('Input text cannot be empty. Paste curriculum notes or rules.')
+      setNotification('Write or paste a note first.')
       return
     }
 
     // Derive rule name if not manually specified
     const derivedName =
       ruleName.trim() ||
-      `MEB_Rule_${category.toUpperCase()}_${Date.now().toString().slice(-4)}`
+      `Note_${category.toUpperCase()}_${Date.now().toString().slice(-4)}`
 
-    // Create persistent RAG rule
     const newItem = ragEngine.saveStandardBlock({
       name: derivedName,
       category,
-      description: trimmed.slice(0, 240) + (trimmed.length > 240 ? '...' : ''),
+      description: trimmed,
       blockType: 'LAD',
-      contentJson: JSON.stringify({
-        title: derivedName,
-        source: 'MEB Automation Textbook Curriculum',
-        notes: trimmed,
-        rules: [
-          'Strict ban on dummy %M helper coils for timers/counters',
-          'Use native sub-bit addressing (e.g. T1.Q, C1.QU)',
-          'Canonical seal-in ladder topology'
-        ]
-      })
+      contentJson: ''
     })
 
     setStandards(ragEngine.getStandards())
     setInputText('')
     setRuleName('')
-    setNotification(`Successfully extracted and persisted rule "${newItem.name}" to AI memory.`)
+    setNotification(`Saved "${newItem.name}". The agent reads it when a request matches.`)
   }
 
   const handleDeleteRule = (id: string) => {
     ragEngine.removeStandard(id)
     setStandards(ragEngine.getStandards())
-    setNotification('Standard rule removed from AI memory.')
+    setNotification('Note removed.')
   }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -68,7 +58,7 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
       const content = event.target?.result as string
       if (content) {
         setInputText(content)
-        setNotification(`Loaded ${file.name} (${content.length} characters) into extractor.`)
+        setNotification(`Loaded ${file.name} (${content.length} characters).`)
       }
     }
     reader.readAsText(file)
@@ -88,10 +78,10 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
             </div>
             <div>
               <span className="font-mono font-bold text-industrial-100 text-xs tracking-wider uppercase">
-                MEB Automation Curriculum & RAG Rule Trainer
+                Circuit Patterns & Your Notes
               </span>
               <span className="text-[10px] text-industrial-400 block font-mono">
-                Persistent S7-1200 Knowledge Base & AST Rule Extractor
+                Patterns are tested on this simulator only. Your notes are not tested.
               </span>
             </div>
           </div>
@@ -123,12 +113,12 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
 
         {/* Content Body */}
         <div className="p-4 overflow-y-auto space-y-4 flex-1">
-          {/* Section 1: Textbook Input & Rule Extractor */}
+          {/* Section 1: The user's notes */}
           <div className="p-3 bg-[#13151a] border border-[#27272a] space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-mono font-bold text-amber-400 uppercase tracking-wide flex items-center gap-1.5">
                 <PlusCircle className="w-3.5 h-3.5" />
-                Extract Rules From MEB Textbook / Curriculum Notes
+                Add a Note
               </span>
               <label className="cursor-pointer text-[10px] font-mono text-cyan-400 hover:text-cyan-300 flex items-center gap-1">
                 <Upload className="w-3 h-3" />
@@ -145,20 +135,20 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="text-[10px] font-mono text-industrial-400 block mb-1">
-                  Rule Name / Identifier (Optional)
+                  Name (Optional)
                 </label>
                 <input
                   data-testid="rag-rule-name-input"
                   type="text"
                   value={ruleName}
                   onChange={(e) => setRuleName(e.target.value)}
-                  placeholder="e.g. MEB_Ch3_StarDelta_Timer_Rule"
+                  placeholder="e.g. Plant_Wiring_Rules"
                   className="w-full h-7 px-2 bg-[#0a0b0d] border border-[#27272a] focus:border-amber-500 text-industrial-100 font-mono text-xs outline-none rounded-none"
                 />
               </div>
               <div>
                 <label className="text-[10px] font-mono text-industrial-400 block mb-1">
-                  Rule Category
+                  Category
                 </label>
                 <select
                   value={category}
@@ -178,14 +168,14 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
 
             <div>
               <label className="text-[10px] font-mono text-industrial-400 block mb-1">
-                Textbook Content / Operational Standard
+                Note
               </label>
               <textarea
                 data-testid="rag-book-input"
                 rows={4}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder="Paste MEB Automation textbook paragraphs, syllabus rules, or standard operating procedures here (e.g. Chapter 3: Motor start-stop latch with TON timer auto-stop using T1.Q done bit without %M helper coils)..."
+                placeholder="How your plant works: wiring conventions, naming rules, procedures. The agent gets this text as you write it, and only the first 1500 characters..."
                 className="w-full p-2 bg-[#0a0b0d] border border-[#27272a] focus:border-amber-500 text-industrial-100 font-mono text-xs outline-none resize-none rounded-none"
               />
             </div>
@@ -197,19 +187,16 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
                 className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 transition-colors rounded-none"
               >
                 <BookOpen className="w-3.5 h-3.5" />
-                Extract PLC Rules & Add to AI Memory
+                Save Note
               </button>
             </div>
           </div>
 
-          {/* Section 2: Active Standards in Persistent Memory */}
+          {/* Section 2: Patterns and notes */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-mono font-bold text-industrial-300 uppercase tracking-wider">
-                Active Rules in Persistent Memory ({standards.length})
-              </span>
-              <span className="text-[10px] font-mono text-industrial-500">
-                Layer 3 RAG Knowledge Base
+                Patterns and Notes ({standards.length})
               </span>
             </div>
 
@@ -225,22 +212,27 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
                       <span className="px-1.5 py-0.5 bg-[#1f242d] text-amber-400 font-mono text-[9.5px] font-bold uppercase tracking-wider border border-amber-500/20">
                         {item.category}
                       </span>
-                      <span className="font-mono font-bold text-industrial-100 text-xs">
+                      <span className="font-mono font-bold text-industrial-100 text-xs break-all">
                         {item.name}
                       </span>
+                      <span className="text-[9.5px] font-mono text-industrial-500 whitespace-nowrap">
+                        {item.pattern ? 'tested on simulator' : 'your note'}
+                      </span>
                     </div>
-                    <p className="text-[11px] font-mono text-industrial-400 leading-snug">
+                    <p className="text-[11px] font-mono text-industrial-400 leading-snug line-clamp-3 break-words">
                       {item.description}
                     </p>
                   </div>
-                  <button
-                    data-testid="btn-delete-rule"
-                    onClick={() => handleDeleteRule(item.id)}
-                    className="text-industrial-500 hover:text-red-400 p-1 hover:bg-[#1a1c22] transition-colors"
-                    title="Delete rule"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  {!item.pattern && (
+                    <button
+                      data-testid="btn-delete-rule"
+                      onClick={() => handleDeleteRule(item.id)}
+                      className="text-industrial-500 hover:text-red-400 p-1 hover:bg-[#1a1c22] transition-colors"
+                      title="Delete note"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -250,7 +242,7 @@ export const PlcBookTrainerModal: React.FC<PlcBookTrainerModalProps> = ({ isOpen
         {/* Footer */}
         <div className="h-9 px-4 bg-[#14161b] border-t border-[#27272a] flex items-center justify-between">
           <span className="text-[10px] font-mono text-industrial-500">
-            Rules automatically injected into prompt context for deterministic & LLM synthesis.
+            Entries that match a request are added to the prompt sent to the model.
           </span>
           <button
             onClick={onClose}

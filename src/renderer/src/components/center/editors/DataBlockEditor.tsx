@@ -55,28 +55,28 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
   }
 
   return (
-    <div className="h-full flex flex-col bg-industrial-900 select-none text-xs">
+    <div className="cq h-full flex flex-col bg-industrial-900 select-none text-xs overflow-hidden">
       {/* Header Bar */}
-      <div className="h-11 px-4 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <Database className="w-4 h-4 text-amber-400" />
-            <span className="font-semibold text-industrial-100 font-mono text-sm">{db.name}</span>
-            <span className="text-[11px] text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800 font-mono">
+      <div className="h-11 shrink-0 px-4 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between gap-3 whitespace-nowrap">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <Database className="w-4 h-4 text-amber-400 shrink-0" />
+            <span className="font-semibold text-industrial-100 font-mono text-sm truncate" title={db.name}>{db.name}</span>
+            <span className="under-720:hidden text-[11px] text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800 font-mono">
               DB{db.blockNumber} [{db.dbType}]
             </span>
           </div>
           {db.parentFbName && (
-            <span className="text-industrial-400 text-[11px]">
+            <span className="under-900:hidden text-industrial-400 text-[11px]">
               Linked to FB: <strong className="text-blue-300 font-mono">{db.parentFbName}</strong>
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           {/* Optimized Access Toggle Switch */}
-          <div className="flex items-center gap-2 px-3 py-1 bg-industrial-850 rounded border border-industrial-750">
-            <span className="text-industrial-300 font-medium text-[11px]">
+          <div className="flex items-center gap-2 px-2 py-1 bg-industrial-850 rounded border border-industrial-750" title="Optimized Block Access">
+            <span className="under-900:hidden text-industrial-300 font-medium text-[11px]">
               Optimized Block Access:
             </span>
             <button
@@ -98,7 +98,7 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
                   : 'bg-amber-950 text-amber-300 border border-amber-800'
               }`}
             >
-              {db.optimizedAccess ? 'Optimized' : 'Standard (Byte.Bit Offset)'}
+              {db.optimizedAccess ? 'Optimized' : 'Standard'}
             </span>
           </div>
 
@@ -114,7 +114,7 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
 
       {/* Explanatory banner for Standard Access */}
       {!db.optimizedAccess && (
-        <div className="px-3 py-1.5 bg-amber-950/30 border-b border-amber-800/60 flex items-center gap-2 text-amber-200 text-[11px]">
+        <div className="shrink-0 px-3 py-1.5 bg-amber-950/30 border-b border-amber-800/60 flex items-center gap-2 text-amber-200 text-[11px]">
           <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
           <span>
             <strong>Standard Access Active:</strong> Displaying Siemens S7 memory alignment offsets. Multi-byte types align to even byte boundaries, boolean bits pack into bytes 0..7.

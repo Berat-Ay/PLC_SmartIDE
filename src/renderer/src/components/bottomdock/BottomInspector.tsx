@@ -15,6 +15,9 @@ import { CrossReferenceTab } from './CrossReferenceTab'
 import { MemoryMapVisualizer } from './MemoryMapVisualizer'
 import { TraceOscilloscope } from '../simulation/TraceOscilloscope'
 
+// The top bar and the editor keep this much of the window, so a short window still shows the ladder
+const EDITOR_RESERVED_HEIGHT = 470
+
 export const BottomInspector: React.FC = () => {
   const {
     bottomDockCollapsed,
@@ -34,7 +37,8 @@ export const BottomInspector: React.FC = () => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return
       const delta = startYRef.current - e.clientY
-      const newHeight = Math.min(600, Math.max(120, startHeightRef.current + delta))
+      const limit = Math.min(600, window.innerHeight - EDITOR_RESERVED_HEIGHT)
+      const newHeight = Math.min(limit, Math.max(120, startHeightRef.current + delta))
       setBottomDockHeight(newHeight)
     }
 
@@ -55,7 +59,7 @@ export const BottomInspector: React.FC = () => {
 
   if (bottomDockCollapsed) {
     return (
-      <div className="h-7 bg-industrial-950 border-t border-industrial-800 flex items-center justify-between px-3 select-none text-xs">
+      <div className="h-7 shrink-0 bg-industrial-950 border-t border-industrial-800 flex items-center justify-between px-3 select-none text-xs">
         <div className="flex items-center gap-3">
           <button
             onClick={() => {
@@ -120,8 +124,8 @@ export const BottomInspector: React.FC = () => {
 
   return (
     <div
-      style={{ height: `${bottomDockHeight}px` }}
-      className="bg-industrial-900 border-t border-industrial-800 flex flex-col relative select-none"
+      style={{ height: `min(${bottomDockHeight}px, calc(100vh - ${EDITOR_RESERVED_HEIGHT}px))` }}
+      className="cq shrink-0 bg-industrial-900 border-t border-industrial-800 flex flex-col relative select-none"
     >
       {/* Resizer Handle */}
       <div

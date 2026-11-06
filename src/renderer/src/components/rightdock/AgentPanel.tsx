@@ -305,10 +305,10 @@ export const AgentPanel: React.FC = () => {
   return (
     <div
       data-testid="agent-panel"
-      className="w-full h-full bg-[#111215] border-l border-[#27272a] flex flex-col select-none text-xs"
+      className="cq w-full h-full bg-[#111215] border-l border-[#27272a] flex flex-col select-none text-xs overflow-hidden"
     >
       {/* Header */}
-      <div className="h-10 px-3 bg-[#0e0f12] border-b border-[#27272a] flex items-center justify-between">
+      <div className="h-10 shrink-0 px-3 bg-[#0e0f12] border-b border-[#27272a] flex items-center justify-between gap-2 whitespace-nowrap">
         <div className="flex items-center gap-2">
           <div className="w-5 h-5 bg-[#7c3aed] flex items-center justify-center text-white font-mono font-bold text-xs">
             <Bot className="w-3.5 h-3.5" />
@@ -326,16 +326,16 @@ export const AgentPanel: React.FC = () => {
             title="Black-Box Flight Recorder & Telemetry Logs"
           >
             <FileText className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="font-mono text-[10px] hidden sm:inline text-cyan-300">Logs</span>
+            <span className="under-600:hidden font-mono text-[10px] text-cyan-300">Logs</span>
           </button>
           <button
             data-testid="btn-open-book-trainer"
             onClick={() => setBookTrainerOpen(true)}
             className="flex items-center gap-1 text-industrial-400 hover:text-amber-400 p-1 hover:bg-[#1f2228] transition-colors rounded-none"
-            title="MEB Automation Rulebook & Curriculum Trainer"
+            title="Circuit patterns and your notes"
           >
             <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-            <span className="font-mono text-[10px] hidden sm:inline text-amber-300">Rules</span>
+            <span className="under-600:hidden font-mono text-[10px] text-amber-300">Rules</span>
           </button>
           <button
             onClick={() => setSettingsOpen(true)}
@@ -356,7 +356,7 @@ export const AgentPanel: React.FC = () => {
       </div>
 
       {/* Mode & Model Tier Switch */}
-      <div className="p-2.5 bg-[#14161b] border-b border-[#27272a] space-y-2">
+      <div className="p-2 bg-[#14161b] border-b border-[#27272a] space-y-1.5 shrink-0">
         {/* Auto-Apply vs Diff-View Approval Toggle */}
         <div className="flex items-center justify-between bg-[#0c0d10] p-1 border border-[#27272a] rounded-none">
           <button
@@ -387,9 +387,8 @@ export const AgentPanel: React.FC = () => {
         </div>
 
         {/* Model Tier Selector */}
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="text-industrial-400">Reasoning Tier:</span>
-          <div className="flex items-center gap-1">
+        <div className="flex items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-1 shrink-0">
             <button
               data-testid="agent-tier-fast-flash"
               onClick={() => setAgentTier('fast-flash')}
@@ -415,16 +414,14 @@ export const AgentPanel: React.FC = () => {
               <span>Deep Pro</span>
             </button>
           </div>
-        </div>
 
-        {/* Quick Model Selector Dropdown */}
-        <div className="flex items-center justify-between text-[11px] pt-0.5">
-          <span className="text-industrial-400">Model:</span>
+          {/* Quick Model Selector Dropdown */}
           <select
+            title="Model"
             data-testid="agent-model-quick-select"
             value={currentModelId}
             onChange={handleModelQuickChange}
-            className="bg-industrial-950 border border-industrial-700 text-industrial-200 text-[10px] font-mono px-2 py-0.5 rounded-none focus:outline-hidden max-w-[190px] truncate"
+            className="flex-1 min-w-0 bg-industrial-950 border border-industrial-700 text-industrial-200 text-[10px] font-mono px-1 py-0.5 rounded-none focus:outline-hidden truncate"
           >
             {availableModels.map((m) => (
               <option key={m.id} value={m.id}>
@@ -435,7 +432,7 @@ export const AgentPanel: React.FC = () => {
         </div>
 
         {/* Live Context Chips & Actions */}
-        <div className="flex flex-wrap items-center justify-between gap-1 pt-1">
+        <div className="flex flex-wrap items-center justify-between gap-1">
           <div className="flex flex-wrap gap-1">
             <span className="px-1.5 py-0.5 rounded-none text-[10px] font-mono bg-industrial-900 border border-industrial-800 text-industrial-300 flex items-center gap-1">
               <Cpu className="w-2.5 h-2.5 text-cyan-400" />
@@ -452,33 +449,31 @@ export const AgentPanel: React.FC = () => {
             )}
           </div>
 
-          <button
-            onClick={handleUndoTurn}
-            title="Undo last agent mutation turn"
-            className="flex items-center gap-1 px-1.5 py-0.5 rounded-none text-[10px] text-industrial-400 hover:text-white bg-industrial-850 hover:bg-industrial-800 border border-industrial-750 transition-colors"
-          >
-            <RotateCcw className="w-2.5 h-2.5" />
-            <span>Undo Turn</span>
-          </button>
-        </div>
-
-        {/* Save to RAG Standard Library Button */}
-        {activeTab && (activeTab.type === 'lad' || activeTab.type === 'scl') && (
-          <div className="pt-1">
-            <button
-              data-testid="btn-save-rag-standard"
-              onClick={handleSaveActiveBlockToRag}
-              className="w-full flex items-center justify-center gap-1.5 py-1 bg-amber-950/40 hover:bg-amber-950/80 border border-amber-800/60 text-amber-300 text-[10px] font-semibold rounded-none transition-colors"
-            >
-              <Star className="w-3 h-3 text-amber-400 fill-amber-400/20" />
-              <span>Save {activeTab.title} to AI Standard Library</span>
-            </button>
-            {savedStandardNotice && (
-              <div className="text-[10px] text-emerald-400 text-center font-mono mt-1">
-                {savedStandardNotice}
-              </div>
+          <div className="flex items-center gap-1">
+            {/* Save to RAG Standard Library Button */}
+            {activeTab && (activeTab.type === 'lad' || activeTab.type === 'scl') && (
+              <button
+                data-testid="btn-save-rag-standard"
+                onClick={handleSaveActiveBlockToRag}
+                title={`Save ${activeTab.title} to AI Standard Library`}
+                className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-950/40 hover:bg-amber-950/80 border border-amber-800/60 text-amber-300 text-[10px] font-semibold rounded-none transition-colors"
+              >
+                <Star className="w-2.5 h-2.5 text-amber-400 fill-amber-400/20" />
+                <span>Save</span>
+              </button>
             )}
+            <button
+              onClick={handleUndoTurn}
+              title="Undo last agent mutation turn"
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded-none text-[10px] text-industrial-400 hover:text-white bg-industrial-850 hover:bg-industrial-800 border border-industrial-750 transition-colors"
+            >
+              <RotateCcw className="w-2.5 h-2.5" />
+              <span>Undo Turn</span>
+            </button>
           </div>
+        </div>
+        {savedStandardNotice && (
+          <div className="text-[10px] text-emerald-400 text-center font-mono">{savedStandardNotice}</div>
         )}
       </div>
 
@@ -523,7 +518,7 @@ export const AgentPanel: React.FC = () => {
       )}
 
       {/* Chat Messages */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-3">
         {agentMessages.map((msg) => (
           <div
             key={msg.id}
@@ -541,7 +536,7 @@ export const AgentPanel: React.FC = () => {
             </div>
 
             <div
-              className={`p-2.5 max-w-[90%] text-xs leading-relaxed font-sans select-text border ${
+              className={`p-2.5 max-w-[90%] min-w-0 text-xs leading-relaxed font-sans select-text border [overflow-wrap:anywhere] ${
                 msg.sender === 'user'
                   ? 'bg-cyan-950/40 border-cyan-700/60 text-cyan-100'
                   : 'bg-[#0f1115] border-[#27272a] text-industrial-200'
@@ -553,9 +548,9 @@ export const AgentPanel: React.FC = () => {
                   data-testid="agent-error-card"
                   className="mt-2 p-2 bg-red-950/60 border border-red-800 text-red-200 font-mono text-[11px] space-y-1.5"
                 >
-                  <div className="flex items-center justify-between font-bold text-red-400 border-b border-red-900/60 pb-1">
-                    <div className="flex items-center gap-1.5">
-                      <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                  <div className="flex flex-wrap items-center justify-between gap-1 font-bold text-red-400 border-b border-red-900/60 pb-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
                       <span>SYNTHESIS FAILED — NO LADDER MODIFICATIONS</span>
                     </div>
                     <button
@@ -641,20 +636,20 @@ export const AgentPanel: React.FC = () => {
       </div>
 
       {/* Input Prompt Box */}
-      <form onSubmit={handleSubmit} className="p-2.5 bg-[#0e0f12] border-t border-[#27272a]">
-        <div className="relative">
+      <form onSubmit={handleSubmit} className="p-2.5 bg-[#0e0f12] border-t border-[#27272a] shrink-0">
+        <div className="flex items-stretch bg-[#14161b] border border-[#27272a] focus-within:border-purple-500">
           <input
             data-testid="agent-input-prompt"
             type="text"
             value={inputPrompt}
             onChange={(e) => setInputPrompt(e.target.value)}
             placeholder="Ask agent to synthesize, refactor, or debug..."
-            className="w-full bg-[#14161b] border border-[#27272a] rounded-none pl-3 pr-8 py-2 text-xs text-industrial-100 placeholder-industrial-500 focus:border-purple-500 focus:outline-hidden"
+            className="flex-1 min-w-0 bg-transparent rounded-none pl-3 py-2 text-xs text-industrial-100 placeholder-industrial-500 focus:outline-hidden"
           />
           <button
             data-testid="agent-submit-prompt"
             type="submit"
-            className="absolute right-1.5 top-1.5 p-1 text-purple-400 hover:text-purple-300 disabled:opacity-40 cursor-pointer rounded-none"
+            className="shrink-0 px-2 text-purple-400 hover:text-purple-300 disabled:opacity-40 cursor-pointer rounded-none"
             disabled={!inputPrompt.trim() || isExecuting}
           >
             <Send className="w-3.5 h-3.5" />

@@ -22,7 +22,7 @@ import { useTagStore } from '../../../stores/useTagStore'
 import { useUIStore } from '../../../stores/useUIStore'
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
 import { DoubleCoilConflict } from '../../../services/DoubleCoilDetector'
-import { LadderGridLayoutEngine } from '../../../services/layout/LadderGridLayoutEngine'
+import { LadderGridLayoutEngine, LADDER_MIN_WIDTH } from '../../../services/layout/LadderGridLayoutEngine'
 import { TagAutocompleteCombobox } from './TagAutocompleteCombobox'
 import { InstructionRibbon } from './InstructionRibbon'
 import {
@@ -170,18 +170,23 @@ interface DropCandidate {
   target: DropZoneTarget
 }
 
+const WIRE_Y = LadderGridLayoutEngine.TOP_PADDING
+// A selection toolbar starts right of the left power rail instead of covering it
+const TOOLBAR_MIN_X = 38
+const POWER_RAIL_X = 30
+
 function getNetworkDropCandidates(net: LadNetwork, netIdx: number): DropCandidate[] {
   const candidates: DropCandidate[] = []
   const nodes = net.nodes || []
 
   if (nodes.length === 0) {
-    candidates.push({ x: 550, y: 65, target: { netIdx, insertIndex: 0 } })
+    candidates.push({ x: LADDER_MIN_WIDTH / 2, y: WIRE_Y, target: { netIdx, insertIndex: 0 } })
     return candidates
   }
 
   const maxH = getMaxHorizontalNodes(net.nodes || [])
   const contentW = 48 + Math.max(1, maxH) * 175 + 220 + 60
-  const svgW = Math.max(1100, contentW)
+  const svgW = Math.max(LADDER_MIN_WIDTH, contentW)
   const targetCoilX = svgW - 60 - 70
   const rightRailX = svgW - 60
 
@@ -293,7 +298,7 @@ function getNetworkDropCandidates(net: LadNetwork, netIdx: number): DropCandidat
     })
   }
 
-  collectCandidates(nodes, 30, 65)
+  collectCandidates(nodes, 30, WIRE_Y)
   return candidates
 }
 
@@ -1600,7 +1605,15 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
       />
 
       {/* Networks Canvas Container: Joined Steel Rung Grid (Flush Stacked, No Floating Cards) */}
-      <div className="flex-1 overflow-auto bg-[#0c0d10] divide-y divide-[#27272a]">
+      <div
+        data-testid="ladder-networks-scroll"
+        className="flex-1 overflow-auto bg-[#0c0d10] divide-y divide-[#27272a]"
+        onClick={() => {
+          // Elements stop their own clicks, so only empty space gets here
+          onSelectNode(null)
+          setSelectedBranchTarget(null)
+        }}
+      >
         {block.networks.map((net: LadNetwork, netIdx: number) => {
           const isNetSelected = selectedNetworkNumber === net.networkNumber
 
@@ -1617,7 +1630,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
               >
                 {/* Left Steel Gutter */}
                 <div
-                  className={`w-14 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
+                  className={`w-12 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
                     isNetSelected
                       ? 'bg-[#151922] text-[#38bdf8] border-r-2 border-r-[#00a3a6]'
                       : 'bg-[#101216] text-industrial-400'
@@ -1629,7 +1642,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                 {/* Right Content */}
                 <div className="flex-1 flex flex-col min-w-0">
                   <div className="h-7 px-3 bg-[#16181d] border-b border-[#27272a] flex items-center justify-between gap-3 text-xs">
-                    <div className="flex items-center gap-2 flex-1 min-w-[280px]">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
                       <span className="font-mono text-[10px] text-blue-400 font-bold shrink-0">
                         [SCL]
                       </span>
@@ -1642,7 +1655,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                           onUpdateBlock({ ...block, networks: updated })
                         }}
                         placeholder={`Network ${net.networkNumber} title...`}
-                        className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-[200px]"
+                        className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-0"
                       />
                     </div>
 
@@ -1713,7 +1726,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
           const nodes = net.nodes || []
 
           // Deterministic 2D Cellular Matrix Layout Engine (Grid[Row][Col])
-          const layout = LadderGridLayoutEngine.layoutNetwork(net, netIdx, 1100)
+          const layout = LadderGridLayoutEngine.layoutNetwork(net, netIdx, LADDER_MIN_WIDTH)
           const svgWidth = layout.svgWidth
           const netSvgHeight = layout.svgHeight
           const coilX = layout.coilX
@@ -1735,7 +1748,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
             >
               {/* Left Steel Gutter Bar showing NW Number */}
               <div
-                className={`w-14 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
+                className={`w-12 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
                   isNetSelected
                     ? 'bg-[#151922] text-[#38bdf8] border-r-2 border-r-[#00a3a6]'
                     : 'bg-[#101216] text-industrial-400'
@@ -1748,7 +1761,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
               <div className="flex-1 flex flex-col min-w-0">
                 {/* Compact Full-Width Steel Header Strip */}
                 <div className="h-7 px-3 bg-[#16181d] border-b border-[#27272a] flex items-center justify-between gap-3 text-xs">
-                  <div className="flex items-center gap-2 flex-1 min-w-[280px]">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
                     <span className="font-mono text-[10px] text-industrial-400 shrink-0">
                       //
                     </span>
@@ -1761,7 +1774,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                         onUpdateBlock({ ...block, networks: updated })
                       }}
                       placeholder={`Network ${net.networkNumber} title...`}
-                      className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-[200px]"
+                      className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-0"
                     />
                   </div>
 
@@ -1840,7 +1853,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                       minWidth: `${Math.round(svgWidth * canvasZoom)}px`,
                       height: `${Math.round(netSvgHeight * canvasZoom)}px`
                     }}
-                    className="overflow-visible min-w-[950px]"
+                    className="overflow-visible"
                     onDragOver={(e) => handleSvgDragOver(e, netIdx)}
                     onDragLeave={(e) => handleSvgDragLeave(e, netIdx)}
                     onDrop={(e) => handleSvgDrop(e, netIdx)}
@@ -1860,25 +1873,15 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                       </filter>
                     </defs>
 
-                    {/* Left Power Rail */}
-                    <line
-                      x1="30"
-                      y1="0"
-                      x2="30"
-                      y2={netSvgHeight}
-                      stroke="#38bdf8"
-                      strokeWidth="5"
-                    />
-
                     {/* Rung Logic or Empty Wire Drop-zone */}
                     {nodes.length === 0 ? (
                       <g className="select-none">
                         {/* Clean horizontal wire */}
                         <line
                           x1="30"
-                          y1="65"
+                          y1={WIRE_Y}
                           x2={rightRailX}
-                          y2="65"
+                          y2={WIRE_Y}
                           stroke="#334155"
                           strokeWidth="2"
                         />
@@ -1886,16 +1889,16 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                         <line
                           data-testid="rung-terminal-bar"
                           x1={rightRailX}
-                          y1="51"
+                          y1={WIRE_Y - 14}
                           x2={rightRailX}
-                          y2="79"
+                          y2={WIRE_Y + 14}
                           stroke="#475569"
                           strokeWidth="3"
                         />
                         {/* Centered subtle drop hint text */}
                         <text
                           x={Math.round(svgWidth / 2)}
-                          y="46"
+                          y={WIRE_Y - 19}
                           fill="#64748b"
                           fontSize="11"
                           fontWeight="bold"
@@ -1926,7 +1929,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                           >
                             <rect
                               x={isEmptyHovered ? Math.round(svgWidth / 2) - 8 : Math.round(svgWidth / 2) - 5}
-                              y={isEmptyHovered ? 57 : 60}
+                              y={isEmptyHovered ? WIRE_Y - 8 : WIRE_Y - 5}
                               width={isEmptyHovered ? 16 : 10}
                               height={isEmptyHovered ? 16 : 10}
                               fill="#10b981"
@@ -1945,7 +1948,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                       renderNodes(
                         nodes,
                         30,
-                        65,
+                        WIRE_Y,
                         netIdx,
                         isMonitoringActive,
                         powerStates,
@@ -2030,6 +2033,16 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                         />
                       </g>
                     )}
+                    {/* Left Power Rail, on top of the wires that leave it */}
+                    <line
+                      data-testid="ladder-power-rail"
+                      x1={POWER_RAIL_X}
+                      y1="0"
+                      x2={POWER_RAIL_X}
+                      y2={netSvgHeight}
+                      stroke={isMonitoringActive ? '#10b981' : '#38bdf8'}
+                      strokeWidth="5"
+                    />
                   </svg>
                 </div>
               </div>
@@ -2203,7 +2216,7 @@ function renderNodes(
 
   const formatOperand = (op: string) => {
     if (!op) return ''
-    return op.length > 18 ? op.slice(0, 17) + '…' : op
+    return op.length > 19 ? op.slice(0, 18) + '…' : op
   }
 
   // Resolve symbolic name and physical address for any operand
@@ -2389,7 +2402,6 @@ function renderNodes(
             y2={y}
             stroke={incomingRlo ? '#10b981' : '#475569'}
             strokeWidth="2.5"
-            filter={incomingRlo ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* Contact vertical bars */}
@@ -2400,7 +2412,6 @@ function renderNodes(
             y2={y + 20}
             stroke={contactColor}
             strokeWidth="3.5"
-            filter={isMonitoring && isConducting && incomingRlo ? 'url(#emeraldGlow)' : undefined}
           />
           <line
             x1={midX + 16}
@@ -2409,7 +2420,6 @@ function renderNodes(
             y2={y + 20}
             stroke={contactColor}
             strokeWidth="3.5"
-            filter={isMonitoring && isConducting && incomingRlo ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* NC slash */}
@@ -2421,7 +2431,6 @@ function renderNodes(
               y2={y - 22}
               stroke={contactColor}
               strokeWidth="2.5"
-              filter={isMonitoring && isConducting && incomingRlo ? 'url(#emeraldGlow)' : undefined}
             />
           )}
 
@@ -2448,7 +2457,6 @@ function renderNodes(
             y2={y}
             stroke={outgoingRlo ? '#10b981' : '#475569'}
             strokeWidth="2.5"
-            filter={outgoingRlo ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* DUAL-ROW LABELS (Top: Symbolic Name in quotes / Bottom: Physical Address) */}
@@ -2563,7 +2571,7 @@ function renderNodes(
               <g
                 data-testid="contact-selection-toolbar"
                 className="select-none cursor-pointer"
-                transform={`translate(${midX - 100}, ${y - 84})`}
+                transform={`translate(${Math.max(TOOLBAR_MIN_X, midX - 100)}, ${y - 84})`}
               >
                 <rect
                   x="0"
@@ -2855,22 +2863,25 @@ function renderNodes(
       const dropY = 120
       const branchWidth = getNodeWidth(p)
       const lastBranchY = y + (p.branches.length - 1) * dropY
+      const startsAtRail = curX <= POWER_RAIL_X
       const incomingRlo = isMonitoring ? (state?.rloIn !== undefined ? state.rloIn : currentRlo) : false
       const isBranchPowered = isMonitoring && !!state?.powered
       currentRlo = isMonitoring ? isBranchPowered : false
 
       elements.push(
         <g key={p.id}>
-          {/* Vertical drop line on left connecting all tiers */}
-          <line
-            x1={curX}
-            y1={y}
-            x2={curX}
-            y2={lastBranchY}
-            stroke={incomingRlo ? '#10b981' : '#475569'}
-            strokeWidth="2.5"
-            filter={incomingRlo ? 'url(#emeraldGlow)' : undefined}
-          />
+          {/* Vertical drop line on left connecting all tiers. At the power rail the rail itself does this */}
+          {!startsAtRail && (
+            <line
+              data-testid="branch-fork-line"
+              x1={curX}
+              y1={y}
+              x2={curX}
+              y2={lastBranchY}
+              stroke={incomingRlo ? '#10b981' : '#475569'}
+              strokeWidth="2.5"
+            />
+          )}
 
           {/* Render all branch tiers */}
           {p.branches.map((bNodes, bIdx) => {
@@ -2889,7 +2900,6 @@ function renderNodes(
                   y2={branchY}
                   stroke={incomingRlo ? '#10b981' : '#475569'}
                   strokeWidth="2.5"
-                  filter={incomingRlo ? 'url(#emeraldGlow)' : undefined}
                 />
 
                 {/* Nodes or clickable drop-zone */}
@@ -3008,7 +3018,6 @@ function renderNodes(
                   y2={branchY}
                   stroke={isBranchPowered ? '#10b981' : '#475569'}
                   strokeWidth="2.5"
-                  filter={isBranchPowered ? 'url(#emeraldGlow)' : undefined}
                 />
               </g>
             )
@@ -3022,16 +3031,15 @@ function renderNodes(
             y2={lastBranchY}
             stroke={isBranchPowered ? '#10b981' : '#475569'}
             strokeWidth="2.5"
-            filter={isBranchPowered ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* Selection frame and Add Tier button */}
           {isSelected && (
             <g>
               <rect
-                x={curX - 4}
+                x={startsAtRail ? curX + 8 : curX - 4}
                 y={y - 16}
-                width={branchWidth + 8}
+                width={startsAtRail ? branchWidth - 4 : branchWidth + 8}
                 height={(p.branches.length - 1) * dropY + 32}
                 fill="none"
                 stroke="#38bdf8"
@@ -3121,7 +3129,6 @@ function renderNodes(
             y2={y}
             stroke={isPowered ? '#10b981' : '#475569'}
             strokeWidth="2.5"
-            filter={isPowered ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* Box Rect */}
@@ -3240,7 +3247,6 @@ function renderNodes(
             y2={y}
             stroke={isPowered ? '#10b981' : '#475569'}
             strokeWidth="2.5"
-            filter={isPowered ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* Main Box Rect */}
@@ -3271,9 +3277,9 @@ function renderNodes(
                 }}
               >
                 <rect
-                  x={boxX + boxWidth / 2 - 28}
+                  x={boxX + boxWidth / 2 - Math.max(56, instName.length * 6 + 10) / 2}
                   y={boxY - 15}
-                  width="56"
+                  width={Math.max(56, instName.length * 6 + 10)}
                   height="14"
                   fill="#0f172a"
                   stroke="#38bdf8"
@@ -3537,7 +3543,6 @@ function renderNodes(
                 y2={y}
                 stroke={isPowered ? '#10b981' : '#475569'}
                 strokeWidth="2.5"
-                filter={isPowered ? 'url(#emeraldGlow)' : undefined}
               />
               <line
                 data-testid="rung-terminal-bar"
@@ -3547,7 +3552,6 @@ function renderNodes(
                 y2={y + 14}
                 stroke={isPowered ? '#10b981' : '#64748b'}
                 strokeWidth="3"
-                filter={isPowered ? 'url(#emeraldGlow)' : undefined}
               />
             </>
           ) : (
@@ -3613,7 +3617,6 @@ function renderNodes(
           y2={y}
           stroke={incomingRlo ? '#10b981' : '#475569'}
           strokeWidth="2.5"
-          filter={incomingRlo ? 'url(#emeraldGlow)' : undefined}
         />
       )
 
@@ -3656,7 +3659,6 @@ function renderNodes(
             fill="none"
             stroke={isEnergized ? '#10b981' : isSelected ? '#38bdf8' : '#cbd5e1'}
             strokeWidth="3.5"
-            filter={isEnergized ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* Negated slash if negated coil */}
@@ -3668,7 +3670,6 @@ function renderNodes(
               y2={y - 13}
               stroke={isEnergized ? '#10b981' : isSelected ? '#38bdf8' : '#cbd5e1'}
               strokeWidth="2.5"
-              filter={isEnergized ? 'url(#emeraldGlow)' : undefined}
             />
           )}
 
@@ -3693,7 +3694,6 @@ function renderNodes(
             fill="none"
             stroke={isEnergized ? '#10b981' : isSelected ? '#38bdf8' : '#cbd5e1'}
             strokeWidth="3.5"
-            filter={isEnergized ? 'url(#emeraldGlow)' : undefined}
           />
 
           {/* Wire lead out from coil */}
@@ -3705,7 +3705,6 @@ function renderNodes(
               y2={y}
               stroke={isEnergized ? '#10b981' : '#475569'}
               strokeWidth="2.5"
-              filter={isEnergized ? 'url(#emeraldGlow)' : undefined}
             />
           ) : isLastNode ? (
             <>
@@ -3716,7 +3715,6 @@ function renderNodes(
                 y2={y}
                 stroke={isEnergized ? '#10b981' : '#475569'}
                 strokeWidth="2.5"
-                filter={isEnergized ? 'url(#emeraldGlow)' : undefined}
               />
               <line
                 data-testid="rung-terminal-bar"
@@ -3726,7 +3724,6 @@ function renderNodes(
                 y2={y + 14}
                 stroke={isEnergized ? '#10b981' : '#64748b'}
                 strokeWidth="3"
-                filter={isEnergized ? 'url(#emeraldGlow)' : undefined}
               />
             </>
           ) : (
@@ -3737,7 +3734,6 @@ function renderNodes(
               y2={y}
               stroke={isEnergized ? '#10b981' : '#475569'}
               strokeWidth="2.5"
-              filter={isEnergized ? 'url(#emeraldGlow)' : undefined}
             />
           )}
 
@@ -3884,7 +3880,7 @@ function renderNodes(
               <g
                 data-testid="coil-selection-toolbar"
                 className="select-none cursor-pointer"
-                transform={`translate(${midX - 90}, ${y - 84})`}
+                transform={`translate(${Math.max(TOOLBAR_MIN_X, midX - 90)}, ${y - 84})`}
               >
                 <rect
                   x="0"
@@ -4083,7 +4079,6 @@ function renderNodes(
           y2={y}
           stroke={isRungPowered ? '#10b981' : '#475569'}
           strokeWidth="2.5"
-          filter={isRungPowered ? 'url(#emeraldGlow)' : undefined}
         />
         <line
           data-testid="rung-terminal-bar"
@@ -4093,7 +4088,6 @@ function renderNodes(
           y2={y + 14}
           stroke={isRungPowered ? '#10b981' : '#64748b'}
           strokeWidth="3"
-          filter={isRungPowered ? 'url(#emeraldGlow)' : undefined}
         />
       </g>
     )

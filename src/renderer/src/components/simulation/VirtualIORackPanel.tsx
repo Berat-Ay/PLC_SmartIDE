@@ -90,10 +90,10 @@ export const VirtualIORackPanel: React.FC = () => {
   })
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-industrial-950 select-none overflow-hidden text-industrial-100">
+    <div className="cq flex-1 flex flex-col h-full bg-industrial-950 select-none overflow-hidden text-industrial-100">
       {/* Top Simulation Workbench Navigation Bar */}
-      <div className="h-10 bg-industrial-900 border-b border-industrial-800 flex items-center justify-between px-3 text-xs">
-        <div className="flex items-center gap-1.5 h-full">
+      <div className="h-10 shrink-0 bg-industrial-900 border-b border-industrial-800 flex items-center justify-between gap-2 px-3 text-xs overflow-hidden">
+        <div className="flex items-center gap-1 h-full min-w-0 overflow-x-auto scrollbar-none">
           <button
             onClick={() => setActiveSubTab('rack')}
             className={`h-full flex items-center gap-2 px-3 border-b-2 font-semibold transition-colors ${
@@ -102,8 +102,8 @@ export const VirtualIORackPanel: React.FC = () => {
                 : 'border-transparent text-industrial-400 hover:text-industrial-200'
             }`}
           >
-            <Cpu className="w-4 h-4 text-cyan-400" />
-            <span>Virtual I/O Rack & Faults</span>
+            <Cpu className="under-720:hidden w-4 h-4 text-cyan-400" />
+            <span title="Virtual I/O Rack & Faults">I/O Rack</span>
           </button>
 
           <button
@@ -114,8 +114,8 @@ export const VirtualIORackPanel: React.FC = () => {
                 : 'border-transparent text-industrial-400 hover:text-industrial-200'
             }`}
           >
-            <Gauge className="w-4 h-4 text-emerald-400" />
-            <span>2D Process Mimic (Chemical Tank)</span>
+            <Gauge className="under-720:hidden w-4 h-4 text-emerald-400" />
+            <span title="2D Process Mimic (Chemical Tank)">Mimic</span>
           </button>
 
           <button
@@ -126,8 +126,8 @@ export const VirtualIORackPanel: React.FC = () => {
                 : 'border-transparent text-industrial-400 hover:text-industrial-200'
             }`}
           >
-            <Code className="w-4 h-4 text-purple-400" />
-            <span>Plant Scenario Script (.sim.js)</span>
+            <Code className="under-720:hidden w-4 h-4 text-purple-400" />
+            <span title="Plant Scenario Script (.sim.js)">Scenario</span>
           </button>
 
           <button
@@ -138,15 +138,16 @@ export const VirtualIORackPanel: React.FC = () => {
                 : 'border-transparent text-industrial-400 hover:text-industrial-200'
             }`}
           >
-            <Activity className="w-4 h-4 text-amber-400" />
-            <span>Trace Oscilloscope</span>
+            <Activity className="under-720:hidden w-4 h-4 text-amber-400" />
+            <span title="Trace Oscilloscope">Trace</span>
           </button>
         </div>
 
         {/* Global Closed-Loop Toggle */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={() => setClosedLoopActive(!closedLoopActive)}
+            title="Closed-Loop Physics"
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-none text-[11px] font-bold border transition-all ${
               closedLoopActive
                 ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
@@ -154,7 +155,10 @@ export const VirtualIORackPanel: React.FC = () => {
             }`}
           >
             <RotateCcw className={`w-3.5 h-3.5 ${closedLoopActive ? 'animate-spin' : ''}`} style={{ animationDuration: '6s' }} />
-            <span>Closed-Loop Physics: {closedLoopActive ? 'ACTIVE' : 'PAUSED'}</span>
+            <span>
+              <span className="under-720:hidden">Closed-Loop Physics: </span>
+              {closedLoopActive ? 'ACTIVE' : 'PAUSED'}
+            </span>
           </button>
         </div>
       </div>
@@ -166,7 +170,7 @@ export const VirtualIORackPanel: React.FC = () => {
           <div className="space-y-6 max-w-7xl mx-auto">
             {/* 1. Digital Inputs Module (%IB0..%IB1) */}
             <div className="bg-industrial-900 border border-industrial-800 rounded-none p-4 shadow-lg">
-              <div className="flex items-center justify-between pb-3 mb-3 border-b border-industrial-800">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pb-3 mb-3 border-b border-industrial-800">
                 <div className="flex items-center gap-2">
                   <div className="w-2.5 h-2.5 bg-cyan-400" />
                   <h3 className="font-semibold text-sm text-industrial-100">
@@ -178,11 +182,11 @@ export const VirtualIORackPanel: React.FC = () => {
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-3">
                 {diChannels.map((ch) => (
                   <div
                     key={ch.address}
-                    className={`p-2.5 rounded-none border transition-all flex flex-col justify-between h-32 ${
+                    className={`p-2.5 rounded-none border transition-all flex flex-col justify-between gap-2 ${
                       ch.isActive
                         ? 'bg-emerald-950/40 border-emerald-700/80 shadow-md shadow-emerald-950/50'
                         : 'bg-industrial-950 border-industrial-800'
@@ -199,12 +203,12 @@ export const VirtualIORackPanel: React.FC = () => {
                           }`}
                         />
                       </div>
-                      <div className="text-[11px] font-medium text-industrial-300 truncate" title={ch.symbol}>
+                      <div className="text-[11px] font-medium text-industrial-300 min-h-[2.2em] leading-tight [overflow-wrap:anywhere]" title={ch.symbol}>
                         {ch.symbol}
                       </div>
                     </div>
 
-                    <div className="space-y-1.5 mt-2">
+                    <div className="space-y-1.5">
                       {/* Toggle Latch */}
                       <button
                         onClick={() => setDigitalInput(ch.byte, ch.bit, !ch.isActive)}
@@ -234,7 +238,7 @@ export const VirtualIORackPanel: React.FC = () => {
 
             {/* 2. Digital Outputs Module (%QB0..%QB1) */}
             <div className="bg-industrial-900 border border-industrial-800 rounded-none p-4 shadow-lg">
-              <div className="flex items-center justify-between pb-3 mb-3 border-b border-industrial-800">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pb-3 mb-3 border-b border-industrial-800">
                 <div className="flex items-center gap-2">
                   <div className="w-2.5 h-2.5 bg-emerald-400" />
                   <h3 className="font-semibold text-sm text-industrial-100">
@@ -246,11 +250,11 @@ export const VirtualIORackPanel: React.FC = () => {
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-3">
                 {dqChannels.map((ch) => (
                   <div
                     key={ch.address}
-                    className={`p-2.5 rounded-none border transition-all flex flex-col justify-between h-24 ${
+                    className={`p-2.5 rounded-none border transition-all flex flex-col justify-between gap-2 ${
                       ch.isActive
                         ? 'bg-emerald-950/60 border-emerald-600 shadow-lg shadow-emerald-950/60'
                         : 'bg-industrial-950 border-industrial-800'
@@ -267,7 +271,7 @@ export const VirtualIORackPanel: React.FC = () => {
                           }`}
                         />
                       </div>
-                      <div className="text-[11px] font-medium text-industrial-300 truncate" title={ch.symbol}>
+                      <div className="text-[11px] font-medium text-industrial-300 min-h-[2.2em] leading-tight [overflow-wrap:anywhere]" title={ch.symbol}>
                         {ch.symbol}
                       </div>
                     </div>
@@ -446,8 +450,8 @@ export const VirtualIORackPanel: React.FC = () => {
         {/* SUB-TAB 2: 2D Plant Process Mimic */}
         {activeSubTab === 'mimic' && (
           <div className="space-y-6 max-w-6xl mx-auto">
-            <div className="bg-industrial-900 border border-industrial-800 rounded-none p-6 shadow-xl">
-              <div className="flex items-center justify-between pb-4 mb-4 border-b border-industrial-800">
+            <div className="bg-industrial-900 border border-industrial-800 rounded-none p-4 shadow-xl">
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-4 mb-4 border-b border-industrial-800">
                 <div>
                   <h3 className="font-bold text-base text-industrial-100 flex items-center gap-2">
                     <Gauge className="w-5 h-5 text-emerald-400" />
@@ -460,7 +464,7 @@ export const VirtualIORackPanel: React.FC = () => {
 
                 <div className="flex items-center gap-3">
                   <span
-                    className={`px-2.5 py-1 rounded-none text-xs font-mono font-bold ${
+                    className={`whitespace-nowrap px-2.5 py-1 rounded-none text-xs font-mono font-bold ${
                       closedLoopActive
                         ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
                         : 'bg-industrial-800 text-industrial-400'
@@ -472,10 +476,10 @@ export const VirtualIORackPanel: React.FC = () => {
               </div>
 
               {/* 2D SCADA SVG Visualizer */}
-              <div className="flex flex-col lg:flex-row gap-6 items-center justify-center p-6 bg-industrial-950 rounded-none border border-industrial-850">
+              <div className="flex flex-wrap gap-6 items-center justify-center p-4 bg-industrial-950 rounded-none border border-industrial-850">
                 {/* SVG Mimic Schematic */}
-                <div className="relative w-full max-w-lg h-96 flex items-center justify-center">
-                  <svg width="460" height="360" viewBox="0 0 460 360" className="overflow-visible">
+                <div className="relative flex-1 basis-[320px] min-w-0 max-w-lg">
+                  <svg viewBox="0 0 460 360" className="w-full h-auto overflow-visible">
                     {/* Tank Outer Shell */}
                     <rect
                       x="140"
@@ -612,7 +616,7 @@ export const VirtualIORackPanel: React.FC = () => {
                 </div>
 
                 {/* Right Process Stats & Drain Valve Slider */}
-                <div className="w-full lg:w-80 space-y-4">
+                <div className="flex-1 basis-[260px] min-w-0 max-w-sm space-y-4">
                   {/* Status Cards */}
                   <div className="p-3.5 rounded-none bg-industrial-900 border border-industrial-800 space-y-2 font-mono text-xs">
                     <div className="flex justify-between">

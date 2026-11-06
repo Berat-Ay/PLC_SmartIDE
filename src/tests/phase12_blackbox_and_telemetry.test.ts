@@ -170,47 +170,7 @@ async function testStrictBanOnHardcodedFallbacks() {
 
   testPass('Zero-fake-fallback verified: Gemini API failure returns honest error and logs telemetry without fake circuit injection')
 
-  // Restore provider to offline_local
-  router.updateConfig({
-    provider: 'offline_local',
-    geminiApiKey: ''
-  })
-}
-
-// 4. Parking Garage Priority in Offline Deterministic Engine
-async function testParkingGaragePriority() {
-  console.log('\n--- 4. Testing Parking Garage Priority in Offline Engine ---')
-
-  const demo = DemoProjectSeeder.createDemoProject()
-  useBlockStore.getState().setBlocks({
-    dataBlocks: demo.dataBlocks,
-    ladBlocks: demo.ladBlocks,
-    sclBlocks: demo.sclBlocks,
-    udts: demo.udts
-  })
-  useTagStore.getState().setTagTables(demo.tagTables)
-
-  const router = AiModelRouter.getInstance()
-  router.updateConfig({
-    provider: 'offline_local',
-    geminiApiKey: ''
-  })
-
-  const response = await router.executePrompt('10 araçlık otopark bariyer kontrol sistemi yap', 'fast-flash', 'auto-apply')
-
-  assert.strictEqual(response.isError, undefined, 'No error in offline canonical synthesis')
-  assert.ok(response.replyText.includes('Otopark') || response.replyText.includes('Parking'), 'Synthesized Parking Garage')
-
-  const ladBlocks = useBlockStore.getState().ladBlocks
-  const ob1 = ladBlocks.find((b) => b.number === 1 || b.name === 'OB1_Main') || ladBlocks[0]
-  assert.ok(ob1, 'OB1 exists')
-  assert.strictEqual(ob1.networks.length, 5, 'OB1 contains exactly 5 parking garage networks')
-
-  const tags = useTagStore.getState().tagTables[0]?.tags || []
-  assert.ok(tags.some((t) => t.name === 'Giris_Fotosel'), 'Tag table contains Giris_Fotosel')
-  assert.ok(tags.some((t) => t.name === 'Otopark_Dolu_Tabela'), 'Tag table contains Otopark_Dolu_Tabela')
-
-  testPass('Offline Deterministic Engine gives top priority to Parking Garage (CTUD, N_TRIG, TON, CMP)')
+  router.updateConfig({ geminiApiKey: '' })
 }
 
 // 5. Prompt Sanitizer & Model Priority Sorting
@@ -350,6 +310,15 @@ function testNormalizeAiGeneratedNetworks() {
 
 // 7. End-to-End Parking Garage Synthesis with Telemetry Verification
 async function testParkingGarageEndToEndTelemetry() {
+  const demo = DemoProjectSeeder.createDemoProject()
+  useBlockStore.getState().setBlocks({
+    dataBlocks: demo.dataBlocks,
+    ladBlocks: demo.ladBlocks,
+    sclBlocks: demo.sclBlocks,
+    udts: demo.udts
+  })
+  useTagStore.getState().setTagTables(demo.tagTables)
+
   console.log('\n--- 7. Testing End-to-End Parking Garage Synthesis with Telemetry Verification ---')
 
   const logger = BlackBoxLogger.getInstance()
@@ -487,7 +456,6 @@ async function runAll() {
   testBlackBoxLoggerCore()
   testResilientJsonBlockExtraction()
   await testStrictBanOnHardcodedFallbacks()
-  await testParkingGaragePriority()
   testPromptSanitizerAndModelSorting()
   testNormalizeAiGeneratedNetworks()
   await testParkingGarageEndToEndTelemetry()

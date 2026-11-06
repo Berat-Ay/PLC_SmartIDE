@@ -73,7 +73,7 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
                   Dual-Tier Router
                 </span>
               </h2>
-              <p className="text-[11px] text-industrial-400">Configure AI providers, reasoning models & offline zero-key engine</p>
+              <p className="text-[11px] text-industrial-400">Configure AI providers and reasoning models</p>
             </div>
           </div>
           <button
@@ -92,21 +92,7 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
               <Cpu className="w-3.5 h-3.5 text-cyan-400" />
               <span>AI Engine Provider</span>
             </label>
-            <div className="grid grid-cols-4 gap-2">
-              <button
-                data-testid="provider-btn-offline-local"
-                type="button"
-                onClick={() => setConfig({ ...config, provider: 'offline_local' })}
-                className={`p-2 border rounded-none text-left transition-all ${
-                  config.provider === 'offline_local'
-                    ? 'bg-purple-950/60 border-purple-500 text-purple-200 shadow-sm'
-                    : 'bg-industrial-950 border-industrial-800 text-industrial-400 hover:border-industrial-700'
-                }`}
-              >
-                <div className="font-bold text-[10px]">Offline S7</div>
-                <div className="text-[9px] opacity-75">Built-in Zero-Key</div>
-              </button>
-
+            <div className="grid grid-cols-3 gap-2">
               <button
                 data-testid="provider-btn-gemini"
                 type="button"
@@ -375,7 +361,7 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
           {/* Footer Actions */}
           <div className="pt-3 border-t border-industrial-800 flex items-center justify-between">
             <span className="text-[11px] text-industrial-500 italic">
-              Offline engine includes full S7 AST synthesis & self-healing without keys.
+              The agent needs an API key or a running Ollama server.
             </span>
             <div className="flex items-center gap-2">
               <button

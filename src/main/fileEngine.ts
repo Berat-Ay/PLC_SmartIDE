@@ -213,6 +213,38 @@ export class FileEngine {
   }
 
   /**
+   * Moves a deleted block, type or tag table to the project's .trash folder, so opening the project
+   * does not bring it back and a mistake can still be undone by hand. Returns false if the file never
+   * reached the disk.
+   */
+  public static async moveToTrash(projectDir: string, relativePath: string): Promise<boolean> {
+    const match = relativePath.replace(/\\/g, '/').replace(/^\/+/, '').match(/^(blocks|types|tags)\/([^/]+)$/)
+    if (!match) throw new Error(`'${relativePath}' cannot be moved to the trash`)
+    const fileName = assertPlainFileName(match[2])
+    const source = resolveInside(projectDir, `${match[1]}/${fileName}`)
+
+    const trashDir = resolveInside(projectDir, '.trash')
+    await fs.mkdir(trashDir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    for (let attempt = 0; ; attempt++) {
+      const suffix = attempt === 0 ? '' : `_${attempt}`
+      const target = path.join(trashDir, `${stamp}${suffix}_${match[1]}_${fileName}`)
+      const taken = await fs.access(target).then(
+        () => true,
+        () => false
+      )
+      if (taken) continue
+      try {
+        await fs.rename(source, target)
+        return true
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+        throw err
+      }
+    }
+  }
+
+  /**
    * Helper to parse an SCL file into an SclBlockDefinition
    */
   private static parseSclFile(fileName: string, rawContent: string): SclBlockDefinition {

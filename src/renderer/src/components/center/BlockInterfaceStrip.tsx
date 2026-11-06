@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -22,6 +22,8 @@ interface BlockInterfaceStripProps {
   blockInterface: BlockInterface
 }
 
+const SHORT_WINDOW_HEIGHT = 820
+
 type SectionKey = 'input' | 'output' | 'inOut' | 'static' | 'temp' | 'constant'
 
 export const BlockInterfaceStrip: React.FC<BlockInterfaceStripProps> = ({
@@ -37,7 +39,15 @@ export const BlockInterfaceStrip: React.FC<BlockInterfaceStripProps> = ({
   } = useBlockStore()
   const { markDirty } = useProjectStore()
 
-  const [collapsed, setCollapsed] = useState(false)
+  // A short window has no room for this table above the ladder
+  const [collapsed, setCollapsed] = useState(() => window.innerHeight < SHORT_WINDOW_HEIGHT)
+  useEffect(() => {
+    const collapseWhenShort = (): void => {
+      if (window.innerHeight < SHORT_WINDOW_HEIGHT) setCollapsed(true)
+    }
+    window.addEventListener('resize', collapseWhenShort)
+    return () => window.removeEventListener('resize', collapseWhenShort)
+  }, [])
   const [activeSection, setActiveSection] = useState<SectionKey>('input')
 
   const sections: Array<{
@@ -87,19 +97,19 @@ export const BlockInterfaceStrip: React.FC<BlockInterfaceStripProps> = ({
   }
 
   return (
-    <div className="bg-industrial-950 border-b border-industrial-800 select-none text-xs">
+    <div className="shrink-0 bg-industrial-950 border-b border-industrial-800 select-none text-xs">
       {/* Strip Toggle Bar */}
-      <div className="h-8 px-3 flex items-center justify-between bg-industrial-900 border-b border-industrial-800">
+      <div className="h-8 px-3 flex items-center justify-between gap-2 bg-industrial-900 border-b border-industrial-800 whitespace-nowrap">
         <div
           onClick={() => setCollapsed(!collapsed)}
-          className="flex items-center gap-2 cursor-pointer text-industrial-200 hover:text-white"
+          className="flex items-center gap-2 cursor-pointer text-industrial-200 hover:text-white min-w-0"
         >
           {collapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
           <TableProperties className="w-3.5 h-3.5 text-siemens-cyan" />
-          <span className="font-semibold text-industrial-100 uppercase tracking-wider text-[11px]">
+          <span className="truncate font-semibold text-industrial-100 uppercase tracking-wider text-[11px]">
             Block Variable Interface
           </span>
-          <span className="text-[10px] text-industrial-400">
+          <span className="under-720:hidden text-[10px] text-industrial-400">
             ({blockType} Interface Declarations)
           </span>
         </div>
@@ -107,7 +117,7 @@ export const BlockInterfaceStrip: React.FC<BlockInterfaceStripProps> = ({
         {!collapsed && (
           <button
             onClick={handleAddVar}
-            className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-white bg-siemens-cyan hover:bg-cyan-600 rounded transition-colors"
+            className="shrink-0 flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-white bg-siemens-cyan hover:bg-cyan-600 rounded transition-colors"
           >
             <Plus className="w-3 h-3" />
             <span>Add {activeSection}</span>
@@ -118,20 +128,20 @@ export const BlockInterfaceStrip: React.FC<BlockInterfaceStripProps> = ({
       {!collapsed && (
         <div className="flex flex-col">
           {/* Section Selector Tabs */}
-          <div className="flex items-center gap-1 px-3 py-1 bg-industrial-950 border-b border-industrial-800/80">
+          <div className="flex items-center gap-1 px-3 py-1 bg-industrial-950 border-b border-industrial-800/80 overflow-x-auto scrollbar-none">
             {sections
               .filter((s) => s.allowed)
               .map((s) => (
                 <button
                   key={s.key}
                   onClick={() => setActiveSection(s.key)}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
+                  className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
                     activeSection === s.key
                       ? 'bg-industrial-800 text-white font-medium border border-industrial-700'
                       : 'text-industrial-400 hover:text-industrial-200 hover:bg-industrial-900'
                   }`}
                 >
-                  {s.icon}
+                  <span className="under-600:hidden">{s.icon}</span>
                   <span>{s.label}</span>
                   <span className="text-[10px] text-industrial-500 font-mono">({s.vars.length})</span>
                 </button>
@@ -158,7 +168,7 @@ export const BlockInterfaceStrip: React.FC<BlockInterfaceStripProps> = ({
               <tbody className="divide-y divide-industrial-850 text-industrial-200">
                 {activeVars.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-3 text-center text-industrial-500 italic font-sans text-[11px] whitespace-nowrap">
+                    <td colSpan={8} className="py-3 px-3 text-left text-industrial-500 italic font-sans text-[11px] whitespace-nowrap">
                       No variables defined in VAR_{activeSection.toUpperCase()}. Click "+ Add {activeSection}" to create.
                     </td>
                   </tr>

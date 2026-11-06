@@ -83,6 +83,15 @@ export class SclInterpreter {
     this.edgeTriggerStates.clear()
   }
 
+  /** Keeps the current edge state aside and returns how to bring it back. */
+  public static saveEdgeStates(): () => void {
+    const edgeTriggerStates = this.edgeTriggerStates
+    this.edgeTriggerStates = new Map()
+    return () => {
+      this.edgeTriggerStates = edgeTriggerStates
+    }
+  }
+
   private static parseCached(sclCode: string): ParsedProgram {
     const cached = this.programCache.get(sclCode)
     if (cached) return cached

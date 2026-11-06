@@ -73,24 +73,19 @@ assert((analogScores.get('doc_analog') || 0) > 0.3, 'Analog doc should have stro
 console.log('✓ TF-IDF Cosine Similarity calculation & ranking verified.')
 
 // -----------------------------------------------------------------------------
-// 3. MEB Automation Golden Rulebook RAG Engine Retrieval
+// 3. Circuit pattern retrieval
 // -----------------------------------------------------------------------------
-console.log('\n--- 3. Testing RAG Knowledge Engine & MEB Rule Retrieval ---')
+console.log('\n--- 3. Testing RAG Knowledge Engine & Pattern Retrieval ---')
 
 const ragEngine = RagKnowledgeEngine.getInstance()
 const allStandards = ragEngine.getStandards()
 console.log(`Loaded ${allStandards.length} persistent standard rules in RAG Engine:`)
 allStandards.forEach((s, idx) => console.log(`  ${idx + 1}. [${s.category}] ${s.name}`))
 
-assert(allStandards.length >= 8, 'Should have at least 8 canonical MEB curriculum standards')
-assert(allStandards.some((s) => s.name === 'MEB_Motor_StartStop_SealIn'), 'Should contain MEB_Motor_StartStop_SealIn')
-assert(allStandards.some((s) => s.name === 'MEB_Timer_T1Q_Cutoff'), 'Should contain MEB_Timer_T1Q_Cutoff')
-assert(allStandards.some((s) => s.name === 'MEB_Star_Delta_Starter'), 'Should contain MEB_Star_Delta_Starter')
-assert(allStandards.some((s) => s.name === 'MEB_Forward_Reverse_Interlock'), 'Should contain MEB_Forward_Reverse_Interlock')
-assert(allStandards.some((s) => s.name === 'MEB_Sequential_Motor_Staging'), 'Should contain MEB_Sequential_Motor_Staging')
-assert(allStandards.some((s) => s.name === 'MEB_Two_Timer_Flasher'), 'Should contain MEB_Two_Timer_Flasher')
-assert(allStandards.some((s) => s.name === 'MEB_Counter_Packaging_Batch'), 'Should contain MEB_Counter_Packaging_Batch')
-assert(allStandards.some((s) => s.name === 'MEB_Analog_NormX_ScaleX'), 'Should contain MEB_Analog_NormX_ScaleX')
+assert(allStandards.length >= 8, 'Should have at least 8 patterns')
+for (const name of ['seal_in', 'auto_stop', 'star_delta', 'forward_reverse', 'staged_start', 'flasher', 'batch_counter', 'analog_threshold']) {
+  assert(allStandards.some((s) => s.name === name), `Should contain ${name}`)
+}
 
 // Test 3a: Timer Auto-Stop Motor Query
 const timerQueryResults = ragEngine.retrieveTopKRules('10 saniye sonra otomatik duran mühürlemeli motor devresi', 4)
@@ -98,8 +93,8 @@ console.log('\nTop 4 Rules for Timer Motor Query:')
 timerQueryResults.forEach((r) => console.log(`  Rank ${r.relevanceRank}: ${r.item.name} (Score: ${r.score})`))
 const topRuleNames = timerQueryResults.map((r) => r.item.name)
 assert(
-  topRuleNames.includes('MEB_Timer_T1Q_Cutoff') || topRuleNames.includes('MEB_Motor_StartStop_SealIn'),
-  'Timer motor query must retrieve MEB_Timer_T1Q_Cutoff or MEB_Motor_StartStop_SealIn'
+  topRuleNames.includes('auto_stop') || topRuleNames.includes('seal_in'),
+  'Timer motor query must retrieve auto_stop or seal_in'
 )
 
 // Test 3b: Star-Delta Query
@@ -107,8 +102,8 @@ const starDeltaResults = ragEngine.retrieveTopKRules('yıldız üçgen yol verme
 console.log('\nTop 4 Rules for Star-Delta Query:')
 starDeltaResults.forEach((r) => console.log(`  Rank ${r.relevanceRank}: ${r.item.name} (Score: ${r.score})`))
 assert(
-  starDeltaResults[0].item.name === 'MEB_Star_Delta_Starter',
-  'Star-delta query must rank MEB_Star_Delta_Starter first'
+  starDeltaResults[0].item.name === 'star_delta',
+  'Star-delta query must rank star_delta first'
 )
 
 // Test 3c: Forward-Reverse Interlock Query
@@ -116,20 +111,20 @@ const fwdRevResults = ragEngine.retrieveTopKRules('ileri geri motor devresi elek
 console.log('\nTop 4 Rules for Forward-Reverse Query:')
 fwdRevResults.forEach((r) => console.log(`  Rank ${r.relevanceRank}: ${r.item.name} (Score: ${r.score})`))
 assert(
-  fwdRevResults[0].item.name === 'MEB_Forward_Reverse_Interlock',
-  'Forward-reverse query must rank MEB_Forward_Reverse_Interlock first'
+  fwdRevResults[0].item.name === 'forward_reverse',
+  'Forward-reverse query must rank forward_reverse first'
 )
 
 // Test 3d: Format Prompt Injection
 const promptSection = ragEngine.formatRetrievedRulesForPrompt(timerQueryResults)
-assert(promptSection.includes('[RETRIEVED MEB RAG RULES & DSL EXAMPLES]'), 'Must include RAG section open tag')
-assert(promptSection.includes('[/RETRIEVED MEB RAG RULES & DSL EXAMPLES]'), 'Must include RAG section close tag')
-assert(promptSection.includes('DSL Reference:'), 'Must include DSL reference snippets')
+assert(promptSection.includes('[RELEVANT PATTERNS AND NOTES]'), 'Must include RAG section open tag')
+assert(promptSection.includes('[/RELEVANT PATTERNS AND NOTES]'), 'Must include RAG section close tag')
+assert(promptSection.includes('Circuit:'), 'Must include DSL reference snippets')
 console.log('✓ RAG prompt injection block successfully generated.')
 
 // Test 3e: User Textbook Rule Ingestion & Re-indexing
 const newCustomRule = ragEngine.saveStandardBlock({
-  name: 'MEB_Custom_Conveyor_Jam_Detector',
+  name: 'Custom_Conveyor_Jam_Detector',
   category: 'safety',
   description: 'Proximity sensor jam timer: if sensor remains HIGH for over 3 seconds, stop conveyor and activate horn.',
   blockType: 'LAD',
@@ -140,7 +135,7 @@ assert(newCustomRule.id.startsWith('std_'), 'New rule must have std_ prefix')
 const jamQueryResults = ragEngine.retrieveTopKRules('conveyor jam sensor 3 seconds stop horn', 4)
 console.log('\nTop Rule for Jam Query:', jamQueryResults[0]?.item.name)
 assert(
-  jamQueryResults[0]?.item.name === 'MEB_Custom_Conveyor_Jam_Detector',
+  jamQueryResults[0]?.item.name === 'Custom_Conveyor_Jam_Detector',
   'Newly trained custom rule must be immediately indexed and retrievable'
 )
 
@@ -221,12 +216,34 @@ console.log('✓ Ollama model auto-discovery parser verified.')
 ;(globalThis as any).fetch = originalFetch
 
 // Test Prompt Execution Attaches RAG Rules
-router.updateConfig({ provider: 'offline_local' })
+router.updateConfig({ provider: 'gemini', geminiApiKey: 'test-key' })
+;(globalThis as any).fetch = async () =>
+  new Response(
+    JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: JSON.stringify({
+                  explanation: 'Motor',
+                  dsl: 'TAG Motor_Run %Q0.0 BOOL "Motor"\nNW 1 "Motor": SERIES( NO(Motor_Run), COIL(Motor_Run) )'
+                })
+              }
+            ]
+          }
+        }
+      ]
+    }),
+    { status: 200 }
+  )
 const execResponse = await router.executePrompt(
   '10 saniye sonra duran mühürlemeli motor devresi',
   'fast-flash',
   'auto-apply'
 )
+;(globalThis as any).fetch = originalFetch
+router.updateConfig({ geminiApiKey: '' })
 
 console.log('\nAgent Execution Reply Text Length:', execResponse.replyText.length)
 console.log('Agent Execution RAG Rules Consulted:', execResponse.ragRulesConsulted)
@@ -234,9 +251,9 @@ console.log('Agent Execution RAG Rules Consulted:', execResponse.ragRulesConsult
 assert(Array.isArray(execResponse.ragRulesConsulted), 'Response must have ragRulesConsulted array')
 assert(execResponse.ragRulesConsulted.length > 0, 'Response must have consulted at least 1 RAG rule')
 assert(
-  execResponse.ragRulesConsulted.includes('MEB_Timer_T1Q_Cutoff') ||
-    execResponse.ragRulesConsulted.includes('MEB_Motor_StartStop_SealIn'),
-  'Consulted rules must include MEB_Timer_T1Q_Cutoff or MEB_Motor_StartStop_SealIn'
+  execResponse.ragRulesConsulted.includes('auto_stop') ||
+    execResponse.ragRulesConsulted.includes('seal_in'),
+  'Consulted rules must include auto_stop or seal_in'
 )
 console.log('✓ Agent prompt execution with Semantic RAG Consultation Badge verified.')
 

@@ -65,6 +65,22 @@ export const TraceOscilloscope: React.FC = () => {
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
+  // The drawing buffer follows the element's size, or the plot and its labels get stretched and blurred
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return undefined
+    const fit = (): void => {
+      if (canvas.clientWidth > 0 && canvas.clientHeight > 0) {
+        canvas.width = canvas.clientWidth
+        canvas.height = canvas.clientHeight
+      }
+    }
+    fit()
+    const observer = new ResizeObserver(fit)
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [])
+
   // Listen for runtime cyclic ticks and push samples
   useEffect(() => {
     if (!currentSnapshot || triggerState === 'STOPPED') return
@@ -364,9 +380,9 @@ export const TraceOscilloscope: React.FC = () => {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-industrial-950 select-none overflow-hidden text-industrial-100">
+    <div className="cq flex-1 flex flex-col h-full bg-industrial-950 select-none overflow-hidden text-industrial-100">
       {/* Top Scope Toolbar */}
-      <div className="px-3 py-2 bg-industrial-900 border-b border-industrial-800 flex items-center justify-between gap-3 text-xs flex-wrap">
+      <div className="shrink-0 px-3 py-1 bg-industrial-900 border-b border-industrial-800 flex items-center justify-between gap-x-3 gap-y-2 text-xs flex-wrap whitespace-nowrap">
         {/* Run/Arm/Stop buttons */}
         <div className="flex items-center gap-1.5">
           {triggerState === 'RUNNING' || triggerState === 'ARMED' ? (
@@ -478,7 +494,7 @@ export const TraceOscilloscope: React.FC = () => {
       </div>
 
       {/* Main Canvas Plotter */}
-      <div className="flex-1 relative overflow-hidden flex flex-col">
+      <div className="flex-1 min-h-0 relative overflow-hidden">
         <canvas
           ref={canvasRef}
           width={1000}
@@ -487,22 +503,22 @@ export const TraceOscilloscope: React.FC = () => {
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
-          className="w-full h-full cursor-crosshair block"
+          className="absolute inset-0 w-full h-full cursor-crosshair block"
         />
       </div>
 
       {/* Bottom Cursors HUD & Channel Legend */}
-      <div className="px-3 py-2 bg-industrial-900 border-t border-industrial-800 flex items-center justify-between text-xs font-mono">
+      <div className="shrink-0 px-3 py-1 bg-industrial-900 border-t border-industrial-800 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs font-mono whitespace-nowrap">
         {/* Cursor Δt and Frequency */}
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
           <div className="flex items-center gap-1.5 text-cyan-400">
             <span className="w-2.5 h-2.5 rounded-full bg-cyan-400" />
-            <span>Cursor A: {(cursorA * (timebaseMs / 1000)).toFixed(2)}s</span>
+            <span><span className="under-1100:hidden">Cursor </span>A: {(cursorA * (timebaseMs / 1000)).toFixed(2)}s</span>
           </div>
 
           <div className="flex items-center gap-1.5 text-amber-400">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
-            <span>Cursor B: {(cursorB * (timebaseMs / 1000)).toFixed(2)}s</span>
+            <span><span className="under-1100:hidden">Cursor </span>B: {(cursorB * (timebaseMs / 1000)).toFixed(2)}s</span>
           </div>
 
           <div className="px-2 py-0.5 rounded bg-industrial-950 border border-industrial-800 text-industrial-200">
@@ -515,7 +531,7 @@ export const TraceOscilloscope: React.FC = () => {
         </div>
 
         {/* Channel Toggles & Values */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {channels.map((ch) => (
             <button
               key={ch.id}

@@ -15,7 +15,7 @@ import { MemoryOverlapEngine } from '../MemoryOverlapEngine'
 import { DoubleCoilDetector } from '../DoubleCoilDetector'
 import { SclInterpreter } from '../../runtime/SclInterpreter'
 import { StlListingGenerator, ProjectListingSummary } from './StlListingGenerator'
-import { runProgramChecks } from './ProgramConsistencyChecks'
+import { findIoBitsWithoutChannel, runProgramChecks } from './ProgramConsistencyChecks'
 import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
@@ -429,6 +429,20 @@ export class ProjectCompilerEngine {
         autoFixable: !!finding.blockFileName,
         fixAction: finding.blockFileName ? 'GO_TO_RUNG' : undefined,
         fixLabel: finding.blockFileName ? 'Go to Block' : undefined,
+        timestamp: Date.now()
+      })
+    })
+
+    findIoBitsWithoutChannel(effectiveTagTables, effectiveCpuConfig).forEach((finding, index) => {
+      diagnostics.push({
+        id: `warn_io_channel_${index}`,
+        severity: 'Warning',
+        code: finding.iecCode,
+        iecCode: finding.iecCode,
+        source: 'Program Check',
+        message: finding.message,
+        location: { tagName: finding.tagName },
+        autoFixable: false,
         timestamp: Date.now()
       })
     })

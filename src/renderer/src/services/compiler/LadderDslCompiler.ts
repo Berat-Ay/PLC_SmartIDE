@@ -38,7 +38,16 @@ export interface DslCompilationResult {
 
 export interface DslCompilerOptions {
   existingTags?: TagDefinition[]
+  /** Tags that go away with this program unless it uses them. Usable by name, but their addresses are free. */
+  releasedTags?: TagDefinition[]
+  /**
+   * Tags that stay when the program is replaced. A guessed address avoids them. A declared address is kept even
+   * on top of one, because moving it would change the wiring unasked: the project compile reports the overlap.
+   */
+  keptTags?: TagDefinition[]
   defaultBlockName?: string
+  /** Merker bytes the CPU writes itself, such as clock and system memory. Nothing is placed there. */
+  reservedMerkerBytes?: number[]
 }
 
 /**
@@ -126,10 +135,39 @@ export class LadderDslCompiler {
     const addressRewrites = new Map<string, string>() // oldAddr -> newAddr
     const tagNameToTag = new Map<string, TagDefinition>()
 
+    for (const byte of options?.reservedMerkerBytes || []) {
+      for (let bit = 0; bit < 8; bit++) usedBitCoordinates.add(`M:${byte}:${bit}`)
+    }
+
+    // An existing tag keeps its address when the program uses it without declaring it again.
+    // One declared again gives up its old address, so tags can swap addresses.
+    const redeclared = new Set(
+      Array.from(dslText.matchAll(/^\s*TAG\s+([A-Za-z0-9_]+)/gim)).map((m) => m[1].toLowerCase())
+    )
+    const knownTags = new Map<string, TagDefinition>()
+    for (const released of options?.releasedTags || []) {
+      if (released.address && !redeclared.has(released.name.toLowerCase())) {
+        knownTags.set(released.name.toLowerCase(), released)
+      }
+    }
+    const keptAddresses = new Set<string>()
+    for (const kept of options?.keptTags || []) {
+      const norm = normalizeS7Address(kept.address || '')
+      if (!norm.isValid) continue
+      const upper = norm.formatted.toUpperCase()
+      keptAddresses.add(upper)
+      usedAddresses.set(upper, kept.name)
+      if (norm.area && norm.byteAddress !== undefined) {
+        usedBitCoordinates.add(`${norm.area}:${norm.byteAddress}:${norm.bitAddress !== undefined ? norm.bitAddress : 0}`)
+      }
+      if (!redeclared.has(kept.name.toLowerCase())) knownTags.set(kept.name.toLowerCase(), kept)
+    }
+
     // Register existing tags if provided
     if (options?.existingTags) {
       for (const ex of options.existingTags) {
-        if (!ex.address) continue
+        if (!ex.address || redeclared.has(ex.name.toLowerCase())) continue
+        knownTags.set(ex.name.toLowerCase(), ex)
         const norm = normalizeS7Address(ex.address)
         if (norm.isValid) {
           const upper = norm.formatted.toUpperCase()
@@ -230,8 +268,9 @@ export class LadderDslCompiler {
           // Conflict-Free Address Allocation Check:
           const existingOccupant = usedAddresses.get(finalAddress)
           const isColliding =
-            (existingOccupant && existingOccupant.toLowerCase() !== name.toLowerCase()) ||
-            (coordKey && usedBitCoordinates.has(coordKey) && existingOccupant?.toLowerCase() !== name.toLowerCase())
+            !keptAddresses.has(finalAddress) &&
+            ((existingOccupant && existingOccupant.toLowerCase() !== name.toLowerCase()) ||
+              (coordKey && usedBitCoordinates.has(coordKey) && existingOccupant?.toLowerCase() !== name.toLowerCase()))
 
           if (isColliding) {
             // Allocate next free sequential bit in same area
@@ -310,6 +349,14 @@ export class LadderDslCompiler {
         return { name: existingByName.name, address: existingByName.address }
       }
 
+      const known = knownTags.get(lower)
+      if (known) {
+        const tag = { ...known }
+        declaredTags.push(tag)
+        tagNameToTag.set(lower, tag)
+        return { name: tag.name, address: tag.address }
+      }
+
       // Check if cleanOp is an S7 address (e.g. %I0.0, %Q0.0)
       const norm = normalizeS7Address(cleanOp)
       if (norm.isValid) {
@@ -344,6 +391,8 @@ export class LadderDslCompiler {
         lower.includes('button') ||
         lower.includes('sensor') ||
         lower.includes('switch') ||
+        lower.includes('buton') ||
+        lower.includes('anahtar') ||
         lower.startsWith('in_')
       ) {
         targetArea = 'I'
@@ -353,6 +402,12 @@ export class LadderDslCompiler {
         lower.includes('valve') ||
         lower.includes('led') ||
         lower.includes('lamp') ||
+        lower.includes('lamba') ||
+        lower.includes('isik') ||
+        lower.includes('ışık') ||
+        lower.includes('siren') ||
+        lower.includes('valf') ||
+        lower.includes('kontakt') ||
         lower.includes('coil') ||
         lower.startsWith('out_') ||
         defaultKind === 'coil'

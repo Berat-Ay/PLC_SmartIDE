@@ -14,9 +14,17 @@ async function readStore(): Promise<Record<string, string>> {
     return JSON.parse(await fs.readFile(storePath(), 'utf-8'))
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    // A damaged file must not block saving a key again for good
+    if (err instanceof SyntaxError) {
+      console.warn('secrets.json is damaged, so stored API keys must be entered again')
+      return {}
+    }
     throw err
   }
 }
+
+// Saves run one at a time. Two saves at once could lose a key or leave a damaged file.
+let saveQueue: Promise<unknown> = Promise.resolve()
 
 function assertAllowed(key: string): void {
   if (!ALLOWED_KEYS.has(key)) throw new Error(`Unknown secret '${key}'`)
@@ -34,9 +42,16 @@ export async function getSecret(key: string): Promise<string | null> {
 export async function setSecret(key: string, value: string): Promise<boolean> {
   assertAllowed(key)
   if (!safeStorage.isEncryptionAvailable()) return false
-  const store = await readStore()
-  if (value) store[key] = safeStorage.encryptString(value).toString('base64')
-  else delete store[key]
-  await fs.writeFile(storePath(), JSON.stringify(store), { encoding: 'utf-8', mode: 0o600 })
-  return true
+  const save = saveQueue.then(async () => {
+    const store = await readStore()
+    if (value) store[key] = safeStorage.encryptString(value).toString('base64')
+    else delete store[key]
+    // The rename means a reader or a crash never meets a half-written file
+    const tempPath = `${storePath()}.tmp`
+    await fs.writeFile(tempPath, JSON.stringify(store), { encoding: 'utf-8', mode: 0o600 })
+    await fs.rename(tempPath, storePath())
+    return true
+  })
+  saveQueue = save.catch(() => undefined)
+  return save
 }

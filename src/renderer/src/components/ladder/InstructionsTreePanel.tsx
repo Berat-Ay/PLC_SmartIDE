@@ -279,17 +279,17 @@ export const InstructionsTreePanel: React.FC = () => {
                       onClick={() => handleInsertClick(item)}
                       onContextMenu={(e) => handleContextMenu(e, item)}
                       title={`${item.title}\n${item.description}\n(Drag onto Ladder wire or double-click to insert, Right-click to Add to Favorites)`}
-                      className="px-3 py-1.5 flex items-center justify-between hover:bg-[#1a202c] cursor-grab active:cursor-grabbing group transition-colors select-none"
+                      className="relative px-3 py-1.5 flex items-center justify-between hover:bg-[#1a202c] cursor-grab active:cursor-grabbing group transition-colors select-none"
                     >
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className="font-mono text-xs font-bold text-cyan-300 w-16 shrink-0 truncate">
+                        <span className="font-mono text-xs font-bold text-cyan-300 w-24 shrink-0 truncate">
                           {item.name}
                         </span>
                         <span className="text-[11px] text-industrial-300 truncate">
                           {item.title}
                         </span>
                       </div>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1a202c]">
                         <button
                           onClick={(e) => {
                             e.stopPropagation()

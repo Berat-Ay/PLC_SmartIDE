@@ -38,6 +38,16 @@ export const TagAutocompleteCombobox: React.FC<TagAutocompleteComboboxProps> = (
     inputRef.current?.select()
   }, [])
 
+  // It floats above everything, so it must not outlive a click somewhere else
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const closeOnOutsideClick = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onClose()
+    }
+    window.addEventListener('mousedown', closeOnOutsideClick)
+    return () => window.removeEventListener('mousedown', closeOnOutsideClick)
+  }, [onClose])
+
   // Collect all available symbols
   const options: SymbolOption[] = []
 
@@ -170,11 +180,12 @@ export const TagAutocompleteCombobox: React.FC<TagAutocompleteComboboxProps> = (
 
   return (
     <div
+      ref={rootRef}
       data-testid="tag-autocomplete-combobox"
       style={{
         position: position ? 'fixed' : 'relative',
-        left: position ? `${position.x}px` : undefined,
-        top: position ? `${position.y}px` : undefined,
+        left: position ? `min(${position.x}px, calc(100vw - 296px))` : undefined,
+        top: position ? `min(${position.y}px, calc(100vh - 280px))` : undefined,
         zIndex: 50
       }}
       className="w-72 bg-industrial-950 border border-cyan-500 rounded-none shadow-2xl overflow-hidden text-xs font-mono"

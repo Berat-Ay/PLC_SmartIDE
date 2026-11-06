@@ -1,15 +1,20 @@
 /**
- * Rungline AI Model Router & Deterministic Industrial Synthesis Engine
- * Supports real cloud API providers (Gemini, OpenAI-compatible) and a zero-key
- * built-in offline industrial deterministic synthesis engine supporting Turkish and English.
+ * Rungline AI Model Router
+ * Sends prompts to a real model: Gemini, an OpenAI-compatible API or a local Ollama server.
+ * There is no built-in answer engine. Without a usable provider the agent reports an error.
  */
 
 import { PlcAgentTools, AgentToolCall, AgentToolResult } from './PlcAgentTools'
 import { useTagStore } from '../../stores/useTagStore'
+import { useHardwareStore } from '../../stores/useHardwareStore'
+import { useProjectStore } from '../../stores/useProjectStore'
+import { BehaviorTest, parseBehaviorTest, runBehaviorTest } from './CircuitBehaviorTest'
+import { TagDefinition } from '@shared/types/tags'
+import { ProjectLoadPayload } from '@shared/types/ipc'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useUIStore } from '../../stores/useUIStore'
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
-import { LadderDslCompiler } from '../compiler/LadderDslCompiler'
+import { LadderDslCompiler, DslCompilerOptions } from '../compiler/LadderDslCompiler'
 import { RagKnowledgeEngine } from './RagKnowledgeEngine'
 import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
 import {
@@ -30,7 +35,7 @@ import {
   ComparatorType
 } from '@shared/types/ladder'
 
-export type AiProvider = 'offline_local' | 'gemini' | 'ollama' | 'openai'
+export type AiProvider = 'gemini' | 'ollama' | 'openai'
 export type AiTier = 'fast-flash' | 'deep-pro'
 
 export interface DiscoveredModel {
@@ -81,6 +86,47 @@ export interface AiConfig {
   fastModel: string
   deepModel: string
   language: 'auto' | 'en' | 'tr'
+}
+
+const MAX_AGENT_ROUNDS = 6
+const READ_ONLY_TOOLS = new Set(['read_project_overview', 'read_block', 'read_pattern'])
+
+const LADDER_RULES = `LADDER RULES:
+1. Read a timer or counter through its instance: T1.Q, T1.ET, C1.QU, C1.QD, C1.CV. A timer or counter box ends its rung, and a coil that only copies its Q adds nothing. Use %M bits freely for real program state, such as a running flag or a sequence step.
+2. A timer whose own Q is in the path to its IN is TRUE for one scan only. Never use that to hold a lamp, a motor or a stage of a cycle. For a repeating cycle chain the timers and let the last one reset the first (pattern timer_ring).
+3. Drive each output coil from one network. If two networks write the same coil, the last one wins.
+4. FIELD WIRING: A contact tests the input bit, not the physical button. A stop button wired normally closed reads 1 at rest, so it needs an NO contact in ladder. Use an NC contact for it only when the button is wired normally open. If the wiring is not stated, assume normally closed and say so.
+5. Give different signals different addresses.
+6. A program does not replace hard-wired safety. Say so when a circuit has an emergency stop or contactors that must never close together.`
+// What the model may call. Hardware, plant scripts, undo and deleting stay with the user.
+const AGENT_TOOLS = new Set([
+  ...READ_ONLY_TOOLS,
+  'manage_plc_tags',
+  'create_or_update_udt',
+  'create_or_update_db',
+  'create_or_update_scl_block'
+])
+
+interface GeminiContent {
+  role: 'user' | 'model'
+  parts: Array<{ text: string }>
+}
+
+interface AgentModelReply {
+  behaviorTest?: BehaviorTest
+  explanation: string
+  toolCalls: AgentToolCall[]
+  circuit?: AiCircuitSynthesisPayload
+  problems: string[]
+  rawJson?: string
+}
+
+function hasEmptyNetwork(networks: AiCircuitSynthesisPayload['networks']): boolean {
+  return networks.some((n) => !n.isSclNetwork && (n.nodes || []).length === 0)
+}
+
+function signalAborted(err: unknown): boolean {
+  return (err as { name?: string })?.name === 'AbortError' || String(err).includes('cancelled')
 }
 
 export interface AgentExecutionResponse {
@@ -136,7 +182,7 @@ export function isStrictGeminiTextModel(id: string): boolean {
 }
 
 export const defaultAiConfig: AiConfig = {
-  provider: 'offline_local',
+  provider: 'gemini',
   geminiApiKey: '',
   openaiApiKey: '',
   openaiEndpoint: 'https://api.openai.com/v1',
@@ -480,12 +526,18 @@ export class AiModelRouter {
     this.saveConfig()
   }
 
+  // Null until stored keys are loaded. Saving earlier would erase them with the still empty values.
+  private savedSecrets: Record<'geminiApiKey' | 'openaiApiKey', string> | null = null
+
   private persistSecrets(): void {
     const api = typeof window !== 'undefined' ? window.electronApi : undefined
-    if (!api?.setSecret) return
+    if (!api?.setSecret || !this.savedSecrets) return
     const failed = (): void => console.warn('API key is kept for this session only: encrypted storage is unavailable')
     for (const key of ['geminiApiKey', 'openaiApiKey'] as const) {
-      api.setSecret(key, this.config[key] || '').then((stored) => {
+      const value = this.config[key] || ''
+      if (value === this.savedSecrets[key]) continue
+      this.savedSecrets[key] = value
+      api.setSecret(key, value).then((stored) => {
         if (!stored && this.config[key]) failed()
       }, failed)
     }
@@ -495,11 +547,16 @@ export class AiModelRouter {
   public async hydrateSecrets(): Promise<void> {
     const api = typeof window !== 'undefined' ? window.electronApi : undefined
     if (!api?.getSecret) return
-    const gemini = await api.getSecret('geminiApiKey')
-    const openai = await api.getSecret('openaiApiKey')
-    if (gemini && !this.config.geminiApiKey) this.config.geminiApiKey = gemini
-    if (openai && !this.config.openaiApiKey) this.config.openaiApiKey = openai
-    this.saveConfig()
+    const stored = { geminiApiKey: '', openaiApiKey: '' }
+    try {
+      stored.geminiApiKey = (await api.getSecret('geminiApiKey')) || ''
+      stored.openaiApiKey = (await api.getSecret('openaiApiKey')) || ''
+    } finally {
+      this.savedSecrets = stored
+      if (stored.geminiApiKey && !this.config.geminiApiKey) this.config.geminiApiKey = stored.geminiApiKey
+      if (stored.openaiApiKey && !this.config.openaiApiKey) this.config.openaiApiKey = stored.openaiApiKey
+      this.saveConfig()
+    }
   }
 
   private loadConfig(): AiConfig {
@@ -507,8 +564,10 @@ export class AiModelRouter {
       const saved = localStorage.getItem(STORAGE_KEY)
       if (saved) {
         const parsed = { ...defaultAiConfig, ...JSON.parse(saved) }
+        // Settings saved by older versions may name the removed offline engine
+        if (!parsed.provider || parsed.provider === 'offline_local') parsed.provider = 'gemini'
         // Sanitize selectedModelId and availableModels: purge retired 1.5 and invalid 3.8
-        if (parsed.provider === 'gemini' || !parsed.provider || parsed.provider === 'offline_local') {
+        if (parsed.provider === 'gemini') {
           if (
             !isStrictGeminiTextModel(parsed.selectedModelId) ||
             parsed.selectedModelId.includes('1.5') ||
@@ -738,9 +797,8 @@ export class AiModelRouter {
   }
 
   /**
-   * MEB Golden Rulebook AST Optimizer & Self-Critic
-   * Strips redundant %M dummy coils following timers/counters, rewires interlock contacts directly
-   * to native timer sub-bits (e.g. T1.Q), and purges redundant %M tags from project tag tables.
+   * Removes a plain %M coil that only copies a timer's or counter's Q, and reads the instance bit instead.
+   * Other coil types stay: a SET coil latches and a negated coil inverts, so they are not the same as Q.
    */
   public optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload): AiCircuitSynthesisPayload {
     if (!payload.networks || payload.networks.length === 0) return payload
@@ -756,11 +814,21 @@ export class AiModelRouter {
         const current = originalNodes[i]
         const next = originalNodes[i + 1]
 
-        if ((current.kind === 'timer' || current.kind === 'counter') && next && next.kind === 'coil') {
+        if (
+          (current.kind === 'timer' || current.kind === 'counter') &&
+          next?.kind === 'coil' &&
+          (next as LadderCoilNode).coilType === 'OUTPUT_COIL'
+        ) {
           const t = current as LadderTimerNode | LadderCounterNode
           const c = next as LadderCoilNode
+          const declared = (payload.tagsToUpsert || []).find((tag) => tag.name.toLowerCase() === c.operand.toLowerCase())
+          if (/^%?[IQ]/i.test(c.address || declared?.address || '')) {
+            newNodes.push(current)
+            continue
+          }
           const instName = t.instanceDb || (current.kind === 'timer' ? 'T1' : 'C1')
-          const nativeBit = current.kind === 'timer' ? `${instName}.Q` : `${instName}.QU`
+          const countsDown = current.kind === 'counter' && (current as LadderCounterNode).counterType === 'CTD'
+          const nativeBit = current.kind === 'timer' ? `${instName}.Q` : `${instName}.${countsDown ? 'QD' : 'QU'}`
 
           strippedCoilMap.set(c.operand.toLowerCase(), nativeBit)
           if (c.address) strippedCoilMap.set(c.address.toLowerCase(), nativeBit)
@@ -818,38 +886,10 @@ export class AiModelRouter {
       nodes: rewireContacts(net.nodes)
     }))
 
-    // 3. Filter out dummy %M tags from tagsToUpsert
-    const cleanedTags = (payload.tagsToUpsert || []).filter((tag) => {
-      const lowerName = tag.name.toLowerCase()
-      const lowerAddr = tag.address.toLowerCase()
-      if (strippedCoilMap.has(lowerName) || strippedCoilMap.has(lowerAddr)) {
-        return false
-      }
-      if (
-        lowerAddr.startsWith('%m') &&
-        (lowerName.includes('timer') || lowerName.includes('done') || lowerName.includes('aux_t'))
-      ) {
-        return false
-      }
-      return true
-    })
-
-    // Also remove any matching dummy %M tag from live tagStore
-    try {
-      const tagStore = useTagStore.getState()
-      tagStore.tagTables.forEach((tbl) => {
-        const toDelete = tbl.tags.filter(
-          (t) =>
-            strippedCoilMap.has(t.name.toLowerCase()) ||
-            strippedCoilMap.has(t.address.toLowerCase()) ||
-            (t.address.toLowerCase().startsWith('%m') &&
-              (t.name.toLowerCase().includes('timer') || t.name.toLowerCase().includes('done')))
-        )
-        toDelete.forEach((t) => tagStore.deleteTag(tbl.id, t.id))
-      })
-    } catch {
-      // outside react
-    }
+    // 3. Drop the tags of the coils removed above
+    const cleanedTags = (payload.tagsToUpsert || []).filter(
+      (tag) => !strippedCoilMap.has(tag.name.toLowerCase()) && !strippedCoilMap.has(tag.address.toLowerCase())
+    )
 
     return {
       ...payload,
@@ -912,7 +952,8 @@ export class AiModelRouter {
   public static sanitizeAndAllocateUniqueAddresses(
     tagsToUpsert: Array<{ name: string; dataType: 'BOOL' | 'INT' | 'DINT' | 'REAL' | 'TIME'; address: string; comment?: string }>,
     networks: LadderNetwork[] = [],
-    existingTags: Array<{ id: string; name: string; address: string; dataType: string }> = []
+    existingTags: Array<{ id: string; name: string; address: string; dataType: string }> = [],
+    reservedMerkerBytes: number[] = []
   ): {
     tags: Array<{ name: string; dataType: 'BOOL' | 'INT' | 'DINT' | 'REAL' | 'TIME'; address: string; comment?: string }>
     networks: LadderNetwork[]
@@ -920,6 +961,10 @@ export class AiModelRouter {
     const usedAddresses = new Map<string, string>() // normalizedAddr -> tagName
     const addressRewrites = new Map<string, string>() // oldNormalizedAddr -> newNormalizedAddr
     const nameToAddressMap = new Map<string, string>() // tagName.toLowerCase() -> newNormalizedAddr
+
+    for (const byte of reservedMerkerBytes) {
+      for (let bit = 0; bit < 8; bit++) usedAddresses.set(`%M${byte}.${bit}`, 'CPU system or clock memory')
+    }
 
     // Register existing tags that are not being replaced by name
     const newTagNames = new Set(tagsToUpsert.map((t) => t.name.trim().toLowerCase()))
@@ -1016,12 +1061,68 @@ export class AiModelRouter {
     }
   }
 
+  /** Merker bytes the configured CPU writes itself. */
+  private reservedMerkerBytes(): number[] {
+    const config = useHardwareStore.getState().config
+    const bytes: number[] = []
+    if (config?.clockMemory?.enabled) bytes.push(config.clockMemory.byteAddress)
+    if (config?.systemMemory?.enabled) bytes.push(config.systemMemory.byteAddress)
+    return bytes
+  }
+
+  /**
+   * Replacing OB1 removes the tags only OB1 used, so their addresses are free for the new program.
+   * A tag stays if it is in another table or anything outside OB1 mentions it, at any depth of a network or
+   * in SCL source. A false match only keeps a tag, while a missed one would break that block.
+   */
+  private tagsKeptWhenReplacingOb1(): TagDefinition[] {
+    const { tagTables } = useTagStore.getState()
+    const blocks = useBlockStore.getState()
+    const otherProgramText = [
+      JSON.stringify(blocks.ladBlocks.filter((b) => !(b.blockType === 'OB' && b.blockNumber === 1) && b.name !== 'OB1_Main')),
+      ...blocks.sclBlocks.map((b) => b.code)
+    ]
+      .join('\n')
+      .toLowerCase()
+    return tagTables.flatMap((table, index) =>
+      table.tags.filter(
+        (t) => index > 0 || otherProgramText.includes(t.name.toLowerCase()) || otherProgramText.includes(t.address.toLowerCase())
+      )
+    )
+  }
+
+  private dslOptions(operationMode: AiCircuitSynthesisPayload['operationMode'] = this.defaultCircuitMode()): DslCompilerOptions {
+    const allTags = useTagStore.getState().tagTables.flatMap((t) => t.tags)
+    const reservedMerkerBytes = this.reservedMerkerBytes()
+    if (operationMode !== 'replace_ob1_networks') return { existingTags: allTags, reservedMerkerBytes }
+    const keptTags = this.tagsKeptWhenReplacingOb1()
+    return { keptTags, releasedTags: allTags.filter((t) => !keptTags.includes(t)), reservedMerkerBytes }
+  }
+
+  /** Adds the JSON tag list to the DSL text as TAG lines. A tag already declared in the DSL wins. */
+  private dslWithDeclaredTags(dsl: string, tags: unknown): string {
+    if (!Array.isArray(tags)) return dsl
+    const inDsl = new Set(Array.from(dsl.matchAll(/^\s*TAG\s+(\S+)/gim)).map((m) => m[1].toLowerCase()))
+    const lines = tags
+      .filter(
+        (t) =>
+          typeof t?.name === 'string' &&
+          typeof t?.address === 'string' &&
+          t.address.trim() &&
+          /^[A-Za-z]*$/.test(String(t.dataType || '')) &&
+          !inDsl.has(t.name.toLowerCase())
+      )
+      .map((t) => `TAG ${t.name} ${t.address} ${t.dataType || 'BOOL'} "${String(t.comment || '').replace(/["\r\n]/g, ' ')}"`)
+    return [...lines, dsl].join('\n')
+  }
+
   /**
    * Applies the synthesized circuit payload into Tag Tables, LAD Block (OB1), and opens workspace tab
    */
   public applyCircuitPayload(
     payload: AiCircuitSynthesisPayload,
-    mode: 'auto-apply' | 'diff-view'
+    mode: 'auto-apply' | 'diff-view',
+    options: { trialRun?: boolean } = {}
   ): {
     summaryText: string
     stagedChangeset?: Array<{
@@ -1033,6 +1134,11 @@ export class AiModelRouter {
     }>
   } {
     const normalizedNetworks = normalizeAiGeneratedNetworks(payload.networks || [])
+    if (normalizedNetworks.length === 0 || hasEmptyNetwork(normalizedNetworks)) {
+      throw new Error('The model returned an empty network, so the project was not changed.')
+    }
+    if (mode === 'auto-apply' && !options.trialRun) PlcAgentTools.getInstance().captureSnapshot()
+    const tablesBefore = structuredClone(useTagStore.getState().tagTables)
     const effectivePayload = this.optimizeAndCleanGeneratedAst({
       ...payload,
       networks: normalizedNetworks
@@ -1042,7 +1148,8 @@ export class AiModelRouter {
     const sanitized = AiModelRouter.sanitizeAndAllocateUniqueAddresses(
       effectivePayload.tagsToUpsert || [],
       effectivePayload.networks || [],
-      existingLiveTags
+      existingLiveTags,
+      this.reservedMerkerBytes()
     )
     effectivePayload.tagsToUpsert = sanitized.tags
     effectivePayload.networks = sanitized.networks
@@ -1057,29 +1164,11 @@ export class AiModelRouter {
       // Prune orphaned tags if completely replacing OB1 networks to prevent collision duplicates (%Q0.0, %I0.0)
       if (effectivePayload.operationMode === 'replace_ob1_networks') {
         const newTagNames = new Set((effectivePayload.tagsToUpsert || []).map((t) => t.name.toLowerCase()))
-        const newTagAddrs = new Set((effectivePayload.tagsToUpsert || []).map((t) => t.address.toLowerCase()))
-
-        // Gather all other referenced operands/addresses in other LAD blocks
-        const otherReferencedOps = new Set<string>()
-        const allOtherBlocks = useBlockStore.getState().ladBlocks.filter((b) => b.blockNumber !== 1 && b.name !== 'OB1_Main')
-        for (const blk of allOtherBlocks) {
-          for (const net of blk.networks || []) {
-            for (const n of net.nodes || []) {
-              if ((n as unknown as { operand?: string }).operand) otherReferencedOps.add(String((n as unknown as { operand?: string }).operand).toLowerCase())
-              if ((n as unknown as { address?: string }).address) otherReferencedOps.add(String((n as unknown as { address?: string }).address).toLowerCase())
-            }
-          }
-        }
+        const kept = new Set(this.tagsKeptWhenReplacingOb1())
 
         const currentTable = tagStore.tagTables.find((t) => t.id === tableId)
         if (currentTable) {
-          const tagsToRemove = currentTable.tags.filter((t) => {
-            const nameLower = t.name.toLowerCase()
-            const addrLower = t.address.toLowerCase()
-            if (newTagNames.has(nameLower) || newTagAddrs.has(addrLower)) return false
-            if (otherReferencedOps.has(nameLower) || otherReferencedOps.has(addrLower)) return false
-            return true
-          })
+          const tagsToRemove = currentTable.tags.filter((t) => !newTagNames.has(t.name.toLowerCase()) && !kept.has(t))
           for (const t of tagsToRemove) {
             tagStore.deleteTag(tableId, t.id)
           }
@@ -1126,6 +1215,24 @@ export class AiModelRouter {
       afterContent: string
     }> | undefined = undefined
 
+    // Diff-View changes nothing until it is approved, so tag edits become staged files too
+    const stagedTags: NonNullable<AgentExecutionResponse['stagedChangeset']> = []
+    if (mode === 'diff-view') {
+      const tablesAfter = useTagStore.getState().tagTables
+      for (const before of tablesBefore) {
+        const after = tablesAfter.find((t) => t.id === before.id)
+        if (!after || JSON.stringify(before) === JSON.stringify(after)) continue
+        stagedTags.push({
+          path: `/tags/${before.fileName || `${before.id}.tags.json`}`,
+          title: `Tags: ${before.name}`,
+          fileType: 'tag',
+          beforeContent: JSON.stringify(before, null, 2),
+          afterContent: JSON.stringify(after, null, 2)
+        })
+      }
+      useTagStore.getState().setTagTables(tablesBefore)
+    }
+
     if (ob1) {
       const updatedNetworks =
         effectivePayload.operationMode === 'append_ob1_networks'
@@ -1141,33 +1248,36 @@ export class AiModelRouter {
         blockStore.updateLadBlock(ob1.fileName, { networks: updatedNetworks })
 
         // 3. Auto-navigate to OB1_Main in workspace
-        try {
-          const uiStore = useUIStore.getState()
-          const existingTab = uiStore.tabs.find(
-            (t) => t.title === 'OB1_Main' || t.title === 'OB1' || t.targetId === ob1.fileName
-          )
-          if (existingTab) {
-            uiStore.setActiveTab(existingTab.id)
-          } else {
-            uiStore.openTab({
-              id: 'tab_ob1_main',
-              title: 'OB1_Main',
-              type: 'lad',
-              targetId: ob1.fileName
-            })
+        if (!options.trialRun) {
+          try {
+            const uiStore = useUIStore.getState()
+            const existingTab = uiStore.tabs.find(
+              (t) => t.title === 'OB1_Main' || t.title === 'OB1' || t.targetId === ob1.fileName
+            )
+            if (existingTab) {
+              uiStore.setActiveTab(existingTab.id)
+            } else {
+              uiStore.openTab({
+                id: 'tab_ob1_main',
+                title: 'OB1_Main',
+                type: 'lad',
+                targetId: ob1.fileName
+              })
+            }
+          } catch {
+            // ignore outside react
           }
-        } catch {
-          // ignore outside react
         }
       } else {
         // Diff-view staging
         stagedChangeset = [
+          ...stagedTags,
           {
             path: `blocks/${ob1.fileName}`,
             title: `OB1_Main (${payload.networks.length} Networks)`,
-            fileType: 'LAD',
-            beforeContent: JSON.stringify(ob1.networks || [], null, 2),
-            afterContent: JSON.stringify(updatedNetworks, null, 2)
+            fileType: 'lad',
+            beforeContent: JSON.stringify(ob1, null, 2),
+            afterContent: JSON.stringify({ ...ob1, networks: updatedNetworks }, null, 2)
           }
         ]
       }
@@ -1205,6 +1315,25 @@ export class AiModelRouter {
       throw new Error('Synthesis cancelled by user.')
     }
 
+    const provider = this.config.provider
+    const apiKey = provider === 'gemini' ? this.config.geminiApiKey : provider === 'openai' ? this.config.openaiApiKey : 'none'
+    if (!apiKey?.trim()) {
+      const providerName = provider === 'gemini' ? 'Gemini' : 'OpenAI'
+      const message = isTurkish
+        ? `Yapay zekâ ajanı için ${providerName} API anahtarı gerekli. Anahtarı AI ayarlarından girin. Projede hiçbir şey değiştirilmedi.`
+        : `The AI agent needs a ${providerName} API key. Enter it in the AI settings. Nothing in the project was changed.`
+      return {
+        replyText: message,
+        tier,
+        providerUsed: provider,
+        toolCallsExecuted: [],
+        toolResults: [],
+        isError: true,
+        errorDetails: message,
+        rawTraceSnippet: message
+      }
+    }
+
     let response: AgentExecutionResponse | null = null
 
     // Check if Ollama provider is selected
@@ -1231,12 +1360,7 @@ export class AiModelRouter {
           rawTraceSnippet: errMsg
         }
       }
-    } else if (
-      this.config.provider === 'gemini' ||
-      (this.config.geminiApiKey &&
-        this.config.geminiApiKey.trim() &&
-        this.config.provider !== 'openai')
-    ) {
+    } else if (this.config.provider === 'gemini') {
       try {
         response = await this.callGeminiApi(trimmed, tier, mode, isTurkish, signal)
       } catch (err) {
@@ -1259,7 +1383,7 @@ export class AiModelRouter {
           rawTraceSnippet: errMsg
         }
       }
-    } else if (this.config.provider === 'openai' && this.config.openaiApiKey) {
+    } else {
       try {
         response = await this.callOpenAiApi(trimmed, tier, mode, isTurkish, signal)
       } catch (err) {
@@ -1288,9 +1412,8 @@ export class AiModelRouter {
       throw new Error('Synthesis cancelled by user.')
     }
 
-    // Default zero-key deterministic industrial synthesis engine
     if (!response) {
-      response = await this.executeDeterministicOffline(trimmed, tier, mode, isTurkish)
+      throw new Error(`Provider '${this.config.provider}' returned no response.`)
     }
 
     // Ensure RAG consulted rules are always populated from Semantic Vectorizer
@@ -1312,484 +1435,6 @@ export class AiModelRouter {
     const trRegex =
       /[ğüşıöçĞÜŞİÖÇ]|pompa|hidrofor|vana|çakışma|cakisma|bobin|bellek|çöz|coz|ekle|oluştur|olustur|neden|çalış|calis|dursun|duran|yansın|yansin|saniye|devre|mühür|muhur|buton|hata|seviye|basınç|basinc|sıcaklık|sicaklik|arıza|ariza/i
     return trRegex.test(text)
-  }
-
-  /**
-   * Built-in Offline Deterministic Industrial Synthesis Engine
-   */
-  private async executeDeterministicOffline(
-    prompt: string,
-    tier: AiTier,
-    mode: 'auto-apply' | 'diff-view',
-    isTurkish: boolean
-  ): Promise<AgentExecutionResponse> {
-    const lower = prompt.toLowerCase()
-    const tools = PlcAgentTools.getInstance()
-    const toolCalls: AgentToolCall[] = []
-
-    // 0. 10-Car Parking Garage (Otopark) Control System with CTUD, N_TRIG, TON, Interlocks (MEB Standard)
-    const isParkingGarage =
-      lower.includes('otopark') ||
-      lower.includes('parking') ||
-      lower.includes('garaj') ||
-      lower.includes('garage') ||
-      (lower.includes('kapı') && lower.includes('araç')) ||
-      (lower.includes('kapi') && lower.includes('arac'))
-
-    if (isParkingGarage) {
-      BlackBoxLogger.getInstance().log('AI_REQUEST', `Offline Deterministic Synthesis: "${prompt}"`, {
-        prompt,
-        intent: 'ParkingGarage_MEB',
-        isTurkish
-      })
-
-      const dslLines = [
-        '# TAG DECLARATIONS',
-        'TAG Giris_Kart %I0.0 BOOL "Giriş Kart Okuyucu (NO)"',
-        'TAG Giris_Fotosel %I0.1 BOOL "Giriş Güvenlik Fotoseli"',
-        'TAG Ust_Limit %I0.2 BOOL "Bariyer Üst Limit Sınır Anahtarı"',
-        'TAG Alt_Limit %I0.3 BOOL "Bariyer Alt Limit Sınır Anahtarı"',
-        'TAG Cikis_Fotosel %I0.4 BOOL "Çıkış Araç Algılama Fotoseli"',
-        'TAG Kapi_Yukari_Motor %Q0.0 BOOL "Bariyer Kapı Yukarı Açma Motoru"',
-        'TAG Kapi_Asagi_Motor %Q0.1 BOOL "Bariyer Kapı Aşağı Kapatma Motoru"',
-        'TAG Otopark_Dolu_Tabela %Q0.2 BOOL "Otopark Dolu Işıklı Tabela"',
-        '',
-        '# NETWORK DEFINITIONS',
-        `NW 1 "${isTurkish ? 'Bariyer Açma ve Emniyet Geri Açılma (Motor %Q0.0)' : 'Door Up & Safety Reopen Motor (%Q0.0)'}": SERIES( PARALLEL( SERIES( CMP_LT(C1.CV, 10), NO(Giris_Kart) ), SERIES( NO(Kapi_Asagi_Motor), NO(Giris_Fotosel) ), NO(Kapi_Yukari_Motor) ), NC(Ust_Limit), NC(Kapi_Asagi_Motor), COIL(Kapi_Yukari_Motor) )`,
-        `NW 2 "${isTurkish ? 'Araç Giriş/Çıkış Sayacı (CTUD C1, PV=10)' : 'Vehicle In/Out Counter (CTUD C1, PV=10)'}": SERIES( N_TRIG(Giris_Fotosel), CTUD(C1, PV=10, CD=Cikis_Fotosel) )`,
-        `NW 3 "${isTurkish ? '7 Saniye Otomatik Kapanma Zamanlayıcısı (TON T1)' : '7-Second Auto-Close Timer (TON T1)'}": SERIES( NO(Ust_Limit), TON(T1, PT=T#7s) )`,
-        `NW 4 "${isTurkish ? 'Bariyer Aşağı Kapatma Motoru (%Q0.1)' : 'Door Down Closing Motor (%Q0.1)'}": SERIES( PARALLEL( NO(T1.Q), NO(Kapi_Asagi_Motor) ), NC(Alt_Limit), NC(Giris_Fotosel), NC(Kapi_Yukari_Motor), COIL(Kapi_Asagi_Motor) )`,
-        `NW 5 "${isTurkish ? 'Otopark Dolu Tabelası Kontrolü (%Q0.2)' : 'Parking Full Sign Control (%Q0.2)'}": SERIES( CMP_GE(C1.CV, 10), COIL(Otopark_Dolu_Tabela) )`
-      ]
-
-      const dslResult = LadderDslCompiler.compileLadderDslToAst(dslLines.join('\n'))
-
-      const explanation = isTurkish
-        ? `10 Araçlık Otomatik Otopark Bariyer Kontrol Sistemi (MEB Standartı) başarıyla oluşturuldu:\n\n1. **Ağ 1 (Bariyer Açma & Emniyet Mühürlemesi):** Otopark dolu değilse (C1.CV < 10) ve Giriş Kartı okutulursa veya kapı inerken fotosel kesilirse bariyer açılmaya başlar, üst limit ve mekanik kilit ile korunur.\n2. **Ağ 2 (CTUD Araç Sayacı C1, PV=10):** Giriş fotoseli düşen kenarında (N_TRIG Giris_Fotosel) araç sayısını artırır (CU); çıkış fotoseli yükselen kenarında sayıyı azaltır (CD).\n3. **Ağ 3 (7s Otomatik Kapanma Zamanlayıcısı TON T1):** Bariyer en üst limite ulaştığında 7 saniyelik bekleme süresi başlar.\n4. **Ağ 4 (Bariyer Kapatma Motoru %Q0.1):** Süre dolduğunda (T1.Q) veya mühürleme ile kapı aşağı iner. Alt limit, giriş fotoseli veya karşı yön motoru devredeyken kapanma kilitlenir.\n5. **Ağ 5 (Otopark Dolu Tabelası %Q0.2):** Araç sayısı 10'a ulaştığında (CMP >= 10) tabela enerjilenir.\n\n**Semboller:** Giris_Kart (%I0.0), Giris_Fotosel (%I0.1), Ust_Limit (%I0.2), Alt_Limit (%I0.3), Cikis_Fotosel (%I0.4), Kapi_Yukari_Motor (%Q0.0), Kapi_Asagi_Motor (%Q0.1), Otopark_Dolu_Tabela (%Q0.2).`
-        : `10-Car Automatic Parking Garage Barrier System created successfully:\n\n1. **Network 1 (Door Up & Safety Reopen):** Latches if not full (C1.CV < 10) AND Giris_Kart, or if closing motor active AND photocell blocked. Interlocked with NC Ust_Limit and NC Kapi_Asagi_Motor.\n2. **Network 2 (CTUD Vehicle Counter C1, PV=10):** Counts UP on N_TRIG Giris_Fotosel falling edge; counts DOWN on Cikis_Fotosel (CD).\n3. **Network 3 (7-Second TON Timer T1):** 7-second dwell starts when door reaches Ust_Limit (%I0.2).\n4. **Network 4 (Door Down Motor %Q0.1):** Latches on T1.Q done bit, cut off by NC Alt_Limit, NC Giris_Fotosel, and electrical interlock NC Kapi_Yukari_Motor.\n5. **Network 5 (Parking Full Sign %Q0.2):** Energizes when vehicle count reaches 10 (CMP >= 10).\n\n**Tags:** Giris_Kart (%I0.0), Giris_Fotosel (%I0.1), Ust_Limit (%I0.2), Alt_Limit (%I0.3), Cikis_Fotosel (%I0.4), Kapi_Yukari_Motor (%Q0.0), Kapi_Asagi_Motor (%Q0.1), Otopark_Dolu_Tabela (%Q0.2).`
-
-      const parkingPayload: AiCircuitSynthesisPayload = {
-        explanation,
-        operationMode: 'replace_ob1_networks',
-        tagsToUpsert: dslResult.tags.map((t) => ({
-          name: t.name,
-          dataType: t.dataType as any,
-          address: t.address,
-          comment: t.comment
-        })),
-        networks: dslResult.networks
-      }
-
-      BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', 'Generated Deterministic Parking Garage AST (5 networks, 8 tags)', {
-        networks: dslResult.networks.length,
-        tags: dslResult.tags.length
-      })
-
-      const res = this.applyCircuitPayload(parkingPayload, mode)
-      return {
-        replyText: res.summaryText,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: [],
-        stagedChangeset: res.stagedChangeset,
-        rawTraceSnippet: 'Offline Deterministic MEB Parking Garage'
-      }
-    }
-
-    // 1. Memory Overlap resolution intent
-    if (
-      (lower.includes('overlap') ||
-        lower.includes('collision') ||
-        lower.includes('çakışma') ||
-        lower.includes('bellek')) &&
-      !lower.includes('valve') &&
-      !lower.includes('vana') &&
-      !lower.includes('pompa') &&
-      !lower.includes('pump') &&
-      !lower.includes('booster') &&
-      !lower.includes('hidrofor')
-    ) {
-      toolCalls.push({
-        tool: 'manage_plc_tags',
-        params: { action: 'resolve_overlaps' }
-      })
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `S7 Bellek Haritası analiz edildi. Tespit edilen çakışan adresler S7 byte/word sınırlarına (even-byte boundary) uygun güvenli boş alanlara otomatik olarak yeniden taşındı.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `S7 Memory Map analyzed. Detected address collisions were reallocated to safe, non-overlapping addresses respecting S7 even-byte word alignments.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 2. Double-Coil merge intent
-    if (
-      lower.includes('double coil') ||
-      lower.includes('double-coil') ||
-      lower.includes('çift bobin') ||
-      lower.includes('auto-merge') ||
-      lower.includes('bobin birleştir')
-    ) {
-      toolCalls.push({
-        tool: 'create_or_update_lad_block',
-        params: { action: 'auto_refactor_double_coils', blockName: 'OB1_Main' }
-      })
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `OB1_Main bloğu içerisindeki çift bobin (double-coil) yazma çakışmaları tespit edildi. TIA Portal standart Çözüm A (Intermediate Temp Coils + Consolidation OR Network) deseni ile tek bir nihai ağda birleştirildi.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `Double-coil write conflicts in OB1_Main detected. Auto-refactored using Siemens Solution A pattern (Intermediate temp coils consolidated into a final deterministic OR-network).\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 3. Multi-Pump booster station / Hidrofor sistemi intent
-    if (
-      lower.includes('hidrofor') ||
-      lower.includes('booster') ||
-      (lower.includes('pompa') && (lower.includes('3') || lower.includes('eş yaşlandırma') || lower.includes('alternation'))) ||
-      (lower.includes('pump') && (lower.includes('lead-lag') || lower.includes('staging') || lower.includes('3') || lower.includes('pumpcontrol') || lower.includes('fb_pumpcontrol')))
-    ) {
-      const sclBlockName = lower.includes('fb_pumpcontrol') || lower.includes('pumpcontrol') ? 'FB_PumpControl' : 'FC_BoosterAlternation'
-      const sclBlockType = lower.includes('fb_pumpcontrol') || lower.includes('pumpcontrol') ? 'FB' : 'FC'
-
-      // Create UDT
-      toolCalls.push({
-        tool: 'create_or_update_udt',
-        params: {
-          name: 'UDT_BoosterPump',
-          fields: [
-            { name: 'RunCmd', dataType: 'BOOL', comment: 'Coil command to contactor' },
-            { name: 'RunFeedback', dataType: 'BOOL', comment: 'Auxiliary contact feedback' },
-            { name: 'TripFault', dataType: 'BOOL', comment: 'Thermal overload or VFD fault' },
-            { name: 'RunHours', dataType: 'REAL', comment: 'Runtime accumulated operating hours' }
-          ]
-        }
-      })
-
-      // Create DB
-      toolCalls.push({
-        tool: 'create_or_update_db',
-        params: {
-          name: 'DB_BoosterStation',
-          isOptimized: true,
-          variables: [
-            { name: 'Pump1', dataType: 'UDT_BoosterPump', initialValue: '', comment: 'Hydraulic Booster Pump 1' },
-            { name: 'Pump2', dataType: 'UDT_BoosterPump', initialValue: '', comment: 'Hydraulic Booster Pump 2' },
-            { name: 'Pump3', dataType: 'UDT_BoosterPump', initialValue: '', comment: 'Hydraulic Booster Pump 3' },
-            { name: 'TargetPressure_Bar', dataType: 'REAL', initialValue: '4.5', comment: 'Header setpoint pressure' },
-            { name: 'ActualPressure_Bar', dataType: 'REAL', initialValue: '0.0', comment: 'Header actual pressure' },
-            { name: 'ActivePumpsCount', dataType: 'INT', initialValue: '0', comment: 'Currently energized pumps' }
-          ]
-        }
-      })
-
-      // Create SCL Logic Block
-      toolCalls.push({
-        tool: 'create_or_update_scl_block',
-        params: {
-          name: sclBlockName,
-          blockType: sclBlockType,
-          sourceCode: `// Siemens S7-1200/1500 3-Pump Equal Wear Alternation (Eş Yaşlandırma)
-IF "DB_BoosterStation".ActualPressure_Bar < ("DB_BoosterStation".TargetPressure_Bar - 0.5) THEN
-    // Low pressure: Stage on least worn pump
-    IF NOT "DB_BoosterStation".Pump1.RunCmd AND NOT "DB_BoosterStation".Pump1.TripFault THEN
-        "DB_BoosterStation".Pump1.RunCmd := TRUE;
-    ELSIF NOT "DB_BoosterStation".Pump2.RunCmd AND NOT "DB_BoosterStation".Pump2.TripFault THEN
-        "DB_BoosterStation".Pump2.RunCmd := TRUE;
-    ELSIF NOT "DB_BoosterStation".Pump3.RunCmd AND NOT "DB_BoosterStation".Pump3.TripFault THEN
-        "DB_BoosterStation".Pump3.RunCmd := TRUE;
-    END_IF;
-ELSIF "DB_BoosterStation".ActualPressure_Bar > ("DB_BoosterStation".TargetPressure_Bar + 0.5) THEN
-    // High pressure: Stage off highest hour pump
-    IF "DB_BoosterStation".Pump3.RunCmd THEN
-        "DB_BoosterStation".Pump3.RunCmd := FALSE;
-    ELSIF "DB_BoosterStation".Pump2.RunCmd THEN
-        "DB_BoosterStation".Pump2.RunCmd := FALSE;
-    ELSIF "DB_BoosterStation".Pump1.RunCmd THEN
-        "DB_BoosterStation".Pump1.RunCmd := FALSE;
-    END_IF;
-END_IF;`
-        }
-      })
-
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `3 Pompalı Eş Yaşlandırmalı Hidrofor Sistemi başarıyla oluşturuldu:\n\n1. **UDT_BoosterPump**: Pompa çalıştırma, geri bildirim, termik arıza ve çalışma saati alanları tanımlandı.\n2. **DB_BoosterStation**: 3 adet hidrofor pompası, hedef basınç (4.5 Bar) ve anlık basınç parametreleri ile optimize DB olarak oluşturuldu.\n3. **${sclBlockName}**: Histerezisli basınç bandına göre pompaları devreye alan/çıkaran SCL algoritması yazıldı.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `3-Pump Equal Wear Booster Station created successfully:\n\n1. **UDT_BoosterPump**: RunCmd, RunFeedback, TripFault, and RunHours fields declared.\n2. **DB_BoosterStation**: Optimized DB with 3 pump instances, TargetPressure_Bar (4.5 Bar), and ActualPressure_Bar.\n3. **${sclBlockName}**: SCL staging logic with hysteresis pressure band and wear balancing.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 4. Valve Control intent (UDT_Valve, Tags, FB_ValveControl, Compiler Verification)
-    if (
-      lower.includes('valve') ||
-      lower.includes('vana') ||
-      lower.includes('fb_valvecontrol') ||
-      lower.includes('udt_valve')
-    ) {
-      const isOverride =
-        lower.includes('emergency') ||
-        lower.includes('override') ||
-        lower.includes('acil kapatma') ||
-        lower.includes('update') ||
-        lower.includes('güncelle')
-
-      if (isOverride) {
-        toolCalls.push({
-          tool: 'create_or_update_scl_block',
-          params: {
-            name: 'FB_ValveControl',
-            blockType: 'FB',
-            sourceCode: `FUNCTION_BLOCK "FB_ValveControl"
-{ S7_Optimized_Access := 'TRUE' }
-VERSION : 0.1
-VAR_INPUT
-  EmergencyStop : Bool;
-  OpenRequest : Bool;
-  CloseRequest : Bool;
-  OpenedLimit : Bool;
-  ClosedLimit : Bool;
-END_VAR
-VAR_OUTPUT
-  OpenCmd : Bool;
-  CloseCmd : Bool;
-  IsOpen : Bool;
-  IsClosed : Bool;
-END_VAR
-BEGIN
-// Updated with Emergency Close Priority Override
-IF #EmergencyStop THEN
-    #OpenCmd := FALSE;
-    #CloseCmd := TRUE;
-ELSIF #OpenRequest AND NOT #CloseRequest THEN
-    #OpenCmd := TRUE;
-    #CloseCmd := FALSE;
-ELSIF #CloseRequest AND NOT #OpenRequest THEN
-    #OpenCmd := FALSE;
-    #CloseCmd := TRUE;
-ELSE
-    #OpenCmd := FALSE;
-    #CloseCmd := FALSE;
-END_IF;
-
-// Position Feedback Status
-#IsOpen := #OpenedLimit AND NOT #ClosedLimit;
-#IsClosed := #ClosedLimit AND NOT #OpenedLimit;
-END_FUNCTION_BLOCK`
-          }
-        })
-      } else {
-        // 1. UDT_Valve
-        toolCalls.push({
-          tool: 'create_or_update_udt',
-          params: {
-            name: 'UDT_Valve',
-            description: 'Siemens Standard Valve Control UDT',
-            fields: [
-              { name: 'OpenCmd', dataType: 'BOOL', comment: 'Solenoid coil open command' },
-              { name: 'CloseCmd', dataType: 'BOOL', comment: 'Solenoid coil close command' },
-              { name: 'OpenedLimit', dataType: 'BOOL', comment: 'End position open limit switch' },
-              { name: 'ClosedLimit', dataType: 'BOOL', comment: 'End position close limit switch' },
-              { name: 'TransitFault', dataType: 'BOOL', comment: 'Travel time exceeded alarm' }
-            ]
-          }
-        })
-
-        // 2. Tags without overlap
-        toolCalls.push({
-          tool: 'manage_plc_tags',
-          params: {
-            action: 'upsert',
-            tags: [
-              { id: 'tag_v_open', name: 'Valve_OpenCmd', address: '%Q0.3', dataType: 'BOOL', comment: 'Valve Open Solenoid' },
-              { id: 'tag_v_close', name: 'Valve_CloseCmd', address: '%Q0.4', dataType: 'BOOL', comment: 'Valve Close Solenoid' },
-              { id: 'tag_v_opened', name: 'Valve_OpenedLimit', address: '%I0.4', dataType: 'BOOL', comment: 'Valve Opened Prox Sensor' },
-              { id: 'tag_v_closed', name: 'Valve_ClosedLimit', address: '%I0.5', dataType: 'BOOL', comment: 'Valve Closed Prox Sensor' }
-            ]
-          }
-        })
-
-        // 3. FB_ValveControl SCL Block
-        toolCalls.push({
-          tool: 'create_or_update_scl_block',
-          params: {
-            name: 'FB_ValveControl',
-            blockType: 'FB',
-            sourceCode: `FUNCTION_BLOCK "FB_ValveControl"
-{ S7_Optimized_Access := 'TRUE' }
-VERSION : 0.1
-VAR_INPUT
-  OpenRequest : Bool;
-  CloseRequest : Bool;
-  OpenedLimit : Bool;
-  ClosedLimit : Bool;
-END_VAR
-VAR_OUTPUT
-  OpenCmd : Bool;
-  CloseCmd : Bool;
-  IsOpen : Bool;
-  IsClosed : Bool;
-END_VAR
-BEGIN
-// Manages open/close actuation with limit switch feedback and travel timeout supervision
-IF #OpenRequest AND NOT #CloseRequest THEN
-    #OpenCmd := TRUE;
-    #CloseCmd := FALSE;
-ELSIF #CloseRequest AND NOT #OpenRequest THEN
-    #OpenCmd := FALSE;
-    #CloseCmd := TRUE;
-ELSE
-    #OpenCmd := FALSE;
-    #CloseCmd := FALSE;
-END_IF;
-
-// Position Feedback Status
-#IsOpen := #OpenedLimit AND NOT #ClosedLimit;
-#IsClosed := #ClosedLimit AND NOT #OpenedLimit;
-END_FUNCTION_BLOCK`
-          }
-        })
-      }
-
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? isOverride
-          ? `FB_ValveControl bloğu acil kapatma önceliği (Emergency Close Override) ile güncellendi.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-          : `Endüstriyel Vana Kontrol Sistemi başarıyla oluşturuldu:\n\n1. **UDT_Valve**: OpenCmd, CloseCmd, OpenedLimit, ClosedLimit ve TransitFault alanları tanımlandı.\n2. **PLC Tagleri**: Çakışmasız güvenli adreslere (Q0.3, Q0.4, I0.4, I0.5) vana I/O etiketleri eklendi.\n3. **FB_ValveControl**: Çift yönlü aktüasyon ve konum izleme algoritmaları SCL olarak oluşturuldu.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : isOverride
-          ? `FB_ValveControl block updated with Emergency Close Priority Override logic.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-          : `Industrial Valve Control System created successfully:\n\n1. **UDT_Valve**: OpenCmd, CloseCmd, OpenedLimit, ClosedLimit, and TransitFault members declared.\n2. **PLC Tags**: Non-overlapping I/O tags allocated at %Q0.3, %Q0.4, %I0.4, %I0.5.\n3. **FB_ValveControl**: Bidirectional actuation and position feedback supervisory SCL block created.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 5. OB30 PID & Analog Scaling intent
-    if (
-      lower.includes('pid') ||
-      lower.includes('ob30') ||
-      (lower.includes('analog') && (lower.includes('scale') || lower.includes('ölçek')))
-    ) {
-      toolCalls.push({
-        tool: 'update_hardware_parameters',
-        params: {
-          obCyclicInterruptIntervalMs: 100,
-          aiWireBreakDetection: true
-        }
-      })
-
-      toolCalls.push({
-        tool: 'create_or_update_scl_block',
-        params: {
-          name: 'OB30_CyclicInterrupt',
-          blockType: 'OB',
-          sourceCode: `// OB30 100ms Cyclic Interrupt for Analog Scaling and PID Control
-// Normalize %IW64 (0..27648) and scale to Engineering Units (0.0 .. 10.0 Bar)
-VAR_TEMP
-    rNormalized : REAL;
-    rPressureBar : REAL;
-END_VAR
-
-// Siemens S7-1200 NORM_X formula
-rNormalized := INT_TO_REAL("TankLevel_Raw") / 27648.0;
-IF rNormalized < 0.0 THEN rNormalized := 0.0; END_IF;
-IF rNormalized > 1.0 THEN rNormalized := 1.0; END_IF;
-
-// Siemens S7-1200 SCALE_X formula
-rPressureBar := rNormalized * 10.0;
-"TankPressure_Bar" := rPressureBar;`
-        }
-      })
-
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `OB30 100ms Döngüsel Kesme (Cyclic Interrupt) ve Analog NORM_X/SCALE_X modülü yapılandırıldı:\n\n1. CPU donanım parametrelerinde OB30 periyodu 100ms olarak ayarlandı ve AI tel kopması teşhisi etkinleştirildi.\n2. OB30_CyclicInterrupt SCL bloğu oluşturularak %IW64 ham analog verisi 0..27648 aralığından 0.0..10.0 Bar mühendislik birimine dönüştürüldü.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `OB30 100ms Cyclic Interrupt and Analog NORM_X/SCALE_X module configured:\n\n1. Hardware configuration updated for 100ms OB30 interval and AI wire-break diagnostic enabled.\n2. OB30_CyclicInterrupt SCL block created with Siemens NORM_X/SCALE_X converting %IW64 raw count (0..27648) to 0.0..10.0 Bar.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // Default conversational engineering synthesis
-    toolCalls.push({
-      tool: 'read_project_overview',
-      params: {}
-    })
-    const execution = await tools.executeToolBatch(toolCalls, 'auto-apply')
-    const reply = isTurkish
-      ? `Rungline S7 Mühendislik Asistanı isteğinizi analiz etti: "${prompt}".\n\nCPU ve Derleyici AST denetleyicisi aktif. Belirli bir PLC devresi (örn: mühürlemeli motor devresi, zamanlayıcı kontrolü, vana veya hidrofor mantığı) oluşturmak istediğinizde komutunuzu doğrudan iletebilirsiniz.`
-      : `Rungline S7 Engineering Agent analyzed your request: "${prompt}".\n\nCPU and Compiler AST inspector active. Feel free to request any ladder circuit synthesis, timer logic, valve control, or booster station automation.`
-
-    return {
-      replyText: reply,
-      tier,
-      providerUsed: 'offline_local',
-      toolCallsExecuted: toolCalls,
-      toolResults: execution.results
-    }
   }
 
   /**
@@ -1829,19 +1474,20 @@ rPressureBar := rNormalized * 10.0;
       mode
     })
 
-    // Retrieve Top 4 Semantic MEB RAG Rules
     const ragEngine = RagKnowledgeEngine.getInstance()
-    const topRules = ragEngine.retrieveTopKRules(prompt, 4)
+    const topRules = ragEngine.retrieveTopKRules(prompt, 3)
     const ragPromptSection = ragEngine.formatRetrievedRulesForPrompt(topRules)
     const consultedRuleNames = topRules.map((r) => r.item.name)
 
-    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC Automation Architect in the Rungline IDE following strict MEB Automation Curriculum standards.
-When asked to synthesize, create, or modify PLC Ladder logic, circuits, timers, motors, or I/O configurations, output your response in structured JSON or Compact Ladder DSL:
+    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC programmer in the Rungline IDE.
+The user message starts with the current project. You change it only through the fields below. Text alone changes nothing: never say something was created unless your reply contains the action that creates it.
+Always answer with one JSON object in this form:
 
 STRUCTURED JSON OUTPUT SCHEMA:
 {
   "explanation": "Detailed engineering explanation in the user's language.",
-  "operationMode": "replace_ob1_networks",
+  "toolCalls": [ { "tool": "<tool name>", "params": { } } ],
+  "operationMode": "append_ob1_networks",
   "tagsToUpsert": [
     { "name": "Start", "dataType": "BOOL", "address": "%I0.0", "comment": "Start pushbutton" }
   ],
@@ -1853,17 +1499,37 @@ STRUCTURED JSON OUTPUT SCHEMA:
       "nodes": [ ... ]
     }
   ],
-  "dsl": "optional Compact Ladder DSL text"
+  "dsl": "optional Compact Ladder DSL text",
+  "verification": { "steps": [ ] }
 }
 
-COMPACT LADDER DSL SYNTAX:
-# EXPLANATION
-Detailed engineering explanation in the user's language.
+Ladder goes in "dsl" or "networks" and only ever changes OB1. Use only for ladder circuits; leave these fields out otherwise.
+operationMode: "append_ob1_networks" adds to OB1 and is the default. Use "replace_ob1_networks" only when the user clearly asks to rewrite OB1, because it removes the existing networks.
 
-# TAG DECLARATIONS
+TOOLS (put them in "toolCalls"; everything else, such as FBs, FCs, UDTs and DBs, can only be made this way):
+- read_block { "name": "..." }: returns a block's source or networks. Read a block before changing it. You get the result in the next message.
+- read_pattern { "id": "..." }: returns a circuit pattern with its timeline and pitfalls, from the list below.
+- create_or_update_scl_block { "name": "FB_Valve", "sourceCode": "FUNCTION_BLOCK \"FB_Valve\"\n{ S7_Optimized_Access := 'TRUE' }\nVERSION : 0.1\nVAR_INPUT\n  Cmd : Bool;\nEND_VAR\nBEGIN\n  ;\nEND_FUNCTION_BLOCK" }: an FB or FC. sourceCode is the full external source, and its name must match "name". You cannot add a new OB.
+- create_or_update_udt { "name": "UDT_Valve", "fields": [ { "name": "Open", "dataType": "BOOL", "comment": "..." } ] }
+- create_or_update_db { "name": "DB_Plant", "variables": [ { "name": "Level", "dataType": "REAL", "initialValue": "0.0", "comment": "..." } ] }: a global DB.
+- manage_plc_tags { "action": "upsert", "tags": [ { "name": "Start", "dataType": "BOOL", "address": "%I0.0", "comment": "..." } ] }
+
+Your whole reply is applied, compiled and run on the simulator. If tools, the compiler or the test report errors, everything from that reply is undone and you get the errors, so send the complete corrected answer again. If you cannot do something, say so in "explanation" instead of inventing a result.
+
+SIMULATION TEST ("verification"): every ladder circuit needs one. It says what the circuit must do over time, starting from the moment the CPU goes to RUN with all inputs at 0:
+"verification": { "steps": [
+  { "atMs": 0, "set": { "Stop": true } },
+  { "atMs": 100, "set": { "Start": true } },
+  { "atMs": 300, "set": { "Start": false }, "expect": { "Motor": true } },
+  { "atMs": 5300, "expect": { "Motor": false } }
+] }
+- "set" changes inputs only. An NC-wired stop button is 1 at rest, so set it to true at the start.
+- "expect" can read tags and instance bits such as T1.Q. Check 200 ms or more away from a timer's expiry.
+- Follow the behaviour the user described, not your circuit: cover the whole cycle, at least one repeat of a cycle, and stopping.
+- If it fails you get the real timeline of the program. Find the cause in the circuit before changing anything. Do not change the expected behaviour to match a wrong circuit.
+
+COMPACT LADDER DSL SYNTAX (for the "dsl" field):
 TAG <Name> <Address> <DataType> "<Comment>"
-
-# NETWORK DEFINITIONS
 NW 1 "<Title>": <EXPRESSION>
 NW 2 "<Title>": <EXPRESSION>
 
@@ -1876,372 +1542,574 @@ DSL Elements:
 - Math: ADD(in1, in2, out), SUB, MUL, DIV, MOVE, NORM_X, SCALE_X
 - Combinators: SERIES(elem1, elem2, ...), PARALLEL(branch1, branch2, ...)
 
-CRITICAL MEB INDUSTRIAL RULES:
-1. STRICT BAN ON DUMMY %M TIMER COILS: Never create dummy %M coils following a timer. Timers terminate cleanly at the rung end without a coil.
-2. NATIVE SUB-BIT ADDRESSING: Contacts reading a timer done bit MUST use 'T1.Q' directly. Counter bits use 'C1.QU', 'C1.QD', 'C1.CV'.
-3. MOTOR SEAL-IN: Network 1 has Start NO parallel with Motor NO, series with Stop NC and T1.Q NC, driving Motor coil. Network 2 has Motor NO driving TON T1.
-4. ZERO DUMMY %M TAGS: Do not declare dummy %M tags for timer done flags.
-5. INDICATOR LAMPS & LEDS: If the user requests indicator lamps/LEDs (e.g. green LED when motor runs, red LED when motor stops), assign distinct safe addresses (e.g. Green LED %Q0.1, Red LED %Q0.2) and add dedicated networks: Network 3 (Motor NO driving Green LED coil) and Network 4 (Motor NC driving Red LED coil). NEVER assign duplicate addresses to different tags.
-6. PARKING GARAGE / BARRIER AUTOMATION:
-   - Giris_Kart (%I0.0), Giris_Fotosel (%I0.1), Ust_Limit (%I0.2), Alt_Limit (%I0.3), Cikis_Fotosel (%I0.4)
-   - Kapi_Yukari_Motor (%Q0.0), Kapi_Asagi_Motor (%Q0.1), Otopark_Dolu_Tabela (%Q0.2)
-   - Use CTUD C1 (PV=10) with CU triggered by N_TRIG Giris_Fotosel, and CD triggered by Cikis_Fotosel.
-   - Use TON T1 (PT=T#7s) for auto-close dwell after reaching Ust_Limit.
+${LADDER_RULES}
+
+CIRCUIT PATTERNS you can read with read_pattern:
+${ragEngine.patternCatalogForPrompt()}
 ${ragPromptSection}
-Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.
+The current project lists this CPU's inputs, outputs, clock memory and system memory. Use those.
+Give every new tag its address, either as a TAG line in "dsl" or in "tagsToUpsert". A tag that already exists keeps its address if you do not declare it again. Never use the CPU's clock or system memory bytes for your own bits.
 If the prompt is purely informational without ladder logic, provide an explanation directly.`
 
     const cleanKey = (this.config.geminiApiKey || '').trim()
-    let rawText = ''
-    let lastError: Error | null = null
-    let successfulModel = ''
     let attemptedAutoDiscovery = false
 
-    for (let i = 0; i < candidateModels.length; i++) {
-      const modelToTry = candidateModels[i]
-      if (signal?.aborted) throw new Error('Synthesis cancelled by user.')
+    const missingModels: string[] = []
+    const requestModel = async (contents: GeminiContent[]): Promise<string> => {
+      let rawText = ''
+      let lastError: Error | null = null
+      let successfulModel = ''
 
-      const cleanModelId = modelToTry.trim().replace(/^models\//i, '')
-      const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelId}:generateContent`
+      for (let i = 0; i < candidateModels.length; i++) {
+        const modelToTry = candidateModels[i]
+        if (signal?.aborted) throw new Error('Synthesis cancelled by user.')
 
-      // Fresh 90-second timeout controller per candidate model attempt
-      const modelController = new AbortController()
-      let modelTimedOut = false
-      const modelTimeoutId = setTimeout(() => {
-        modelTimedOut = true
-        modelController.abort()
-      }, 90000)
+        const cleanModelId = modelToTry.trim().replace(/^models\//i, '')
+        const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelId}:generateContent`
 
-      const onExternalAbort = () => {
-        modelController.abort()
-      }
-      if (signal) {
-        if (signal.aborted) {
-          clearTimeout(modelTimeoutId)
-          throw new Error('Synthesis cancelled by user.')
+        // Fresh 90-second timeout controller per candidate model attempt
+        const modelController = new AbortController()
+        let modelTimedOut = false
+        const modelTimeoutId = setTimeout(() => {
+          modelTimedOut = true
+          modelController.abort()
+        }, 90000)
+
+        const onExternalAbort = () => {
+          modelController.abort()
         }
-        signal.addEventListener('abort', onExternalAbort)
-      }
-
-      const attemptFetch = async (includeThinkingConfig: boolean) => {
-        const generationConfig: Record<string, any> = {
-          temperature: 0.1,
-          maxOutputTokens: 8192,
-          responseMimeType: 'application/json'
-        }
-        if (includeThinkingConfig) {
-          generationConfig.thinkingConfig = { thinkingBudget: 0 }
+        if (signal) {
+          if (signal.aborted) {
+            clearTimeout(modelTimeoutId)
+            throw new Error('Synthesis cancelled by user.')
+          }
+          signal.addEventListener('abort', onExternalAbort)
         }
 
-        return fetch(requestUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey },
-          signal: modelController.signal,
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{ text: systemInstructionText }]
-            },
-            contents: [
-              {
-                role: 'user',
-                parts: [{ text: prompt }]
-              }
-            ],
-            generationConfig
+        const attemptFetch = async (includeThinkingConfig: boolean) => {
+          const generationConfig: Record<string, any> = {
+            temperature: 0.1,
+            maxOutputTokens: 8192,
+            responseMimeType: 'application/json'
+          }
+          if (includeThinkingConfig) {
+            generationConfig.thinkingConfig = { thinkingBudget: 0 }
+          }
+
+          return fetch(requestUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey },
+            signal: modelController.signal,
+            body: JSON.stringify({
+              systemInstruction: {
+                parts: [{ text: systemInstructionText }]
+              },
+              contents,
+              generationConfig
+            })
           })
-        })
-      }
-
-      try {
-        let response = await attemptFetch(true)
-
-        // If HTTP 400 occurred and thinkingConfig was passed, retry once without thinkingConfig
-        if (response.status === 400) {
-          const errBody = await response.text()
-          BlackBoxLogger.getInstance().log(
-            'AI_FALLBACK_OR_RETRY',
-            `Candidate model ${cleanModelId} rejected thinkingConfig (HTTP 400). Retrying without thinkingConfig...`,
-            { model: cleanModelId, status: 400, errorBody: errBody }
-          )
-          response = await attemptFetch(false)
         }
 
-        if (!response.ok) {
-          const errStatus = response.status
-          const errorBodyText = await response.text()
-          BlackBoxLogger.getInstance().log(
-            'AI_FALLBACK_OR_RETRY',
-            `Candidate model ${cleanModelId} returned HTTP ${errStatus}`,
-            {
-              model: cleanModelId,
-              status: errStatus,
-              url: requestUrl.replace(cleanKey, '***'),
-              errorBody: errorBodyText
-            }
-          )
+        try {
+          let response = await attemptFetch(true)
 
-          // Live Self-Healing Model Discovery on HTTP 404
-          if (errStatus === 404 && !attemptedAutoDiscovery && cleanKey) {
-            attemptedAutoDiscovery = true
+          // If HTTP 400 occurred and thinkingConfig was passed, retry once without thinkingConfig
+          if (response.status === 400) {
+            const errBody = await response.text()
             BlackBoxLogger.getInstance().log(
               'AI_FALLBACK_OR_RETRY',
-              `HTTP 404 encountered for model ${cleanModelId}. Initiating live /v1beta/models auto-discovery...`,
-              { model: cleanModelId }
+              `Candidate model ${cleanModelId} rejected thinkingConfig (HTTP 400). Retrying without thinkingConfig...`,
+              { model: cleanModelId, status: 400, errorBody: errBody }
             )
-            try {
-              const discRes = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cleanKey)}`,
-                { signal: modelController.signal }
-              )
-              if (discRes.ok) {
-                const discData = await discRes.json()
-                const rawModels: Array<{
-                  name: string
-                  displayName?: string
-                  description?: string
-                  supportedGenerationMethods?: string[]
-                }> = discData.models || []
+            response = await attemptFetch(false)
+          }
 
-                const filtered: DiscoveredModel[] = rawModels
-                  .filter((m) => {
-                    const hasGen =
-                      Array.isArray(m.supportedGenerationMethods) &&
-                      m.supportedGenerationMethods.includes('generateContent')
-                    if (!hasGen) return false
-                    const cId = m.name.replace(/^models\//, '')
-                    return isStrictGeminiTextModel(cId)
-                  })
-                  .map((m) => {
-                    const cId = m.name.replace(/^models\//, '')
-                    return {
-                      id: cId,
-                      displayName: m.displayName || cId,
-                      description: m.description
-                    }
-                  })
-
-                const sorted = sortGeminiModels(filtered)
-                if (sorted.length > 0) {
-                  this.config.availableModels = sorted
-                  this.config.selectedModelId = sorted[0].id
-                  this.saveConfig()
-
-                  for (const dm of sorted) {
-                    if (!candidateModels.includes(dm.id)) {
-                      candidateModels.push(dm.id)
-                    }
-                  }
-
-                  BlackBoxLogger.getInstance().log(
-                    'AI_FALLBACK_OR_RETRY',
-                    `Auto-discovery healed models: ${sorted.length} models loaded. Top model: ${sorted[0].id}`,
-                    { topModels: sorted.slice(0, 5).map((m) => m.id) }
-                  )
-                }
+          if (!response.ok) {
+            const errStatus = response.status
+            const errorBodyText = await response.text()
+            BlackBoxLogger.getInstance().log(
+              'AI_FALLBACK_OR_RETRY',
+              `Candidate model ${cleanModelId} returned HTTP ${errStatus}`,
+              {
+                model: cleanModelId,
+                status: errStatus,
+                url: requestUrl.replace(cleanKey, '***'),
+                errorBody: errorBodyText
               }
-            } catch (discErr) {
-              console.warn('Live model auto-discovery failed:', discErr)
+            )
+
+            if (errStatus === 404) missingModels.push(cleanModelId)
+
+            // Live Self-Healing Model Discovery on HTTP 404
+            if (errStatus === 404 && !attemptedAutoDiscovery && cleanKey) {
+              attemptedAutoDiscovery = true
+              BlackBoxLogger.getInstance().log(
+                'AI_FALLBACK_OR_RETRY',
+                `HTTP 404 encountered for model ${cleanModelId}. Initiating live /v1beta/models auto-discovery...`,
+                { model: cleanModelId }
+              )
+              try {
+                const discRes = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+                  headers: { 'x-goog-api-key': cleanKey },
+                  signal: modelController.signal
+                })
+                if (discRes.ok) {
+                  const discData = await discRes.json()
+                  const rawModels: Array<{
+                    name: string
+                    displayName?: string
+                    description?: string
+                    supportedGenerationMethods?: string[]
+                  }> = discData.models || []
+
+                  const filtered: DiscoveredModel[] = rawModels
+                    .filter((m) => {
+                      const hasGen =
+                        Array.isArray(m.supportedGenerationMethods) &&
+                        m.supportedGenerationMethods.includes('generateContent')
+                      if (!hasGen) return false
+                      const cId = m.name.replace(/^models\//, '')
+                      return isStrictGeminiTextModel(cId)
+                    })
+                    .map((m) => {
+                      const cId = m.name.replace(/^models\//, '')
+                      return {
+                        id: cId,
+                        displayName: m.displayName || cId,
+                        description: m.description
+                      }
+                    })
+
+                  const sorted = sortGeminiModels(filtered)
+                  if (sorted.length > 0) {
+                    this.config.availableModels = sorted
+                    this.config.selectedModelId = sorted[0].id
+                    this.saveConfig()
+
+                    for (const dm of sorted) {
+                      if (!candidateModels.includes(dm.id)) {
+                        candidateModels.push(dm.id)
+                      }
+                    }
+
+                    BlackBoxLogger.getInstance().log(
+                      'AI_FALLBACK_OR_RETRY',
+                      `Auto-discovery healed models: ${sorted.length} models loaded. Top model: ${sorted[0].id}`,
+                      { topModels: sorted.slice(0, 5).map((m) => m.id) }
+                    )
+                  }
+                }
+              } catch (discErr) {
+                console.warn('Live model auto-discovery failed:', discErr)
+              }
             }
+
+            lastError = new Error(`Gemini API HTTP Error on ${cleanModelId}: ${errStatus} ${errorBodyText}`)
+            continue
           }
 
-          lastError = new Error(`Gemini API HTTP Error on ${cleanModelId}: ${errStatus} ${errorBodyText}`)
-          continue
-        }
-
-        const data = await response.json()
-        rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-        if (rawText) {
-          successfulModel = cleanModelId
-          break
-        }
-      } catch (fetchErr: unknown) {
-        if (
-          signal?.aborted ||
-          (fetchErr as { name?: string })?.name === 'AbortError' ||
-          String(fetchErr).includes('cancelled')
-        ) {
-          if (modelTimedOut) {
-            throw new Error(`Gemini API call to model ${cleanModelId} timed out after 90 seconds.`)
+          const data = await response.json()
+          rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+          if (rawText) {
+            successfulModel = cleanModelId
+            break
           }
-          throw fetchErr
-        }
-        BlackBoxLogger.getInstance().log(
-          'AI_FALLBACK_OR_RETRY',
-          `Candidate model ${cleanModelId} failed: ${fetchErr}. Retrying next in chain...`,
-          { model: cleanModelId, error: String(fetchErr) }
-        )
-        lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr))
-      } finally {
-        clearTimeout(modelTimeoutId)
-        if (signal) {
-          signal.removeEventListener('abort', onExternalAbort)
-        }
-      }
-    }
-
-    if (!rawText) {
-      const finalErr = lastError || new Error('No candidate Gemini model produced a response.')
-      BlackBoxLogger.getInstance().log('AI_ERROR', `All candidate Gemini models failed: ${finalErr.message}`, {
-        candidateModels,
-        error: String(finalErr)
-      })
-      throw finalErr
-    }
-
-    const elapsedMs = Date.now() - startMs
-    BlackBoxLogger.getInstance().log(
-      'AI_RAW_RESPONSE',
-      `Gemini API Response received from ${successfulModel} (${elapsedMs}ms, ${rawText.length} chars)`,
-      { model: successfulModel, elapsedMs, rawSnippet: rawText.substring(0, 500), rawFull: rawText }
-    )
-
-    // 1. Resilient JSON Block extraction first (for responseMimeType: application/json)
-    const jsonExtract = this.extractValidJsonBlock(rawText)
-    if (jsonExtract && jsonExtract.json) {
-      const parsed = jsonExtract.json as AiCircuitSynthesisPayload & { dsl?: string }
-
-      // Check if JSON includes compact DSL
-      if (parsed.dsl && typeof parsed.dsl === 'string') {
-        const dslResult = LadderDslCompiler.compileLadderDslToAst(parsed.dsl)
-        if (dslResult.success && dslResult.networks.length > 0) {
-          const normalizedNws = normalizeAiGeneratedNetworks(dslResult.networks)
-          const circuitPayload: AiCircuitSynthesisPayload = {
-            explanation: parsed.explanation || dslResult.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL.',
-            operationMode: parsed.operationMode || 'replace_ob1_networks',
-            tagsToUpsert: dslResult.tags.map((t) => ({
-              name: t.name,
-              dataType: t.dataType as any,
-              address: t.address,
-              comment: t.comment
-            })),
-            networks: normalizedNws
+        } catch (fetchErr: unknown) {
+          if (
+            signal?.aborted ||
+            (fetchErr as { name?: string })?.name === 'AbortError' ||
+            String(fetchErr).includes('cancelled')
+          ) {
+            if (modelTimedOut) {
+              throw new Error(`Gemini API call to model ${cleanModelId} timed out after 90 seconds.`)
+            }
+            throw fetchErr
           }
-          const result = this.applyCircuitPayload(circuitPayload, mode)
           BlackBoxLogger.getInstance().log(
-            'AI_PARSE_AND_AST_INJECTION',
-            `Compact Ladder DSL compiled: ${normalizedNws.length} networks, ${dslResult.tags.length} tags`,
-            { networks: normalizedNws.length, tags: dslResult.tags.length }
+            'AI_FALLBACK_OR_RETRY',
+            `Candidate model ${cleanModelId} failed: ${fetchErr}. Retrying next in chain...`,
+            { model: cleanModelId, error: String(fetchErr) }
           )
-          return {
-            replyText: result.summaryText,
-            tier,
-            providerUsed: 'gemini',
-            toolCallsExecuted: [],
-            toolResults: [],
-            ragRulesConsulted: consultedRuleNames,
-            stagedChangeset: result.stagedChangeset,
-            rawTraceSnippet: rawText.substring(0, 300),
-            rawJson: jsonExtract.raw
+          lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr))
+        } finally {
+          clearTimeout(modelTimeoutId)
+          if (signal) {
+            signal.removeEventListener('abort', onExternalAbort)
           }
         }
       }
 
-      if (parsed && Array.isArray(parsed.networks) && parsed.networks.length > 0) {
-        const normalizedNetworks = normalizeAiGeneratedNetworks(parsed.networks)
-        const tags = Array.isArray(parsed.tagsToUpsert) ? parsed.tagsToUpsert : []
-        const circuitPayload: AiCircuitSynthesisPayload = {
-          explanation: parsed.explanation || 'Synthesized Ladder Logic via Google Gemini.',
-          operationMode: parsed.operationMode || 'replace_ob1_networks',
-          tagsToUpsert: tags,
-          networks: normalizedNetworks
-        }
-        const result = this.applyCircuitPayload(circuitPayload, mode)
-        BlackBoxLogger.getInstance().log(
-          'AI_PARSE_AND_AST_INJECTION',
-          `Extracted JSON payload: ${normalizedNetworks.length} networks, ${tags.length} tags`,
-          { networks: normalizedNetworks.length, tags: tags.length }
-        )
-        return {
-          replyText: result.summaryText,
-          tier,
-          providerUsed: 'gemini',
-          toolCallsExecuted: [],
-          toolResults: [],
-          ragRulesConsulted: consultedRuleNames,
-          stagedChangeset: result.stagedChangeset,
-          rawTraceSnippet: rawText.substring(0, 300),
-          rawJson: jsonExtract.raw
-        }
-      } else if (parsed && parsed.explanation) {
-        return {
-          replyText: parsed.explanation,
-          tier,
-          providerUsed: 'gemini',
-          toolCallsExecuted: [],
-          toolResults: [],
-          rawTraceSnippet: rawText.substring(0, 300)
-        }
+      if (!rawText) {
+        const finalErr = lastError || new Error('No candidate Gemini model produced a response.')
+        BlackBoxLogger.getInstance().log('AI_ERROR', `All candidate Gemini models failed: ${finalErr.message}`, {
+          candidateModels,
+          error: String(finalErr)
+        })
+        throw finalErr
+      }
+
+      // A model the API no longer serves is not tried again on every request
+      if (missingModels.includes(this.config.selectedModelId)) {
+        this.config.selectedModelId = successfulModel
+        this.saveConfig()
+      }
+      for (const missing of missingModels) {
+        const index = candidateModels.indexOf(missing)
+        if (index !== -1) candidateModels.splice(index, 1)
+      }
+
+      BlackBoxLogger.getInstance().log(
+        'AI_RAW_RESPONSE',
+        `Gemini API Response received from ${successfulModel} (${Date.now() - startMs}ms, ${rawText.length} chars)`,
+        { model: successfulModel, rawSnippet: rawText.substring(0, 500), rawFull: rawText }
+      )
+      return rawText
+    }
+
+    return this.runAgentTurn(prompt, tier, mode, isTurkish, consultedRuleNames, requestModel)
+  }
+
+  /** Reads one model reply. Problems go back to the model instead of reaching the project. */
+  private interpretModelReply(rawText: string): AgentModelReply {
+    const reply: AgentModelReply = { explanation: '', toolCalls: [], problems: [] }
+    let dslErrors: string[] = []
+    const fromDsl = (text: string, operationMode = this.defaultCircuitMode()): AiCircuitSynthesisPayload | undefined => {
+      const compiled = LadderDslCompiler.compileLadderDslToAst(text, this.dslOptions(operationMode))
+      if (!compiled.success || compiled.networks.length === 0) {
+        dslErrors = compiled.errors
+        return undefined
+      }
+      return {
+        explanation: compiled.explanation || '',
+        operationMode: this.defaultCircuitMode(),
+        tagsToUpsert: compiled.tags.map((t) => ({
+          name: t.name,
+          dataType: t.dataType as any,
+          address: t.address,
+          comment: t.comment
+        })),
+        networks: normalizeAiGeneratedNetworks(compiled.networks)
       }
     }
 
-    // 2. Direct Ladder DSL compilation if returned in plain text format
-    if (
-      rawText.includes('# NETWORK DEFINITIONS') ||
-      rawText.includes('NW ') ||
-      rawText.includes('SERIES(') ||
-      rawText.includes('# TAG DECLARATIONS') ||
-      rawText.includes('TAG ')
-    ) {
-      const cleanDsl = rawText
-        .replace(/^```[a-zA-Z0-9_-]*\r?\n/gm, '')
-        .replace(/```$/gm, '')
-        .trim()
+    const extracted = this.extractValidJsonBlock(rawText)
+    if (extracted?.json && typeof extracted.json === 'object') {
+      const parsed = extracted.json as Partial<AiCircuitSynthesisPayload> & {
+        dsl?: unknown
+        toolCalls?: unknown
+        verification?: unknown
+      }
+      reply.explanation = typeof parsed.explanation === 'string' ? parsed.explanation : ''
+      reply.rawJson = extracted.raw
 
-      const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl)
-      if (dslResult.success && dslResult.networks.length > 0) {
-        const normalizedNetworks = normalizeAiGeneratedNetworks(dslResult.networks)
-        const circuitPayload: AiCircuitSynthesisPayload = {
-          explanation: dslResult.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL Engine.',
-          operationMode: 'replace_ob1_networks',
-          tagsToUpsert: dslResult.tags.map((t) => ({
-            name: t.name,
-            dataType: t.dataType as any,
-            address: t.address,
-            comment: t.comment
-          })),
-          networks: normalizedNetworks
-        }
-        const result = this.applyCircuitPayload(circuitPayload, mode)
-        BlackBoxLogger.getInstance().log(
-          'AI_PARSE_AND_AST_INJECTION',
-          `Compact Ladder DSL compiled: ${normalizedNetworks.length} networks, ${dslResult.tags.length} tags`,
-          { networks: normalizedNetworks.length, tags: dslResult.tags.length }
-        )
-        return {
-          replyText: result.summaryText,
-          tier,
-          providerUsed: 'gemini',
-          toolCallsExecuted: [],
-          toolResults: [],
-          ragRulesConsulted: consultedRuleNames,
-          stagedChangeset: result.stagedChangeset,
-          rawTraceSnippet: rawText.substring(0, 300),
-          rawJson: JSON.stringify(circuitPayload, null, 2)
+      for (const call of Array.isArray(parsed.toolCalls) ? parsed.toolCalls : []) {
+        const tool = String(call?.tool)
+        const params = call?.params && typeof call.params === 'object' ? call.params : {}
+        const isAllowedTagAction = tool !== 'manage_plc_tags' || params.action === 'upsert'
+        if (!AGENT_TOOLS.has(tool) || !isAllowedTagAction) {
+          reply.problems.push(`Tool '${tool}' with these parameters is not available to you.`)
+        } else {
+          reply.toolCalls.push({ tool, params })
         }
       }
+
+      if (typeof parsed.dsl === 'string' && parsed.dsl.trim()) {
+        reply.circuit = fromDsl(this.dslWithDeclaredTags(parsed.dsl, parsed.tagsToUpsert), parsed.operationMode)
+        if (!reply.circuit) reply.problems.push(`The "dsl" field did not compile: ${dslErrors.join('; ') || 'it has no networks'}`)
+      } else if (Array.isArray(parsed.networks) && parsed.networks.length > 0) {
+        reply.circuit = {
+          explanation: '',
+          operationMode: this.defaultCircuitMode(),
+          tagsToUpsert: Array.isArray(parsed.tagsToUpsert) ? parsed.tagsToUpsert : [],
+          networks: normalizeAiGeneratedNetworks(parsed.networks)
+        }
+      }
+      if (parsed.verification !== undefined) {
+        const verification = parseBehaviorTest(parsed.verification)
+        reply.behaviorTest = verification.test
+        reply.problems.push(...verification.problems)
+      }
+      if (reply.circuit) {
+        reply.circuit.explanation = reply.explanation || reply.circuit.explanation || 'Synthesized Ladder Logic via Google Gemini.'
+        if (parsed.operationMode === 'replace_ob1_networks' || parsed.operationMode === 'append_ob1_networks') {
+          reply.circuit.operationMode = parsed.operationMode
+        }
+        if (hasEmptyNetwork(reply.circuit.networks)) {
+          reply.circuit = undefined
+          reply.problems.push('A network has no instructions. FBs, FCs and UDTs need tools, not networks.')
+        }
+      }
+      return reply
     }
 
-    // 3. Conversational explanation or unparsed response
-    if (
-      prompt.toLowerCase().includes('devre') ||
-      prompt.toLowerCase().includes('circuit') ||
-      prompt.toLowerCase().includes('motor') ||
-      prompt.toLowerCase().includes('otopark') ||
-      prompt.toLowerCase().includes('parking')
-    ) {
-      BlackBoxLogger.getInstance().log('AI_PARSE_ERROR', 'Model text did not contain valid Ladder DSL or JSON blocks', {
-        rawSnippet: rawText.substring(0, 500)
-      })
+    const text = rawText.trim()
+    if (text.startsWith('{') || text.startsWith('```')) {
+      reply.problems.push('Your reply was not valid JSON and may have been cut off. Send a shorter, complete JSON object.')
+      return reply
+    }
+    if (/^(# NETWORK DEFINITIONS|# TAG DECLARATIONS|NW \d|TAG )/m.test(text)) {
+      reply.circuit = fromDsl(text)
+      if (reply.circuit) {
+        reply.explanation = reply.circuit.explanation
+        reply.circuit.explanation = reply.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL Engine.'
+        return reply
+      }
+    }
+    reply.explanation = text
+    return reply
+  }
+
+  /**
+   * Runs the reply's test on the project as it stands now. A wrong behaviour always goes back to the model.
+   * A missing test or a very short output pulse is raised once, and accepted with a note if the model repeats it.
+   */
+  private checkCircuitBehavior(
+    test: BehaviorTest | undefined,
+    askedOnce: Set<string>,
+    isTurkish: boolean
+  ): { problems: string[]; note: string } {
+    const askOnce = (kind: string, problems: string[], note: string): { problems: string[]; note: string } => {
+      if (askedOnce.has(kind)) return { problems: [], note }
+      askedOnce.add(kind)
+      return { problems, note: '' }
     }
 
-    return {
-      replyText: rawText || 'Model produced empty response.',
+    if (!test) {
+      return askOnce(
+        'missing test',
+        ['A ladder circuit needs a "verification" timeline, so it can be run on the simulator. Send the complete answer with one.'],
+        isTurkish
+          ? '**Simülasyon testi:** Model test göndermedi, devrenin davranışı doğrulanmadı.'
+          : '**Simulation test:** The model sent no test, so the behaviour was not verified.'
+      )
+    }
+
+    const blocks = useBlockStore.getState()
+    const metadata = useProjectStore.getState().metadata
+    const result = runBehaviorTest(test, {
+      projectPath: metadata?.projectPath || '',
+      metadata,
+      hardware: useHardwareStore.getState().config,
+      tagTables: useTagStore.getState().tagTables,
+      udts: blocks.udts,
+      dataBlocks: blocks.dataBlocks,
+      ladBlocks: blocks.ladBlocks,
+      sclBlocks: blocks.sclBlocks
+    } as ProjectLoadPayload)
+    BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', `Simulation test: ${result.checks} checks, ${result.failures.length} failed`, {
+      failures: result.failures,
+      pulses: result.pulses,
+      timeline: result.timeline
+    })
+
+    const whatHappened = result.timeline ? [`What the program really did:\n${result.timeline}`] : []
+    if (result.failures.length > 0) {
+      return { problems: [`The simulation test failed:`, ...result.failures, ...result.pulses, ...whatHappened], note: '' }
+    }
+    const passed = isTurkish
+      ? `**Simülasyon testi:** ${result.checks} kontrolün hepsi geçti.`
+      : `**Simulation test:** all ${result.checks} checks passed.`
+    if (result.pulses.length > 0) {
+      const asked = askOnce(
+        'short pulse',
+        [
+          ...result.pulses,
+          'A timer whose own Q output resets its IN gives a one-scan pulse. Fix the circuit. If such a short pulse is really wanted, send the same answer again.',
+          ...whatHappened
+        ],
+        `${passed}\n\n${result.pulses.map((p) => `- ${p}`).join('\n')}`
+      )
+      return asked
+    }
+    return { problems: [], note: passed }
+  }
+
+  /**
+   * Model, tools, compiler and simulator in a loop. A reply is applied as a whole and kept only if it compiles
+   * without new errors and behaves as its test says. Otherwise the project goes back to where it was and the
+   * model gets the errors.
+   */
+  private async runAgentTurn(
+    prompt: string,
+    tier: AiTier,
+    mode: 'auto-apply' | 'diff-view',
+    isTurkish: boolean,
+    ragRulesConsulted: string[],
+    requestModel: (contents: GeminiContent[]) => Promise<string>
+  ): Promise<AgentExecutionResponse> {
+    const tools = PlcAgentTools.getInstance()
+    const turnStart = tools.takeSnapshot()
+    const reportBefore = tools.runCompilerVerification()
+    const errorsBefore = new Set(reportBefore.errors)
+    const warningsBefore = new Set(reportBefore.warnings)
+    // Things that are unusual but can be right: the model is asked once and believed if it repeats them
+    const askedOnce = new Set<string>()
+    const contents: GeminiContent[] = [
+      { role: 'user', parts: [{ text: `CURRENT PROJECT:\n${tools.describeProjectForModel()}\n\nUSER REQUEST:\n${prompt}` }] }
+    ]
+    const executed: AgentToolCall[] = []
+    const toolResults: AgentToolResult[] = []
+    let lastProblems: string[] = []
+    let rawText = ''
+    let rawJson: string | undefined
+
+    const respond = (fields: Partial<AgentExecutionResponse> & { replyText: string }): AgentExecutionResponse => ({
       tier,
       providerUsed: 'gemini',
-      toolCallsExecuted: [],
-      toolResults: [],
-      rawTraceSnippet: rawText.substring(0, 300)
+      toolCallsExecuted: executed,
+      toolResults,
+      ragRulesConsulted,
+      rawTraceSnippet: rawText.substring(0, 300),
+      rawJson,
+      ...fields
+    })
+
+    for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
+      rawText = await requestModel(contents)
+      contents.push({ role: 'model', parts: [{ text: rawText }] })
+      const reply = this.interpretModelReply(rawText)
+      rawJson = reply.rawJson
+
+      if (reply.problems.length > 0) {
+        lastProblems = reply.problems
+        contents.push({ role: 'user', parts: [{ text: `Nothing was applied.\n${reply.problems.join('\n')}` }] })
+        continue
+      }
+
+      const writes = reply.toolCalls.filter((c) => !READ_ONLY_TOOLS.has(c.tool))
+      const changesProject = writes.length > 0 || reply.circuit !== undefined
+
+      // Only reads: answer them and let the model go on
+      if (reply.toolCalls.length > 0 && !changesProject) {
+        const reads = await tools.executeToolBatch(reply.toolCalls, mode)
+        executed.push(...reply.toolCalls)
+        toolResults.push(...reads.results)
+        contents.push({ role: 'user', parts: [{ text: `TOOL RESULTS:\n${JSON.stringify(reads.results)}` }] })
+        continue
+      }
+
+      if (!changesProject) {
+        const note = isTurkish ? 'Projede değişiklik yapılmadı.' : 'No changes were made to the project.'
+        return respond({ replyText: `${reply.explanation || rawText}\n\n*${note}*` })
+      }
+
+      // Apply the whole reply
+      const problems: string[] = []
+      const lines: string[] = []
+      const staged: NonNullable<AgentExecutionResponse['stagedChangeset']> = []
+      if (mode === 'auto-apply') tools.holdDiskWrites()
+      try {
+        if (reply.toolCalls.length > 0) {
+          const batch = await tools.executeToolBatch(reply.toolCalls, mode)
+          executed.push(...reply.toolCalls)
+          toolResults.push(...batch.results)
+          staged.push(...(batch.stagedChangeset || []))
+          for (const result of batch.results) {
+            if (!result.success) problems.push(`${result.tool}: ${result.message}`)
+            else if (!READ_ONLY_TOOLS.has(result.tool)) lines.push(`- ${result.message}`)
+          }
+        }
+        if (reply.circuit && problems.length === 0) {
+          const applied = this.applyCircuitPayload(reply.circuit, mode)
+          lines.unshift(applied.summaryText)
+          staged.push(...(applied.stagedChangeset || []))
+        } else if (!reply.circuit && reply.explanation) {
+          lines.unshift(reply.explanation, '')
+        }
+
+        if (mode === 'diff-view' && problems.length === 0) {
+          // Try the staged circuit on the project for a moment. New tools are not applied yet, so it cannot run with them
+          let behaviorNote = ''
+          if (reply.circuit && writes.length === 0) {
+            tools.holdDiskWrites()
+            this.applyCircuitPayload(reply.circuit, 'auto-apply', { trialRun: true })
+            const behavior = this.checkCircuitBehavior(reply.behaviorTest, askedOnce, isTurkish)
+            tools.discardDiskWrites()
+            tools.restoreSnapshot(turnStart)
+            problems.push(...behavior.problems)
+            behaviorNote = behavior.note
+          } else if (reply.circuit) {
+            behaviorNote = isTurkish
+              ? '**Simülasyon testi:** Bu yanıt yeni blok veya etiket de oluşturduğu için onaydan önce çalıştırılamadı, devrenin davranışı doğrulanmadı.'
+              : '**Simulation test:** This reply also creates blocks or tags, so it could not run before approval and the behaviour was not verified.'
+          }
+          if (problems.length === 0) {
+            const note = isTurkish
+              ? 'Derleyici kontrolü onaydan sonra çalışır.'
+              : 'The compiler check runs after you approve the changes.'
+            const parts = [lines.join('\n'), behaviorNote, `*${note}*`].filter(Boolean)
+            return respond({ replyText: parts.join('\n\n'), stagedChangeset: staged })
+          }
+        }
+
+        if (problems.length === 0) {
+          const report = tools.runCompilerVerification()
+          const newErrors = report.errors.filter((e) => !errorsBefore.has(e))
+          // TIA accepts a bit with no channel and overlapping tags, so these are questions and not errors
+          const newAddressWarnings = report.warnings.filter(
+            (w) => (w.includes('[S7-IO-009]') || w.includes('[S7-MEM-001]')) && !warningsBefore.has(w)
+          )
+          problems.push(...newErrors)
+          if (newErrors.length === 0 && newAddressWarnings.length > 0 && !askedOnce.has('address warning')) {
+            askedOnce.add('address warning')
+            problems.push(
+              ...newAddressWarnings,
+              'Use a free address that exists on this CPU. If the user asked for this address, has an expansion module or really wants two tags on one address, send the same answer again.'
+            )
+          }
+          let behaviorNote = ''
+          if (problems.length === 0 && reply.circuit) {
+            const behavior = this.checkCircuitBehavior(reply.behaviorTest, askedOnce, isTurkish)
+            problems.push(...behavior.problems)
+            behaviorNote = behavior.note ? `\n\n${behavior.note}` : ''
+          }
+          if (problems.length === 0) {
+            tools.releaseDiskWrites()
+            tools.setUndoSnapshot(turnStart)
+            const older = report.errors.length
+              ? ` ${report.errors.length} error(s) were already in the project before this change.`
+              : ''
+            const addressNote = newAddressWarnings.length ? `\n\n${newAddressWarnings.map((w) => `- ${w}`).join('\n')}` : ''
+            return respond({
+              replyText: `${lines.join('\n')}\n\n**Compiler:** no new errors, ${report.warnings.length} warning(s).${older}${addressNote}${behaviorNote}`,
+              compilerVerification: { success: report.success, message: report.message }
+            })
+          }
+        }
+      } catch (err) {
+        if (signalAborted(err)) {
+          tools.discardDiskWrites()
+          tools.restoreSnapshot(turnStart)
+          throw err
+        }
+        problems.push(err instanceof Error ? err.message : String(err))
+      }
+
+      tools.discardDiskWrites()
+      tools.restoreSnapshot(turnStart)
+      lastProblems = problems
+      BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Agent reply undone, round ${round + 1}`, { problems })
+      contents.push({
+        role: 'user',
+        parts: [{ text: `Your reply was undone because of these errors. Send the complete corrected answer.\n${problems.join('\n')}` }]
+      })
     }
+
+    const details = lastProblems.map((p) => `- ${p}`).join('\n')
+    return respond({
+      replyText: isTurkish
+        ? `Model ${MAX_AGENT_ROUNDS} denemede çalışan bir sonuç üretemedi. Projede değişiklik yapılmadı.\n\n${details}`
+        : `The model did not reach a working result in ${MAX_AGENT_ROUNDS} attempts. The project was not changed.\n\n${details}`,
+      isError: true,
+      errorDetails: details
+    })
+  }
+
+  /** Adding is the safe default: replacing is only for an empty OB1 or an explicit request. */
+  private defaultCircuitMode(): AiCircuitSynthesisPayload['operationMode'] {
+    const ob1 = useBlockStore.getState().ladBlocks.find((b) => (b.blockType === 'OB' && b.blockNumber === 1) || b.name === 'OB1_Main')
+    const hasLogic = (ob1?.networks || []).some((n) => (n.nodes || []).length > 0)
+    return hasLogic ? 'append_ob1_networks' : 'replace_ob1_networks'
   }
 
   /**
@@ -2296,11 +2164,11 @@ If the prompt is purely informational without ladder logic, provide an explanati
         .replace(/```$/gm, '')
         .trim()
 
-      const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl)
+      const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl, this.dslOptions())
       if (dslResult.success && dslResult.networks.length > 0) {
         const circuitPayload: AiCircuitSynthesisPayload = {
           explanation: dslResult.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL Engine.',
-          operationMode: 'replace_ob1_networks',
+          operationMode: this.defaultCircuitMode(),
           tagsToUpsert: dslResult.tags.map((t) => ({
             name: t.name,
             dataType: t.dataType as any,
@@ -2343,13 +2211,12 @@ If the prompt is purely informational without ladder logic, provide an explanati
     const endpoint = (this.config.ollamaEndpoint || 'http://localhost:11434').replace(/\/$/, '')
     const model = this.config.selectedModelId || 'qwen2.5-coder'
 
-    // Retrieve Top 4 Semantic MEB RAG Rules
     const ragEngine = RagKnowledgeEngine.getInstance()
-    const topRules = ragEngine.retrieveTopKRules(prompt, 4)
+    const topRules = ragEngine.retrieveTopKRules(prompt, 3)
     const ragPromptSection = ragEngine.formatRetrievedRulesForPrompt(topRules)
     const consultedRuleNames = topRules.map((r) => r.item.name)
 
-    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC Automation Architect running on a local industrial factory server following strict MEB Automation Curriculum standards.
+    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC programmer.
 When asked to synthesize, create, or modify PLC Ladder logic, circuits, timers, motors, or I/O configurations, output your response strictly in Compact Ladder DSL:
 
 # EXPLANATION
@@ -2371,12 +2238,7 @@ Compact Ladder DSL Syntax:
 - Math: ADD(in1, in2, out), SUB, MUL, DIV, MOVE, NORM_X, SCALE_X
 - Combinators: SERIES(elem1, elem2, ...), PARALLEL(branch1, branch2, ...)
 
-CRITICAL MEB INDUSTRIAL RULES:
-1. STRICT BAN ON DUMMY %M TIMER COILS: Never create dummy %M coils following a timer. Timers terminate cleanly at the rung end without a coil.
-2. NATIVE SUB-BIT ADDRESSING: Contacts reading a timer done bit MUST use 'T1.Q' directly.
-3. MOTOR SEAL-IN: Network 1 has Start NO parallel with Motor NO, series with Stop NC and T1.Q NC, driving Motor coil. Network 2 has Motor NO driving TON T1.
-4. ZERO DUMMY %M TAGS: Do not declare dummy %M tags for timer done flags.
-5. INDICATOR LAMPS & LEDS: If the user requests indicator lamps/LEDs (e.g. green LED when motor runs, red LED when motor stops), assign distinct safe addresses (e.g. Green LED %Q0.1, Red LED %Q0.2) and add dedicated networks: Network 3 (Motor NO driving Green LED coil) and Network 4 (Motor NC driving Red LED coil). NEVER assign duplicate addresses to different tags.
+${LADDER_RULES}
 ${ragPromptSection}
 Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.`
 
@@ -2433,11 +2295,11 @@ Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.`
           .replace(/```$/gm, '')
           .trim()
 
-        const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl)
+        const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl, this.dslOptions())
         if (dslResult.success && dslResult.networks.length > 0) {
           const circuitPayload: AiCircuitSynthesisPayload = {
             explanation: dslResult.explanation || 'Synthesized Ladder Logic via Local Ollama Model.',
-            operationMode: 'replace_ob1_networks',
+            operationMode: this.defaultCircuitMode(),
             tagsToUpsert: dslResult.tags.map((t) => ({
               name: t.name,
               dataType: t.dataType as any,

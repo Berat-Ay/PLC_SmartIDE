@@ -72,33 +72,33 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
     : null
 
   return (
-    <div className="h-full flex flex-col bg-industrial-900 select-none text-xs overflow-hidden">
+    <div className="cq h-full flex flex-col bg-industrial-900 select-none text-xs overflow-hidden">
       {/* Block Header Banner */}
-      <div className="h-10 px-4 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2">
+      <div className="h-10 px-4 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between gap-3 shrink-0 whitespace-nowrap overflow-hidden">
+        <div className="flex items-center gap-2 min-w-0">
           {isLad ? (
-            <FileCode2 className="w-4 h-4 text-purple-400" />
+            <FileCode2 className="w-4 h-4 text-purple-400 shrink-0" />
           ) : (
-            <Code className="w-4 h-4 text-blue-400" />
+            <Code className="w-4 h-4 text-blue-400 shrink-0" />
           )}
-          <span className="font-semibold text-industrial-100 font-mono text-sm">
+          <span className="font-semibold text-industrial-100 font-mono text-sm truncate" title={currentBlock.name}>
             {currentBlock.name}
           </span>
-          <span className="text-[11px] text-industrial-300 bg-industrial-850 px-2 py-0.5 rounded border border-industrial-750 font-mono">
+          <span className="under-600:hidden text-[11px] text-industrial-300 bg-industrial-850 px-2 py-0.5 rounded border border-industrial-750 font-mono">
             {currentBlock.blockType}{currentBlock.blockNumber} [{isLad ? 'LAD AST' : 'SCL'}]
           </span>
-          <span className="text-[10px] text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/60">
+          <span className="under-720:hidden text-[10px] text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/60">
             {currentBlock.optimizedAccess ? 'Optimized Access' : 'Standard Access'}
           </span>
           {isMonitoring && (
             <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-700 font-mono animate-pulse font-bold">
               <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              ONLINE MONITORING
+              <span className="under-900:hidden">ONLINE MONITORING</span>
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           {/* SCL Syntax indicator */}
           {!isLad && sclSyntax && (
             <div
@@ -111,7 +111,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
               {sclSyntax.valid ? (
                 <>
                   <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                  <span>Syntax Valid</span>
+                  <span className="under-720:hidden">Syntax Valid</span>
                 </>
               ) : (
                 <>
@@ -133,7 +133,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
             title="Toggle Quick I/O Forcing Bar"
           >
             <Zap className="w-3.5 h-3.5" />
-            <span>Force I/O</span>
+            <span className="under-600:hidden">Force I/O</span>
           </button>
 
           {isLad && (
@@ -147,9 +147,10 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                   ? 'bg-industrial-750 text-white border border-industrial-600'
                   : 'text-industrial-400 hover:text-industrial-200 hover:bg-industrial-850'
               }`}
+              title={showRawJson ? 'View SVG Ladder' : 'View AST JSON'}
             >
               <Brackets className="w-3.5 h-3.5" />
-              <span>{showRawJson ? 'View SVG Ladder' : 'View AST JSON'}</span>
+              <span className="under-600:hidden">{showRawJson ? 'View SVG Ladder' : 'View AST JSON'}</span>
             </button>
           )}
 
@@ -168,13 +169,8 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
             title="View STL listing"
           >
             <Binary className="w-3.5 h-3.5" />
-            <span>{showBytecode ? 'Close Listing' : 'View STL Listing'}</span>
+            <span className="under-600:hidden">{showBytecode ? 'Close Listing' : 'View STL Listing'}</span>
           </button>
-
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-industrial-850 text-industrial-400 border border-industrial-750 text-[10px] font-mono">
-            <Sparkles className="w-3 h-3 text-cyan-400" />
-            <span>Phase 2 Runtime Online</span>
-          </div>
         </div>
       </div>
 
@@ -276,7 +272,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                       </div>
                     </div>
                   </div>
-                  <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 font-bold">
+                  <span className="under-600:hidden text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 font-bold">
                     SCL
                   </span>
                 </div>
@@ -284,8 +280,8 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                 {/* SCL Code Area with Line Numbers & Live Badges */}
                 <div className="flex-1 rounded-lg bg-industrial-950 border border-industrial-800 overflow-hidden flex flex-col">
                   <div className="px-3 py-1.5 bg-industrial-900/60 border-b border-industrial-850 flex items-center justify-between text-industrial-400 font-mono text-[10px]">
-                    <span>Source File: /blocks/{sclBlock.fileName}</span>
-                    <span>Lines: {sclBlock.code.split('\n').length}</span>
+                    <span className="truncate">Source File: /blocks/{sclBlock.fileName}</span>
+                    <span className="shrink-0 ml-3">Lines: {sclBlock.code.split('\n').length}</span>
                   </div>
 
                   <div className="flex-1 flex overflow-hidden">
