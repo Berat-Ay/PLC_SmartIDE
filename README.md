@@ -37,6 +37,14 @@ Bu komut, TIA kurulu bir bilgisayara taşınacak `tia-package` klasörünü haz�
 | Etiket tabloları | SimaticML ve CSV | SimaticML |
 | LAD blokları | Yok, uyarıyla atlanır | Yok, uyarıyla atlanır |
 
+## Yapay zekâ ajanı
+
+Ayarlardan bir Gemini anahtarı girin. Anahtar işletim sisteminin şifreli deposunda saklanır.
+
+Ajan projenin mevcut halini görür. FB, FC, UDT, global DB ve etiket oluşturur, OB1'e ladder ekler ve blokları okuyabilir. Her yanıt bir bütün olarak uygulanır ve derlenir. Yeni bir hata çıkarsa yanıt geri alınır, hata modele gönderilir ve en fazla 6 istekte yeniden denenir. Yine çözülmezse proje değişmez ve hata gösterilir.
+
+Donanım ayarlarını, simülasyon betiklerini değiştiremez ve etiket silemez.
+
 ## Bilinen sınırlar
 
 Gerçek CPU'dan farklı veya doğrulanmamış davranışlar:
@@ -61,5 +69,20 @@ Gerçek CPU'dan farklı veya doğrulanmamış davranışlar:
 
 - Silinen blok, UDT ve etiket tablolarının dosyaları projedeki `.trash` klasörüne taşınır. Geri almak için dosya elle taşınmalıdır
 - Arayüz tablosu bir kaynağı yeniden yazarken bildirim bölümleri arasındaki yorumlar kaybolur
-- Gemini bağlantısı gerçek bir anahtarla denenmedi
-- Yapay zekâ ajanı API anahtarı veya Ollama sunucusu olmadan çalışmaz. Yerleşik hazır yanıtlar yoktur
+
+**Yapay zekâ ajanı**
+
+- API anahtarı veya Ollama sunucusu olmadan çalışmaz. Yerleşik hazır yanıtlar yoktur
+- Gemini etiketleri, blok adlarını ve okuduğu blokların kaynağını Google'a gönderir. Gizli bir projede kullanmadan önce Google'ın koşullarını okuyun
+- Yalnızca Gemini yolu araç döngüsü kullanır. OpenAI ve Ollama yalnızca OB1'e ladder ekler, derleyici kontrolünden geçmez
+- Ladder yalnızca OB1'e yazılır. Ajan bir FB veya FC üretebilir, ama onu ladder'dan çağıramaz ve yeni OB ekleyemez
+- Derleyiciden geçmek, mantığın doğru olduğunu göstermez. Model hata yapabilir, programı simülatörde sınayın
+- Modelin "MEB standardına uygun" demesi doğrulanmış bir iddia değildir
+- Diff-View'da derleyici kontrolü onaydan sonra çalışır ve hata varsa değişiklik geri alınmaz, Undo Turn ile alınır
+- Undo Turn, ajanın diske yazdığı yeni dosyaları silmez. Proje yeniden açılınca bu bloklar geri gelir
+
+## Lisans
+
+[MIT](LICENSE)
+
+Kodun büyük bölümü yapay zekâ araçlarıyla (Claude) yazıldı. Commit geçmişinde `Co-Authored-By` satırlarıyla görülebilir.
