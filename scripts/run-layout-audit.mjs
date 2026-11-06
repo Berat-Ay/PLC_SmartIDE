@@ -326,6 +326,66 @@ for (const tab of tabs) {
   await eachSize(`tab-${tab.type}-${String(tab.targetId || tab.id).replace(/[^\w]+/g, '_')}`)
 }
 
+// ---- Selection toolbars of contacts and coils ----
+// The bounds check does not see SVG shapes, so each toolbar is measured against the box that clips it
+// and sampled to prove that nothing is painted over it.
+const toolbarDefects = async () =>
+  page.evaluate(() => {
+    const found = []
+    for (const bar of document.querySelectorAll('[data-testid$="-selection-toolbar"]')) {
+      const box = bar.querySelector('rect').getBoundingClientRect()
+      const clip = bar.closest('[data-testid="ladder-scroll-container"]').getBoundingClientRect()
+      const svg = bar.closest('svg').getBoundingClientRect()
+      const rail = svg.left + (30 + 2.5) * (svg.width / bar.closest('svg').viewBox.baseVal.width)
+      if (box.top < clip.top || box.bottom > clip.bottom) found.push(`cut vertically by ${Math.round(Math.max(clip.top - box.top, box.bottom - clip.bottom))}px`)
+      if (box.left < svg.left || box.right > svg.right) found.push('outside the rung horizontally')
+      if (box.left < rail) found.push('covers the left power rail')
+      let covered = 0
+      for (let i = 1; i < 24; i++) {
+        const x = box.left + (box.width * i) / 24
+        const y = box.top + box.height / 2
+        if (x < clip.left || x > clip.right) continue
+        const hit = document.elementFromPoint(x, y)
+        if (hit && hit.closest('svg') === bar.closest('svg') && !bar.contains(hit)) covered++
+      }
+      if (covered) found.push(`${covered}/23 samples covered by ${bar.getAttribute('data-testid')}`)
+    }
+    return found
+  })
+
+const SELECT_DEFECTS = []
+for (const f of inventory.lad.slice(0, 2)) {
+  await ui((id) => window.plcTestContext.useUIStore.getState().setActiveTab(id), `audit-${f}`)
+  await page.waitForTimeout(250)
+  const count = await page.locator('[data-testid="contact-bottom-address"], [data-testid="coil-bottom-address"]').count()
+  console.log(`Selecting ${count} contacts and coils in ${f}`)
+  for (const size of SIZES) {
+    await resize(size)
+    const n = await page.locator('[data-testid="contact-bottom-address"], [data-testid="coil-bottom-address"]').count()
+    let toolbars = 0
+    for (let i = 0; i < n; i++) {
+      await page.evaluate((idx) => {
+        const el = document.querySelectorAll('[data-testid="contact-bottom-address"], [data-testid="coil-bottom-address"]')[idx]
+        el.scrollIntoView({ block: 'center', inline: 'center' })
+      }, i)
+      await page.evaluate((idx) => {
+        const el = document.querySelectorAll('[data-testid="contact-bottom-address"], [data-testid="coil-bottom-address"]')[idx]
+        el.parentElement.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      }, i)
+      await page.waitForTimeout(40)
+      const barCount = await page.locator('[data-testid$="-selection-toolbar"]').count()
+      toolbars += barCount
+      for (const d of await toolbarDefects()) SELECT_DEFECTS.push(`${f} #${i} @${size.join('x')}: ${d}`)
+      if (i === 0 && barCount) await page.screenshot({ path: path.join(shotDir, `toolbar-${f.replace(/[^\w]+/g, '_')}-${size.join('x')}.png`) })
+    }
+    console.log(`  ${JSON.stringify(size)}: ${toolbars} toolbars shown for ${n} elements`)
+    if (n > 0 && toolbars === 0) SELECT_DEFECTS.push(`${f} @${JSON.stringify(size)}: selecting never opened a toolbar`)
+  }
+  await page.keyboard.press('Escape')
+}
+console.log(`Selection toolbar defects: ${SELECT_DEFECTS.length}`)
+for (const d of [...new Set(SELECT_DEFECTS)].slice(0, 40)) console.log('  ' + d)
+
 // ---- Sub tabs and alternate editor views ----
 const clickAndCheck = async (view, locator) => {
   if ((await locator.count()) === 0) {
@@ -491,4 +551,4 @@ console.log(`Report: ${path.join(shotDir, 'report.txt')}`)
 
 await app.close()
 const blocking = rows.filter((r) => r.kind !== 'ELLIPSIS' && r.kind !== 'H_SCROLLBAR')
-process.exit(blocking.length > 0 || errors.length > 0 ? 1 : 0)
+process.exit(blocking.length > 0 || errors.length > 0 || SELECT_DEFECTS.length > 0 ? 1 : 0)

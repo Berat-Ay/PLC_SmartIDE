@@ -100,7 +100,8 @@ export class LadderGridLayoutEngine {
   public static readonly ROW_HEIGHT = 110 // standard contact row
   public static readonly BOX_ROW_HEIGHT = 140 // function block row
   public static readonly LEFT_RAIL_X = 48
-  public static readonly TOP_PADDING = 65
+  // The selection toolbar of a contact or coil sits 84 above its wire and must stay inside the SVG
+  public static readonly TOP_PADDING = 90
   public static readonly BOTTOM_PADDING = 55
   public static readonly RIGHT_MARGIN = 60
 

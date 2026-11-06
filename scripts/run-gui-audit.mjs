@@ -483,9 +483,9 @@ async function runGuiAudit() {
       const vb = svg.viewBox.baseVal
       const vbWidth = vb.width || 1100
       const vbHeight = vb.height || 145
-      // Drop candidate after contact is at x=195, y=65. Test proximity at x=200 (5px distance < 60px snap radius)
+      // Drop candidate after contact is at x=195, y=90. Test proximity at x=200 (5px distance < 60px snap radius)
       const clientX = rect.left + (rect.width * 200) / vbWidth
-      const clientY = rect.top + (rect.height * 65) / vbHeight
+      const clientY = rect.top + (rect.height * 90) / vbHeight
 
       let event
       try {
@@ -1300,8 +1300,8 @@ async function runGuiAudit() {
       await copyTraceBtn.waitFor({ state: 'visible', timeout: 3000 })
       console.log('  ✅ PASS: [Copy Error Trace] button verified on diagnostic card.')
 
-      // Compile canonical MEB 10s Timer circuit via Compact Ladder DSL Compiler
-      console.log('  -> Injecting canonical MEB 10s timer circuit via Compact Ladder DSL Engine...')
+      // Compile a 10s timer circuit via Compact Ladder DSL Compiler
+      console.log('  -> Injecting 10s timer circuit via Compact Ladder DSL Engine...')
       await window.evaluate(() => {
         const dsl = `
 # TAG DECLARATIONS
@@ -1315,7 +1315,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
 `
         const dslResult = window.plcTestContext.LadderDslCompiler.compileLadderDslToAst(dsl)
         window.plcTestContext.AiModelRouter.getInstance().applyCircuitPayload({
-          explanation: 'Canonical MEB 10-Second Timer Motor Circuit',
+          explanation: '10-Second Timer Motor Circuit',
           operationMode: 'replace_ob1_networks',
           tagsToUpsert: dslResult.tags,
           networks: dslResult.networks
@@ -1329,7 +1329,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     await scenario11Ob1Tab.waitFor({ state: 'visible', timeout: 5000 })
     console.log('  -> OB1_Main active tab verified.')
 
-    // 5. Verify synthesized tags in useTagStore (MEB Standard: zero %M dummy tags!)
+    // 5. Verify synthesized tags in useTagStore (no %M tags that only copy a timer)
     const synthesizedTags = await window.evaluate(() => {
       const tagStore = window.plcTestContext.useTagStore.getState()
       const allTags = tagStore.tagTables.flatMap((t) => t.tags)
@@ -1344,7 +1344,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     if (!synthesizedTags.hasStart || !synthesizedTags.hasStop || !synthesizedTags.hasMotor || !synthesizedTags.hasNoDummyTimer) {
       throw new Error(`Synthesized tags violation in useTagStore: ${JSON.stringify(synthesizedTags)}`)
     }
-    console.log('  -> Canonical MEB tags verified with zero dummy %M flags!')
+    console.log('  -> Tags verified with no %M copies of a timer!')
 
     // 6. Verify synthesized Ladder Networks rendered on Canvas
     const canvasNetworksInfo = await window.evaluate(() => {
@@ -1361,9 +1361,9 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     })
     console.log(`  -> OB1_Main network metrics:`, canvasNetworksInfo)
     if (canvasNetworksInfo.count !== 2 || canvasNetworksInfo.net1TripOperand !== 'T1.Q' || canvasNetworksInfo.net2NodesLength !== 2) {
-      throw new Error(`MEB AST verification failed: ${JSON.stringify(canvasNetworksInfo)}`)
+      throw new Error(`AST verification failed: ${JSON.stringify(canvasNetworksInfo)}`)
     }
-    console.log('  -> 2 Canonical MEB Networks verified with native T1.Q addressing!')
+    console.log('  -> 2 networks verified with native T1.Q addressing!')
 
     // 7. Verify Live Simulation & Native T1.Q Execution
     console.log('  -> Testing Live Simulation with synthesized latching timer circuit...')
@@ -1604,14 +1604,14 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     })
 
     // =========================================================================
-    // SCENARIO 13: MEB Curriculum RAG Trainer Modal, Rule Extraction & Persistent Memory
+    // SCENARIO 13: Patterns and Notes Modal, Saving a Note
     // =========================================================================
     console.log('\n---------------------------------------------------------------')
-    console.log(' SCENARIO 13: MEB Curriculum RAG Trainer Modal & Persistent Rule Extraction')
+    console.log(' SCENARIO 13: Patterns and Notes Modal, Saving a Note')
     console.log('---------------------------------------------------------------')
 
     // 1. Open RAG Book Trainer Modal
-    console.log('  -> Opening MEB Rule Trainer modal via header button...')
+    console.log('  -> Opening patterns and notes modal via header button...')
     const openTrainerBtn = window.locator('[data-testid="btn-open-book-trainer"]')
     await openTrainerBtn.click()
     await window.waitForTimeout(300)
@@ -1630,7 +1630,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     // 3. Extract New Curriculum Rule
     console.log('  -> Inputting textbook rule text into extractor...')
     const ragInput = window.locator('[data-testid="rag-book-input"]')
-    await ragInput.fill('MEB PLC Section 5.1: High-Pressure Hydraulic Safety System. Outflow valve must only open after pump interlock is confirmed. Timer T3 regulates minimum pressurization dwell (T#8s) using native T3.Q trip contact.')
+    await ragInput.fill('Plant note: High-Pressure Hydraulic Safety System. Outflow valve must only open after pump interlock is confirmed. Timer T3 regulates minimum pressurization dwell (T#8s) using native T3.Q trip contact.')
 
     const extractBtn = window.locator('[data-testid="btn-extract-rag-rules"]')
     await extractBtn.click()
@@ -1657,7 +1657,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
 
     auditResults.scenarios.push({
       scenario: 'Scenario 13',
-      title: 'MEB Curriculum RAG Trainer Modal, Rule Extraction & Persistent Memory',
+      title: 'Patterns and Notes Modal, Saving a Note',
       passed: true
     })
 
@@ -1711,6 +1711,18 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     }
     console.log('  -> Zero ghost targets during RUN + Monitor verified!')
 
+    // A filter's region follows the bounding box, so a filter on a straight wire makes the wire vanish
+    const vanishingWires = await window.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="ladder-network-svg"] [filter]')].filter((el) => {
+        const box = el.getBBox()
+        return box.width === 0 || box.height === 0
+      }).length
+    )
+    if (vanishingWires > 0) {
+      throw new Error(`${vanishingWires} straight wires carry an SVG filter and do not paint during Monitor`)
+    }
+    console.log('  -> Every wire paints during RUN + Monitor!')
+
     // Capture Screenshot 14: Zero Ghost Targets & Live Ladder
     const shot14 = path.join(artifactsDir, 'gui-audit-14-zero-ghost-drop-targets.png')
     await window.screenshot({ path: shot14, fullPage: true })
@@ -1729,8 +1741,8 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     console.log(' SCENARIO 15: REAL-TIME TIMER ET ACCUMULATION & T1.Q MOTOR CUTOFF')
     console.log('---------------------------------------------------------------')
 
-    // 1. Synthesize MEB 10s Timer Motor Circuit into OB1 via Compact Ladder DSL
-    console.log('  -> Synthesizing MEB 10-second auto-stop motor circuit into OB1 via Compact Ladder DSL...')
+    // 1. Synthesize a 10s Timer Motor Circuit into OB1 via Compact Ladder DSL
+    console.log('  -> Synthesizing 10-second auto-stop motor circuit into OB1 via Compact Ladder DSL...')
     await window.evaluate(() => {
       const dsl = `
 # TAG DECLARATIONS
@@ -1744,7 +1756,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
 `
       const dslResult = window.plcTestContext.LadderDslCompiler.compileLadderDslToAst(dsl)
       window.plcTestContext.AiModelRouter.getInstance().applyCircuitPayload({
-        explanation: 'Canonical MEB 10-Second Timer Motor Circuit',
+        explanation: '10-Second Timer Motor Circuit',
         operationMode: 'replace_ob1_networks',
         tagsToUpsert: dslResult.tags,
         networks: dslResult.networks
@@ -2102,7 +2114,7 @@ NW 4 "Motor Stopped Red Indicator LED": SERIES( NC(Motor_Run), COIL(Kirmizi_Led)
 `
       const dslResult = window.plcTestContext.LadderDslCompiler.compileLadderDslToAst(dsl)
       const res = window.plcTestContext.AiModelRouter.getInstance().applyCircuitPayload({
-        explanation: 'Created Canonical MEB 10-Second Auto-Stop Latching Motor Circuit with Yesil_Led (%Q0.1) and Kirmizi_Led (%Q0.2)',
+        explanation: 'Created 10-Second Auto-Stop Latching Motor Circuit with Yesil_Led (%Q0.1) and Kirmizi_Led (%Q0.2)',
         operationMode: 'replace_ob1_networks',
         tagsToUpsert: dslResult.tags,
         networks: dslResult.networks
@@ -2767,16 +2779,16 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await window.waitForTimeout(700)
       console.log('  ✅ PASS: Local Ollama configuration saved.')
 
-      // 6. Open MEB Book Trainer Modal
+      // 6. Open the patterns and notes modal
       await window.locator('[data-testid="btn-open-book-trainer"]').click()
       await window.waitForTimeout(400)
 
       const trainerModal = window.locator('[data-testid="rag-book-trainer-modal"]')
       await trainerModal.waitFor({ timeout: 5000 })
-      console.log('  ✅ PASS: MEB Book Trainer Modal opened.')
+      console.log('  ✅ PASS: Patterns and notes modal opened.')
 
       // 7. Extract and persist custom curriculum rule
-      await window.locator('[data-testid="rag-rule-name-input"]').fill('MEB_StarDelta_Timer_Rule')
+      await window.locator('[data-testid="rag-rule-name-input"]').fill('StarDelta_Timer_Note')
       await window.locator('[data-testid="rag-book-input"]').fill('Yıldız üçgen yol vermede T1 zamanlayıcısı 5 saniye sonra yıldız kontaktörünü açıp üçgen kontaktörünü devreye alır.')
       await window.locator('[data-testid="btn-extract-rag-rules"]').click()
       await window.waitForTimeout(500)
@@ -2806,10 +2818,10 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await ragBadge.waitFor({ timeout: 6000 })
       const badgeText = await ragBadge.textContent()
       console.log(`  -> Agent RAG Consultation Badge: "${badgeText}"`)
-      if (!badgeText.includes('RAG Context') && !badgeText.includes('MEB_')) {
+      if (!badgeText.includes('RAG Context') && !badgeText.includes('auto_stop')) {
         throw new Error(`Expected RAG Context badge, got: "${badgeText}"`)
       }
-      console.log('  ✅ PASS: Semantic RAG Consultation Badge rendered with consulted MEB rules!')
+      console.log('  ✅ PASS: Semantic RAG Consultation Badge rendered with the consulted patterns!')
 
       // 10. Verify Coil Diagnostic & 1-Click Force Bit
       await window.evaluate(() => {
@@ -2839,12 +2851,18 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       await forceBitBtn.click()
       await window.waitForTimeout(500)
 
-      const forced = await window.evaluate(() => {
+      const { forced, forcedAddress, startTags } = await window.evaluate(() => {
         const rt = window.plcTestContext.useRuntimeStore.getState()
-        return rt.engine.getVariable('Start_PB') || rt.engine.getVariable('%I0.1') || rt.engine.getVariable('%I0.0')
+        const tags = window.plcTestContext.useTagStore.getState().tagTables.flatMap((t) => t.tags)
+        const forcedAddress = tags.find((t) => t.name === 'Start_Btn')?.address
+        return {
+          forced: forcedAddress ? rt.engine.getVariable(forcedAddress) : undefined,
+          forcedAddress,
+          startTags: tags.filter((t) => t.address.startsWith('%I0.')).map((t) => `${t.name}=${t.address}`)
+        }
       })
-      console.log(`  -> Forced bit (Start_PB / %I0.1) value: ${forced}`)
-      if (!forced) {
+      console.log(`  -> Forced bit Start_Btn (${forcedAddress}) value: ${forced}. Input tags: ${startTags.join(', ')}`)
+      if (forced !== true) {
         throw new Error('Expected blocking bit to be forced TRUE')
       }
       console.log('  ✅ PASS: 1-Click [Force Bit for Test] executed successfully in S7 binary memory!')
@@ -3012,6 +3030,30 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       }
       await window.waitForTimeout(400)
       console.log('  ✅ PASS: Floating toolbar [NO] toggle restored contact!')
+
+      // A click on empty canvas clears the selection and its toolbar
+      const emptySpot = await window.evaluate(() => {
+        // A rung can be wider or taller than the window, so look for a visible point that only hits the SVG itself
+        const svg = document.querySelector('[data-testid="contact-selection-toolbar"]').closest('svg')
+        const box = svg.getBoundingClientRect()
+        for (let y = box.bottom - 4; y > box.top; y -= 8) {
+          for (let x = box.left + 60; x < box.right; x += 16) {
+            if (document.elementFromPoint(x, y) === svg) return { x, y }
+          }
+        }
+        return null
+      })
+      if (!emptySpot) throw new Error('No empty canvas spot is visible next to the selected contact!')
+      await window.mouse.click(emptySpot.x, emptySpot.y)
+      await window.waitForTimeout(200)
+      if ((await toolbar.count()) !== 0) {
+        const hit = await window.evaluate(({ x, y }) => {
+          const el = document.elementFromPoint(x, y)
+          return `${el?.tagName} ${el?.getAttribute('data-testid') || ''}`
+        }, emptySpot)
+        throw new Error(`Selection toolbar stayed open after a click on empty canvas at ${emptySpot.x},${emptySpot.y} (${hit})!`)
+      }
+      console.log('  ✅ PASS: Click on empty canvas cleared the selection toolbar!')
 
       // 9. Live softPLC Runtime Execution & Verification of C1.CV >= 10 -> Otopark_Dolu_Tabela
       console.log('  -> Verifying softPLC live execution of CTUD & CMP_GE logic...')
