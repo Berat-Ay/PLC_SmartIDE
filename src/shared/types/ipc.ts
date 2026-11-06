@@ -13,6 +13,9 @@ export interface ProjectLoadPayload {
   dataBlocks: DataBlockDefinition[]
   ladBlocks: LadBlockDefinition[]
   sclBlocks: SclBlockDefinition[]
+  simulationScripts?: { fileName: string; code: string }[]
+  /** Files that could not be read when the project was opened. They stay untouched on disk. */
+  loadErrors?: { file: string; message: string }[]
 }
 
 export interface FileChangeEventPayload {
@@ -30,6 +33,8 @@ export interface ElectronApi {
   saveAll: (payload: ProjectLoadPayload) => Promise<boolean>
   loadDemoProject: (customDir?: string) => Promise<ProjectLoadPayload>
   onFileChanged: (callback: (payload: FileChangeEventPayload) => void) => () => void
+  getSecret: (key: string) => Promise<string | null>
+  setSecret: (key: string, value: string) => Promise<boolean>
 }
 
 declare global {

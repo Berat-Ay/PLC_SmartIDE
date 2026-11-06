@@ -14,7 +14,7 @@ import { LadderGridLayoutEngine } from './services/layout/LadderGridLayoutEngine
 import { DomVisualInspector } from './services/debug/DomVisualInspector'
 import { S7BinaryMemory } from './runtime/S7BinaryMemory'
 import { PlcRuntimeEngine } from './runtime/PlcRuntimeEngine'
-import { BytecodeCompiler } from './services/compiler/BytecodeCompiler'
+import { StlListingGenerator } from './services/compiler/StlListingGenerator'
 import { ProjectCompilerEngine } from './services/compiler/ProjectCompilerEngine'
 import { RagKnowledgeEngine } from './services/ai/RagKnowledgeEngine'
 import { CoilDiagnosticEngine } from './services/ai/CoilDiagnosticEngine'
@@ -33,7 +33,7 @@ if (typeof window !== 'undefined') {
     DomVisualInspector,
     S7BinaryMemory,
     PlcRuntimeEngine,
-    BytecodeCompiler,
+    StlListingGenerator,
     ProjectCompilerEngine,
     RagKnowledgeEngine,
     CoilDiagnosticEngine

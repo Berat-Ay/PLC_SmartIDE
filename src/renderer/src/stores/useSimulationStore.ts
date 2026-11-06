@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { PlantPhysicsEngine, PlantEngineeringMetrics, ChannelFaultState } from '../runtime/PlantPhysicsEngine'
 import { useRuntimeStore } from './useRuntimeStore'
+import { useProjectStore } from './useProjectStore'
 
 export type SimulationSubTab = 'rack' | 'mimic' | 'scenario' | 'trace'
 
@@ -143,7 +144,16 @@ export const useSimulationStore = create<SimulationStoreState>((set, get) => {
       runtime.setVariable(channel, rawValue)
     },
 
-    setScenarioCode: (scenarioCode) => set({ scenarioCode }),
+    setScenarioCode: (scenarioCode) => {
+      set({ scenarioCode })
+      // An edited scenario is saved back to the project's own file, if it has one
+      const { simulationScripts } = useProjectStore.getState()
+      if (simulationScripts.length > 0) {
+        useProjectStore.setState({
+          simulationScripts: [{ ...simulationScripts[0], code: scenarioCode }, ...simulationScripts.slice(1)]
+        })
+      }
+    },
 
     applyScenarioScript: (code: string) => {
       try {
@@ -173,3 +183,10 @@ export const useSimulationStore = create<SimulationStoreState>((set, get) => {
   }
 })
 
+// A project's scenario file is shown in the editor. It runs only when the user applies it.
+useProjectStore.subscribe((state, previous) => {
+  if (state.simulationScripts !== previous.simulationScripts && state.simulationScripts[0]) {
+    const code = state.simulationScripts[0].code
+    if (useSimulationStore.getState().scenarioCode !== code) useSimulationStore.setState({ scenarioCode: code })
+  }
+})

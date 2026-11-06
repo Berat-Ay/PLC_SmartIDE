@@ -13,6 +13,7 @@ export interface BlockVariable {
   accessibleFromHMI: boolean
   comment?: string
   calculatedOffset?: string // S7 Standard Access Byte.Bit (e.g. 0.0, 2.0, 6.0)
+  members?: BlockVariable[] // Only for dataType 'Struct'
 }
 
 export interface BlockInterface {

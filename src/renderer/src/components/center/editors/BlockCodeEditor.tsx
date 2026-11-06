@@ -21,7 +21,7 @@ import { DoubleCoilDetector } from '../../../services/DoubleCoilDetector'
 import { QuickForceBar } from '../ladder/QuickForceBar'
 import { TimeTravelScrubber } from '../ladder/TimeTravelScrubber'
 import { SclInterpreter } from '../../../runtime/SclInterpreter'
-import { BytecodeCompiler } from '../../../services/compiler/BytecodeCompiler'
+import { StlListingGenerator } from '../../../services/compiler/StlListingGenerator'
 
 interface BlockCodeEditorProps {
   fileName: string
@@ -65,9 +65,9 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
   const sclSyntax = !isLad && sclBlock ? SclInterpreter.validateSyntax(sclBlock.code) : null
   const compiledBytecode = showBytecode
     ? isLad && ladBlock
-      ? BytecodeCompiler.compileLadBlock(ladBlock)
+      ? StlListingGenerator.forLadBlock(ladBlock)
       : sclBlock
-      ? BytecodeCompiler.compileSclBlock(sclBlock)
+      ? StlListingGenerator.forSclBlock(sclBlock)
       : null
     : null
 
@@ -153,7 +153,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
             </button>
           )}
 
-          {/* Inspect S7 Bytecode / STL toggle */}
+          {/* STL listing toggle */}
           <button
             data-testid="toggle-bytecode-view"
             onClick={() => {
@@ -165,10 +165,10 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                 ? 'bg-cyan-950 text-cyan-300 border border-cyan-700 font-semibold'
                 : 'text-industrial-400 hover:text-industrial-200 hover:bg-industrial-850'
             }`}
-            title="Inspect Compiled S7 Bytecode / STL"
+            title="View STL listing"
           >
             <Binary className="w-3.5 h-3.5" />
-            <span>{showBytecode ? 'Close Bytecode' : 'Inspect S7 Bytecode / STL'}</span>
+            <span>{showBytecode ? 'Close Listing' : 'View STL Listing'}</span>
           </button>
 
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-industrial-850 text-industrial-400 border border-industrial-750 text-[10px] font-mono">
@@ -201,19 +201,16 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
               <div className="flex items-center gap-2">
                 <Binary className="w-4 h-4 text-cyan-400" />
                 <span className="font-bold text-industrial-100 font-mono text-xs">
-                  Compiled S7 Instruction List (STL / AWL Bytecode)
-                </span>
-                <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-800 px-2 py-0.5 font-mono font-bold">
-                  MC7 VM
+                  STL Listing (reading aid, not loaded to a CPU)
                 </span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-[11px] font-mono text-industrial-300">
-                  {compiledBytecode.totalInstructions} Instructions | {compiledBytecode.scanMemoryBytes} Bytes MC7
+                  {compiledBytecode.totalInstructions} Instructions
                 </span>
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText(compiledBytecode.disassemblyText)
+                    navigator.clipboard.writeText(compiledBytecode.listingText)
                     setCopiedBytecode(true)
                     setTimeout(() => setCopiedBytecode(false), 2000)
                   }}
@@ -227,7 +224,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
             </div>
             <div className="flex-1 overflow-auto bg-industrial-900 border border-industrial-800 p-3 font-mono text-xs leading-relaxed">
               <pre className="text-industrial-200 select-text whitespace-pre">
-                {compiledBytecode.disassemblyText}
+                {compiledBytecode.listingText}
               </pre>
             </div>
           </div>
@@ -240,7 +237,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                   <div className="flex-1 overflow-auto p-4">
                     <div className="rounded bg-industrial-950 border border-industrial-800 p-3">
                       <div className="text-[11px] text-industrial-400 font-mono mb-2 pb-1 border-b border-industrial-850">
-                        Deterministic AST Tree (/blocks/{ladBlock.fileName})
+                        Ladder JSON (/blocks/{ladBlock.fileName})
                       </div>
                       <pre className="text-industrial-200 font-mono text-[11px] overflow-auto max-h-[600px]">
                         {JSON.stringify(ladBlock, null, 2)}
@@ -275,12 +272,12 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                         Structured Control Language (SCL) Editor
                       </div>
                       <div className="text-industrial-400 text-[11px]">
-                        IEC 61131-3 SCL Compiler Front-End • Live Execution Badges • Deterministic Runtime
+                        SCL source of this block
                       </div>
                     </div>
                   </div>
                   <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 font-bold">
-                    Deterministic SCL
+                    SCL
                   </span>
                 </div>
 
@@ -310,7 +307,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                           <Eye className="w-3 h-3" />
                           <span>Live Line Values</span>
                         </div>
-                        {Object.entries(activeSnapshot?.sclLineValues || {}).map(([lineStr, val]) => (
+                        {Object.entries(activeSnapshot?.sclLineValues?.[currentBlock.fileName] || {}).map(([lineStr, val]) => (
                           <div
                             key={lineStr}
                             className="flex items-center justify-between p-1.5 rounded bg-industrial-950 border border-industrial-800 font-mono text-[11px]"
@@ -319,7 +316,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                             <span className="font-bold text-emerald-400">{String(val)}</span>
                           </div>
                         ))}
-                        {Object.keys(activeSnapshot?.sclLineValues || {}).length === 0 && (
+                        {Object.keys(activeSnapshot?.sclLineValues?.[currentBlock.fileName] || {}).length === 0 && (
                           <div className="text-[11px] text-industrial-500 italic p-2 text-center">
                             Scan cycle active. Monitoring local variables...
                           </div>

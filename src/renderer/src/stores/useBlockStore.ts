@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { effectiveInterface, emptyInterface, mergeInterfaces, parseSourceBlock, rewriteSourceInterface } from '@shared/scl/sourceBlock'
 import {
   DataBlockDefinition,
   LadBlockDefinition,
@@ -9,6 +10,20 @@ import {
 import { UdtDefinition, UdtMember } from '@shared/types/types'
 import { S7OffsetCalculator } from '../services/S7OffsetCalculator'
 import { useCrossRefStore } from './useCrossRefStore'
+
+/** A block's source text is the authority on its interface when the source has a header. */
+function normalizeSclBlock(block: SclBlockDefinition): SclBlockDefinition {
+  if (!parseSourceBlock(block.code || '').hasHeader) {
+    return { ...block, interface: { ...emptyInterface(), ...(block.interface || {}) } }
+  }
+  return { ...block, interface: mergeInterfaces(effectiveInterface(block), block.interface) }
+}
+
+/** After the interface table changed: writes the declarations back into the source. */
+function syncInterfaceToSource<T extends LadBlockDefinition | SclBlockDefinition>(block: T): T {
+  if (!('code' in block) || !parseSourceBlock(block.code || '').hasHeader) return block
+  return { ...block, code: rewriteSourceInterface(block, block.interface) }
+}
 
 interface BlockStoreState {
   dataBlocks: DataBlockDefinition[]
@@ -74,7 +89,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   udts: [],
 
   setBlocks: ({ dataBlocks, ladBlocks, sclBlocks, udts }) => {
-    set({ dataBlocks, ladBlocks, sclBlocks, udts })
+    set({ dataBlocks, ladBlocks, sclBlocks: sclBlocks.map(normalizeSclBlock), udts })
   },
 
   // DB operations
@@ -325,13 +340,13 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   addSclBlock: (block) => {
-    set((state) => ({ sclBlocks: [...state.sclBlocks, block] }))
+    set((state) => ({ sclBlocks: [...state.sclBlocks, normalizeSclBlock(block)] }))
     useCrossRefStore.getState().reindex()
   },
 
   updateSclBlock: (fileName, updates) => {
     set((state) => ({
-      sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? { ...b, ...updates } : b))
+      sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? normalizeSclBlock({ ...b, ...updates }) : b))
     }))
     useCrossRefStore.getState().reindex()
   },
@@ -360,7 +375,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
 
     set((state) => ({
       ladBlocks: state.ladBlocks.map(updateBlock),
-      sclBlocks: state.sclBlocks.map(updateBlock)
+      sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? syncInterfaceToSource(updateBlock(b)) : b))
     }))
     useCrossRefStore.getState().reindex()
   },
@@ -390,7 +405,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
 
     set((state) => ({
       ladBlocks: state.ladBlocks.map(addVar),
-      sclBlocks: state.sclBlocks.map(addVar)
+      sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? syncInterfaceToSource(addVar(b)) : b))
     }))
     useCrossRefStore.getState().reindex()
   },
@@ -410,7 +425,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
 
     set((state) => ({
       ladBlocks: state.ladBlocks.map(removeVar),
-      sclBlocks: state.sclBlocks.map(removeVar)
+      sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? syncInterfaceToSource(removeVar(b)) : b))
     }))
     useCrossRefStore.getState().reindex()
   }

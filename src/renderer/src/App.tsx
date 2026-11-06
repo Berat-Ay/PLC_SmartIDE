@@ -16,6 +16,9 @@ import { useRuntimeStore } from './stores/useRuntimeStore'
 import { useBlockStore } from './stores/useBlockStore'
 import { BlackBoxLogger } from './services/diagnostics/BlackBoxLogger'
 import { Bot, Layers } from 'lucide-react'
+import { AiModelRouter } from './services/ai/AiModelRouter'
+
+const EXTERNAL_WRITE_QUIET_MS = 2000
 
 if (typeof window !== 'undefined') {
   ;(window as any).useProjectStore = useProjectStore
@@ -29,6 +32,7 @@ if (typeof window !== 'undefined') {
     ;(window as any).plcTestContext = {}
   }
   ;(window as any).plcTestContext.BlackBoxLogger = BlackBoxLogger.getInstance()
+  ;(window as any).plcTestContext.useTagStore = useTagStore
 }
 
 export const App: React.FC = () => {
@@ -114,15 +118,33 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [setBottomActiveTab])
 
+  useEffect(() => {
+    AiModelRouter.getInstance().hydrateSecrets().catch((err) => console.warn('Could not load stored API keys:', err))
+  }, [])
+
   // Bi-directional IPC Hot-reload listener from main process
   useEffect(() => {
     if (window.electronApi) {
+      let reloadTimer: ReturnType<typeof setTimeout> | null = null
       const unsubscribe = window.electronApi.onFileChanged((payload) => {
-        console.log('[File Watcher Event]:', payload)
-        useTagStore.getState().recalculateCollisions()
-        useCrossRefStore.getState().reindex()
+        const project = useProjectStore.getState()
+        if (payload.projectPath !== project.projectPath) return
+        // This app's own saves come back through the watcher too
+        if (Date.now() - project.lastLocalWriteAt < EXTERNAL_WRITE_QUIET_MS) return
+        if (project.isDirty) {
+          console.warn(`[File Watcher] ${payload.relativePath} changed on disk; keeping unsaved edits`)
+          return
+        }
+        if (reloadTimer) clearTimeout(reloadTimer)
+        reloadTimer = setTimeout(async () => {
+          const reloaded = await window.electronApi.openProject(payload.projectPath)
+          useProjectStore.getState().setProject(reloaded)
+        }, 300)
       })
-      return () => unsubscribe()
+      return () => {
+        if (reloadTimer) clearTimeout(reloadTimer)
+        unsubscribe()
+      }
     }
     return undefined
   }, [])

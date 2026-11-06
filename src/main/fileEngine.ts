@@ -7,6 +7,30 @@ import { TagTable } from '../shared/types/tags'
 import { UdtDefinition } from '../shared/types/types'
 import { DataBlockDefinition, LadBlockDefinition, SclBlockDefinition } from '../shared/types/blocks'
 import { getDefaultCpuConfig } from '../shared/constants/hardwareDefaults'
+import { effectiveInterface, emptyInterface, parseSourceBlock, toFullSource } from '../shared/scl/sourceBlock'
+import { assertPlainFileName, resolveInside } from './pathGuard'
+
+function isMissingFile(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
+}
+
+/** Writes through a temporary file, so a crash cannot leave a half-written project file. */
+async function writeFileAtomic(target: string, content: string): Promise<void> {
+  const temp = `${target}.${process.pid}.tmp`
+  await fs.writeFile(temp, content, 'utf-8')
+  try {
+    await fs.rename(temp, target)
+  } catch (err) {
+    // Sync clients and virus scanners can hold the target for a moment on Windows
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    try {
+      await fs.rename(temp, target)
+    } catch {
+      await fs.rm(temp, { force: true })
+      throw err
+    }
+  }
+}
 
 export class FileEngine {
   /**
@@ -30,10 +54,11 @@ export class FileEngine {
     const metaPath = path.join(projectDir, 'project.plc.json')
     let metadata: ProjectMetadata
     try {
-      const raw = await fs.readFile(metaPath, 'utf-8')
-      metadata = JSON.parse(raw)
+      metadata = JSON.parse(await fs.readFile(metaPath, 'utf-8'))
       metadata.projectPath = projectDir
-    } catch {
+    } catch (err) {
+      // Only a missing file gets defaults. A corrupt one must not be overwritten.
+      if (!isMissingFile(err)) throw new Error(`Cannot read project.plc.json: ${(err as Error).message}`)
       metadata = {
         id: `proj_${Date.now()}`,
         name: path.basename(projectDir),
@@ -44,82 +69,76 @@ export class FileEngine {
         updatedAt: new Date().toISOString(),
         projectPath: projectDir
       }
-      await fs.writeFile(metaPath, JSON.stringify(metadata, null, 2), 'utf-8')
+      await writeFileAtomic(metaPath, JSON.stringify(metadata, null, 2))
     }
 
     // 2. Hardware / CPU config
     const hwPath = path.join(projectDir, 'hardware', 'cpu_config.json')
     let hardware: CpuConfig
     try {
-      const rawHw = await fs.readFile(hwPath, 'utf-8')
-      hardware = JSON.parse(rawHw)
-    } catch {
+      hardware = JSON.parse(await fs.readFile(hwPath, 'utf-8'))
+    } catch (err) {
+      if (!isMissingFile(err)) throw new Error(`Cannot read hardware/cpu_config.json: ${(err as Error).message}`)
       hardware = this.getDefaultCpuConfig()
-      await fs.writeFile(hwPath, JSON.stringify(hardware, null, 2), 'utf-8')
+      await writeFileAtomic(hwPath, JSON.stringify(hardware, null, 2))
+    }
+
+    // A damaged file is reported and left on disk; the rest of the project still opens
+    const loadErrors: { file: string; message: string }[] = []
+    const readEach = async (subdir: string, handle: (file: string, raw: string) => void): Promise<void> => {
+      const files = await fs.readdir(path.join(projectDir, subdir))
+      for (const file of files) {
+        try {
+          const fullPath = path.join(projectDir, subdir, file)
+          if ((await fs.stat(fullPath)).isDirectory()) continue
+          handle(file, await fs.readFile(fullPath, 'utf-8'))
+        } catch (err) {
+          loadErrors.push({ file: `${subdir}/${file}`, message: (err as Error).message })
+        }
+      }
     }
 
     // 3. Tag tables (/tags/*.tags.json)
     const tagTables: TagTable[] = []
-    const tagsDir = path.join(projectDir, 'tags')
-    try {
-      const tagFiles = await fs.readdir(tagsDir)
-      for (const file of tagFiles) {
-        if (file.endsWith('.tags.json')) {
-          const raw = await fs.readFile(path.join(tagsDir, file), 'utf-8')
-          const table: TagTable = JSON.parse(raw)
-          table.fileName = file
-          tagTables.push(table)
-        }
-      }
-    } catch {
-      // ignore
-    }
+    await readEach('tags', (file, raw) => {
+      if (!file.endsWith('.tags.json')) return
+      const table: TagTable = JSON.parse(raw)
+      table.fileName = file
+      tagTables.push(table)
+    })
 
     // 4. UDT definitions (/types/*.udt.json)
     const udts: UdtDefinition[] = []
-    const typesDir = path.join(projectDir, 'types')
-    try {
-      const typeFiles = await fs.readdir(typesDir)
-      for (const file of typeFiles) {
-        if (file.endsWith('.udt.json')) {
-          const raw = await fs.readFile(path.join(typesDir, file), 'utf-8')
-          const udt: UdtDefinition = JSON.parse(raw)
-          udt.fileName = file
-          udts.push(udt)
-        }
-      }
-    } catch {
-      // ignore
-    }
+    await readEach('types', (file, raw) => {
+      if (!file.endsWith('.udt.json')) return
+      const udt: UdtDefinition = JSON.parse(raw)
+      udt.fileName = file
+      udts.push(udt)
+    })
 
     // 5. Blocks (/blocks/)
     const dataBlocks: DataBlockDefinition[] = []
     const ladBlocks: LadBlockDefinition[] = []
     const sclBlocks: SclBlockDefinition[] = []
-    const blocksDir = path.join(projectDir, 'blocks')
-    try {
-      const blockFiles = await fs.readdir(blocksDir)
-      for (const file of blockFiles) {
-        const fullBlockPath = path.join(blocksDir, file)
-        if (file.endsWith('.db.json')) {
-          const raw = await fs.readFile(fullBlockPath, 'utf-8')
-          const db: DataBlockDefinition = JSON.parse(raw)
-          db.fileName = file
-          dataBlocks.push(db)
-        } else if (file.endsWith('.lad.json')) {
-          const raw = await fs.readFile(fullBlockPath, 'utf-8')
-          const lad: LadBlockDefinition = JSON.parse(raw)
-          lad.fileName = file
-          ladBlocks.push(lad)
-        } else if (file.endsWith('.scl')) {
-          const raw = await fs.readFile(fullBlockPath, 'utf-8')
-          const scl = this.parseSclFile(file, raw)
-          sclBlocks.push(scl)
-        }
+    await readEach('blocks', (file, raw) => {
+      if (file.endsWith('.db.json')) {
+        const db: DataBlockDefinition = JSON.parse(raw)
+        db.fileName = file
+        dataBlocks.push(db)
+      } else if (file.endsWith('.lad.json')) {
+        const lad: LadBlockDefinition = JSON.parse(raw)
+        lad.fileName = file
+        ladBlocks.push(lad)
+      } else if (file.endsWith('.scl')) {
+        sclBlocks.push(this.parseSclFile(file, raw))
       }
-    } catch {
-      // ignore
-    }
+    })
+
+    // 6. Simulation scenarios are loaded as text. They only run when the user applies them.
+    const simulationScripts: { fileName: string; code: string }[] = []
+    await readEach('simulation', (file, raw) => {
+      if (file.endsWith('.sim.js')) simulationScripts.push({ fileName: file, code: raw })
+    })
 
     return {
       projectPath: projectDir,
@@ -129,7 +148,9 @@ export class FileEngine {
       udts,
       dataBlocks,
       ladBlocks,
-      sclBlocks
+      sclBlocks,
+      simulationScripts,
+      loadErrors
     }
   }
 
@@ -137,65 +158,45 @@ export class FileEngine {
    * Saves the entire project payload into the modular folders
    */
   public static async saveProject(payload: ProjectLoadPayload): Promise<boolean> {
-    const { projectPath, metadata, hardware, tagTables, udts, dataBlocks, ladBlocks, sclBlocks } = payload
+    const { projectPath, metadata, hardware, tagTables, udts, dataBlocks, ladBlocks, sclBlocks, simulationScripts } = payload
     await this.ensureProjectDirectories(projectPath)
 
     // Save project.plc.json
-    await fs.writeFile(
-      path.join(projectPath, 'project.plc.json'),
-      JSON.stringify(metadata, null, 2),
-      'utf-8'
-    )
+    await writeFileAtomic(path.join(projectPath, 'project.plc.json'), JSON.stringify(metadata, null, 2))
 
     // Save hardware/cpu_config.json
-    await fs.writeFile(
-      path.join(projectPath, 'hardware', 'cpu_config.json'),
-      JSON.stringify(hardware, null, 2),
-      'utf-8'
-    )
+    await writeFileAtomic(path.join(projectPath, 'hardware', 'cpu_config.json'), JSON.stringify(hardware, null, 2))
 
     // Save tags
     for (const table of tagTables) {
       const fileName = table.fileName || `${table.name || 'tags'}.tags.json`
-      await fs.writeFile(
-        path.join(projectPath, 'tags', fileName),
-        JSON.stringify(table, null, 2),
-        'utf-8'
-      )
+      await writeFileAtomic(path.join(projectPath, 'tags', assertPlainFileName(fileName)), JSON.stringify(table, null, 2))
     }
 
     // Save types
     for (const udt of udts) {
       const fileName = udt.fileName || `${udt.name}.udt.json`
-      await fs.writeFile(
-        path.join(projectPath, 'types', fileName),
-        JSON.stringify(udt, null, 2),
-        'utf-8'
-      )
+      await writeFileAtomic(path.join(projectPath, 'types', assertPlainFileName(fileName)), JSON.stringify(udt, null, 2))
     }
 
     // Save blocks
     for (const db of dataBlocks) {
       const fileName = db.fileName || `${db.name}.db.json`
-      await fs.writeFile(
-        path.join(projectPath, 'blocks', fileName),
-        JSON.stringify(db, null, 2),
-        'utf-8'
-      )
+      await writeFileAtomic(path.join(projectPath, 'blocks', assertPlainFileName(fileName)), JSON.stringify(db, null, 2))
     }
 
     for (const lad of ladBlocks) {
       const fileName = lad.fileName || `${lad.name}.lad.json`
-      await fs.writeFile(
-        path.join(projectPath, 'blocks', fileName),
-        JSON.stringify(lad, null, 2),
-        'utf-8'
-      )
+      await writeFileAtomic(path.join(projectPath, 'blocks', assertPlainFileName(fileName)), JSON.stringify(lad, null, 2))
     }
 
     for (const scl of sclBlocks) {
       const fileName = scl.fileName || `${scl.name}.scl`
-      await fs.writeFile(path.join(projectPath, 'blocks', fileName), scl.code, 'utf-8')
+      await writeFileAtomic(path.join(projectPath, 'blocks', assertPlainFileName(fileName)), toFullSource(scl))
+    }
+
+    for (const script of simulationScripts || []) {
+      await writeFileAtomic(path.join(projectPath, 'simulation', assertPlainFileName(script.fileName)), script.code)
     }
 
     return true
@@ -205,9 +206,9 @@ export class FileEngine {
    * Saves an individual file
    */
   public static async saveSingleFile(projectDir: string, relativePath: string, content: string): Promise<boolean> {
-    const fullPath = path.join(projectDir, relativePath)
+    const fullPath = resolveInside(projectDir, relativePath)
     await fs.mkdir(path.dirname(fullPath), { recursive: true })
-    await fs.writeFile(fullPath, content, 'utf-8')
+    await writeFileAtomic(fullPath, content)
     return true
   }
 
@@ -216,39 +217,22 @@ export class FileEngine {
    */
   private static parseSclFile(fileName: string, rawContent: string): SclBlockDefinition {
     const baseName = fileName.replace(/\.scl$/i, '')
-    let blockType: 'OB' | 'FB' | 'FC' = 'FB'
-    let blockNumber = 1
+    const parsed = parseSourceBlock(rawContent)
+    const prefix = baseName.match(/^(OB|FC|FB)(\d+)?/i)
+    const kind = parsed.kind === 'OB' || parsed.kind === 'FB' || parsed.kind === 'FC' ? parsed.kind : undefined
+    const blockType = kind || ((prefix?.[1].toUpperCase() as 'OB' | 'FB' | 'FC') ?? 'FB') || 'FB'
 
-    if (baseName.startsWith('OB')) {
-      blockType = 'OB'
-      const match = baseName.match(/OB(\d+)/i)
-      if (match) blockNumber = parseInt(match[1], 10)
-    } else if (baseName.startsWith('FC')) {
-      blockType = 'FC'
-      const match = baseName.match(/FC(\d+)/i)
-      if (match) blockNumber = parseInt(match[1], 10)
-    } else if (baseName.startsWith('FB')) {
-      blockType = 'FB'
-      const match = baseName.match(/FB(\d+)/i)
-      if (match) blockNumber = parseInt(match[1], 10)
-    }
-
-    return {
+    const block: SclBlockDefinition = {
       blockType,
-      blockNumber,
-      name: baseName,
+      blockNumber: prefix?.[2] ? parseInt(prefix[2], 10) : 1,
+      name: parsed.name || baseName,
       fileName,
-      optimizedAccess: true,
-      interface: {
-        input: [],
-        output: [],
-        inOut: [],
-        static: [],
-        temp: [],
-        constant: []
-      },
+      optimizedAccess: parsed.optimizedAccess ?? true,
+      interface: emptyInterface(),
       code: rawContent
     }
+    block.interface = effectiveInterface(block)
+    return block
   }
 
   public static getDefaultCpuConfig(): CpuConfig {

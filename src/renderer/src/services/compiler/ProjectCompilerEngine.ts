@@ -1,6 +1,7 @@
 import { TagTable } from '@shared/types/tags'
 import { CpuConfig } from '@shared/types/hardware'
-import { LadBlockDefinition, SclBlockDefinition, LadNetwork } from '@shared/types/blocks'
+import { LadBlockDefinition, SclBlockDefinition, LadNetwork, DataBlockDefinition } from '@shared/types/blocks'
+import { UdtDefinition } from '@shared/types/types'
 import {
   LadderNetwork,
   LadderNode,
@@ -13,7 +14,8 @@ import {
 import { MemoryOverlapEngine } from '../MemoryOverlapEngine'
 import { DoubleCoilDetector } from '../DoubleCoilDetector'
 import { SclInterpreter } from '../../runtime/SclInterpreter'
-import { BytecodeCompiler, ProjectBytecodeSummary } from './BytecodeCompiler'
+import { StlListingGenerator, ProjectListingSummary } from './StlListingGenerator'
+import { runProgramChecks } from './ProgramConsistencyChecks'
 import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
@@ -41,6 +43,8 @@ export interface CompileMessage {
   fixAction?: string
   fixLabel?: string
   timestamp: number
+  /** False for an error that does not stop a real CPU from being loaded. TIA allows overlapping tags. */
+  blocksDownload?: boolean
 }
 
 export interface CompileResult {
@@ -52,7 +56,9 @@ export interface CompileResult {
   bannerMessage: string
   metricSummary?: string
   diagnostics: CompileMessage[]
-  bytecodeSummary?: ProjectBytecodeSummary
+  /** True when no error prevents the program from going to RUN. */
+  canDownload: boolean
+  listingSummary?: ProjectListingSummary
 }
 
 export class ProjectCompilerEngine {
@@ -63,13 +69,17 @@ export class ProjectCompilerEngine {
     tagTables?: TagTable[],
     ladBlocks?: LadBlockDefinition[],
     sclBlocks?: SclBlockDefinition[],
-    cpuConfig?: CpuConfig
+    cpuConfig?: CpuConfig,
+    dataBlocks?: DataBlockDefinition[],
+    udts?: UdtDefinition[]
   ): CompileResult {
     // If not passed explicitly, grab current state from Zustand stores
     const effectiveTagTables = tagTables || useTagStore.getState().tagTables
     const effectiveLadBlocks = ladBlocks || useBlockStore.getState().ladBlocks
     const effectiveSclBlocks = sclBlocks || useBlockStore.getState().sclBlocks
     const effectiveCpuConfig = cpuConfig || useHardwareStore.getState().config
+    const effectiveDataBlocks = dataBlocks || useBlockStore.getState().dataBlocks
+    const effectiveUdts = udts || useBlockStore.getState().udts
 
     const diagnostics: CompileMessage[] = []
     const now = new Date()
@@ -97,7 +107,8 @@ export class ProjectCompilerEngine {
         autoFixable: d.autoFixable,
         fixAction: d.fixAction || 'AUTO_ASSIGN_ADDRESS',
         fixLabel: d.fixLabel || 'Auto-Assign Safe Address',
-        timestamp: d.timestamp
+        timestamp: d.timestamp,
+        blocksDownload: false
       })
     }
 
@@ -284,6 +295,24 @@ export class ProjectCompilerEngine {
 
     for (const blk of effectiveLadBlocks) {
       for (const net of blk.networks || []) {
+        if (net.isSclNetwork && net.sclCode) {
+          const syntax = SclInterpreter.validateSyntax(net.sclCode)
+          for (const err of syntax.errors) {
+            diagnostics.push({
+              id: `err_scl_net_${blk.fileName}_${net.networkNumber}_${diagnostics.length}`,
+              severity: 'Error',
+              code: 'ERR_SCL_SYNTAX',
+              iecCode: 'S7-SCL-005',
+              source: 'SCL Compiler',
+              message: `[S7-SCL-005] ${blk.name}, Network ${net.networkNumber}: ${err}`,
+              location: { blockName: blk.name, blockFileName: blk.fileName, networkNumber: net.networkNumber },
+              targetId: net.id,
+              autoFixable: false,
+              timestamp: Date.now()
+            })
+          }
+          continue
+        }
         if (!net.nodes || net.nodes.length === 0) {
           diagnostics.push({
             id: `err_empty_net_${blk.fileName}_net${net.networkNumber}`,
@@ -301,7 +330,8 @@ export class ProjectCompilerEngine {
             autoFixable: true,
             fixAction: 'GO_TO_RUNG',
             fixLabel: 'Go to Rung',
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            blocksDownload: false
           })
         }
         for (const node of net.nodes || []) {
@@ -368,15 +398,51 @@ export class ProjectCompilerEngine {
       }
     }
 
-    // Compile into S7 VM Bytecode
-    const bytecodeSummary = BytecodeCompiler.compileProject(effectiveLadBlocks, effectiveSclBlocks)
+    // =========================================================================
+    // PASS 6: Symbols, literals, addresses and block references
+    // =========================================================================
+    const findings = runProgramChecks({
+      tagTables: effectiveTagTables,
+      ladBlocks: effectiveLadBlocks,
+      sclBlocks: effectiveSclBlocks,
+      dataBlocks: effectiveDataBlocks,
+      udts: effectiveUdts,
+      cpuConfig: effectiveCpuConfig
+    })
+    findings.forEach((finding, index) => {
+      diagnostics.push({
+        id: `err_program_${index}`,
+        severity: 'Error',
+        code: finding.iecCode,
+        iecCode: finding.iecCode,
+        source: 'Program Checker',
+        message: finding.message,
+        location: {
+          blockName: finding.blockName,
+          blockFileName: finding.blockFileName,
+          networkNumber: finding.networkNumber,
+          nodeId: finding.nodeId,
+          tagName: finding.tagName,
+          line: finding.line
+        },
+        targetId: finding.nodeId || finding.blockFileName,
+        autoFixable: !!finding.blockFileName,
+        fixAction: finding.blockFileName ? 'GO_TO_RUNG' : undefined,
+        fixLabel: finding.blockFileName ? 'Go to Block' : undefined,
+        timestamp: Date.now()
+      })
+    })
+
+    // Reading aid only: this listing does not run and is not loaded to a CPU
+    const listingSummary = StlListingGenerator.forProject(effectiveLadBlocks, effectiveSclBlocks)
 
     const errorsCount = diagnostics.filter((d) => d.severity === 'Error').length
     const warningsCount = diagnostics.filter((d) => d.severity === 'Warning').length
     const infosCount = diagnostics.filter((d) => d.severity === 'Info').length
     const success = errorsCount === 0
 
-    const metricSummary = `Compiled ${bytecodeSummary.totalNetworks} Networks -> ${bytecodeSummary.totalInstructions} S7 VM Instructions | ${errorsCount} Errors, ${warningsCount} Warnings | Scan Memory: ${bytecodeSummary.totalScanMemoryBytes} Bytes`
+    const canDownload = !diagnostics.some((d) => d.severity === 'Error' && d.blocksDownload !== false)
+    const metricSummary = `Checked ${listingSummary.totalNetworks} Networks and ${effectiveSclBlocks.length} SCL Blocks | ${errorsCount} Errors, ${warningsCount} Warnings | STL listing: ${listingSummary.totalInstructions} lines`
 
     const bannerMessage = success
       ? `[COMPILE SUCCESS — 0 Error(s), ${warningsCount} Warning(s) | Compiled at ${timestampStr}]`
@@ -391,7 +457,8 @@ export class ProjectCompilerEngine {
       bannerMessage,
       metricSummary,
       diagnostics,
-      bytecodeSummary
+      canDownload,
+      listingSummary
     }
   }
 }

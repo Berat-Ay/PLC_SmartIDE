@@ -9,6 +9,8 @@ const electronApi: ElectronApi = {
     ipcRenderer.invoke('project:saveFile', projectDir, relativePath, content),
   saveAll: (payload: ProjectLoadPayload) => ipcRenderer.invoke('project:save', payload),
   loadDemoProject: (customDir?: string) => ipcRenderer.invoke('project:loadDemo', customDir),
+  getSecret: (key: string) => ipcRenderer.invoke('secrets:get', key),
+  setSecret: (key: string, value: string) => ipcRenderer.invoke('secrets:set', key, value),
   onFileChanged: (callback: (payload: FileChangeEventPayload) => void) => {
     const handler = (_: unknown, payload: FileChangeEventPayload) => callback(payload)
     ipcRenderer.on('project:fileChanged', handler)

@@ -145,9 +145,15 @@ async function testStrictBanOnHardcodedFallbacks() {
     geminiApiKey: 'invalid_dummy_api_key_for_testing'
   })
 
+  // The API rejects the key. No test talks to the real network.
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: { message: 'API key not valid' } }), { status: 400 })) as typeof fetch
+
   // Attempt prompt synthesis
   const prompt = 'motor calissin 10 sn sonra dursun yesil ve kirmizi led yansin'
   const response = await router.executePrompt(prompt, 'fast-flash', 'auto-apply')
+  globalThis.fetch = realFetch
 
   // MUST return an honest error and NOT return canned Yesil_Led / Kirmizi_Led circuit!
   assert.strictEqual(response.isError, true, 'Flagged as error response')

@@ -26,6 +26,11 @@ interface ProjectStoreState {
   isLoaded: boolean
   isDirty: boolean
   cpuState: CpuOperatingState
+  loadErrors: { file: string; message: string }[]
+  simulationScripts: { fileName: string; code: string }[]
+  /** Time of this app's last write, so the file watcher can tell it from an external edit. */
+  lastLocalWriteAt: number
+  noteLocalWrite: () => void
 
   setProject: (payload: ProjectLoadPayload) => void
   createNewProject: (options: CreateProjectOptions) => void
@@ -45,13 +50,19 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   isDirty: false,
   cpuState: 'STOP',
   lastCompileResult: null,
+  loadErrors: [],
+  simulationScripts: [],
+  lastLocalWriteAt: 0,
+  noteLocalWrite: () => set({ lastLocalWriteAt: Date.now() }),
 
   setProject: (payload: ProjectLoadPayload) => {
     set({
       metadata: payload.metadata,
       projectPath: payload.projectPath,
       isLoaded: true,
-      isDirty: false
+      isDirty: false,
+      loadErrors: payload.loadErrors || [],
+      simulationScripts: payload.simulationScripts || []
     })
 
     // Populate dependent stores
@@ -67,6 +78,11 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     // Run overlap analysis and rebuild cross-reference index
     useTagStore.getState().recalculateCollisions()
     useCrossRefStore.getState().reindex()
+
+    if (payload.loadErrors && payload.loadErrors.length > 0) {
+      get().compileProject()
+      useUIStore.getState().setBottomActiveTab('compile')
+    }
   },
 
   createNewProject: (options: CreateProjectOptions) => {
@@ -280,11 +296,13 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       udts: useBlockStore.getState().udts,
       dataBlocks: useBlockStore.getState().dataBlocks,
       ladBlocks: useBlockStore.getState().ladBlocks,
-      sclBlocks: useBlockStore.getState().sclBlocks
+      sclBlocks: useBlockStore.getState().sclBlocks,
+      simulationScripts: get().simulationScripts
     }
 
     if (window.electronApi) {
       try {
+        get().noteLocalWrite()
         const ok = await window.electronApi.saveAll(payload)
         if (ok) {
           set({ isDirty: false, metadata: payload.metadata })
@@ -307,6 +325,17 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     useCrossRefStore.getState().reindex()
 
     const result = CompileEngine.runFullProjectCompilation()
+    for (const loadError of get().loadErrors) {
+      result.diagnostics.push({
+        id: `load_error_${loadError.file}`,
+        severity: 'Warning',
+        code: 'WARN_FILE_NOT_LOADED',
+        source: 'Project Loader',
+        message: `${loadError.file} could not be read and is not part of this session: ${loadError.message}`,
+        timestamp: Date.now()
+      })
+      result.warningsCount++
+    }
     set({ lastCompileResult: result })
     return result
   }

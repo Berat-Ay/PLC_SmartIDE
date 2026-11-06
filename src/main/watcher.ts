@@ -13,13 +13,11 @@ export class ProjectWatcher {
     this.projectPath = projectDir
 
     this.watcher = chokidar.watch(projectDir, {
-      ignored: [
-        /(^|[/\\])\../, // ignore dotfiles
-        /node_modules/,
-        /\.git/,
-        /out/,
-        /dist/
-      ],
+      // Tested relative to the project, so a parent folder named 'out' does not hide every file
+      ignored: (candidate: string) => {
+        const relative = path.relative(projectDir, candidate)
+        return relative.split(path.sep).some((part) => part.startsWith('.') || part === 'node_modules' || part === 'out' || part === 'dist')
+      },
       persistent: true,
       ignoreInitial: true,
       depth: 3

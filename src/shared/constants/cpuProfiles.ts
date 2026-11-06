@@ -14,6 +14,9 @@ export interface CpuProfile {
   workMemory: string
   loadMemory: string
   retentiveMemory: string
+  inputBytes: number // Process image inputs
+  outputBytes: number // Process image outputs
+  merkerBytes: number // Bit memory
   defaultDiChannels: DigitalInputChannel[]
   defaultDqChannels: DigitalOutputChannel[]
   defaultAiChannels: AnalogInputChannel[]
@@ -30,6 +33,9 @@ export const CPU_1212C_PROFILE: CpuProfile = {
   workMemory: '75 KB',
   loadMemory: '2 MB',
   retentiveMemory: '10 KB',
+  inputBytes: 1024,
+  outputBytes: 1024,
+  merkerBytes: 4096,
   defaultDiChannels: Array.from({ length: 8 }, (_, i) => ({
     channelIndex: i,
     address: `%I0.${i}`,
@@ -84,6 +90,9 @@ export const CPU_1214C_PROFILE: CpuProfile = {
   workMemory: '125 KB',
   loadMemory: '4 MB',
   retentiveMemory: '10 KB',
+  inputBytes: 1024,
+  outputBytes: 1024,
+  merkerBytes: 8192,
   defaultDiChannels: Array.from({ length: 14 }, (_, i) => ({
     channelIndex: i,
     address: `%I${Math.floor(i / 8)}.${i % 8}`,
@@ -138,6 +147,9 @@ export const CPU_1215C_PROFILE: CpuProfile = {
   workMemory: '150 KB',
   loadMemory: '4 MB',
   retentiveMemory: '10 KB',
+  inputBytes: 1024,
+  outputBytes: 1024,
+  merkerBytes: 8192,
   defaultDiChannels: Array.from({ length: 14 }, (_, i) => ({
     channelIndex: i,
     address: `%I${Math.floor(i / 8)}.${i % 8}`,
@@ -203,6 +215,9 @@ export const CPU_1511_PROFILE: CpuProfile = {
   workMemory: '225 KB',
   loadMemory: '12 MB',
   retentiveMemory: '128 KB',
+  inputBytes: 32768,
+  outputBytes: 32768,
+  merkerBytes: 16384,
   defaultDiChannels: Array.from({ length: 16 }, (_, i) => ({
     channelIndex: i,
     address: `%I${Math.floor(i / 8)}.${i % 8}`,
@@ -290,6 +305,9 @@ export const CPU_1516_PROFILE: CpuProfile = {
   workMemory: '1.5 MB',
   loadMemory: '32 MB',
   retentiveMemory: '512 KB',
+  inputBytes: 32768,
+  outputBytes: 32768,
+  merkerBytes: 16384,
   defaultDiChannels: Array.from({ length: 16 }, (_, i) => ({
     channelIndex: i,
     address: `%I${Math.floor(i / 8)}.${i % 8}`,
@@ -375,3 +393,15 @@ export const ALL_CPU_PROFILES: CpuProfile[] = [
   CPU_1516_PROFILE
 ]
 
+/** Finds a profile from an id, a CPU name or a family label such as 'Virtual S7-1200'. */
+export function getCpuProfile(target: string | undefined): CpuProfile | undefined {
+  if (!target) return undefined
+  const lower = target.toLowerCase()
+  const exact = ALL_CPU_PROFILES.find(
+    (p) => p.id === lower || lower.includes(p.name.toLowerCase()) || lower.includes(p.id.replace('cpu-', ''))
+  )
+  if (exact) return exact
+  if (lower.includes('1200')) return CPU_1214C_PROFILE
+  if (lower.includes('1500')) return CPU_1516_PROFILE
+  return undefined
+}
