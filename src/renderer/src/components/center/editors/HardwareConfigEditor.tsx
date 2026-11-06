@@ -39,11 +39,11 @@ export const HardwareConfigEditor: React.FC = () => {
   const currentProfile = ALL_CPU_PROFILES.find((p) => p.name === config.general.cpuName) || ALL_CPU_PROFILES[0]
 
   return (
-    <div className="h-full flex flex-col bg-industrial-900 select-none text-xs">
+    <div className="cq h-full flex flex-col bg-industrial-900 select-none text-xs overflow-hidden">
       {/* Header */}
-      <div className="h-11 px-4 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
+      <div className="shrink-0 bg-industrial-950 border-b border-industrial-800 whitespace-nowrap">
+        <div className="h-10 px-4 flex items-center gap-3 overflow-hidden">
+          <div className="under-600:hidden flex items-center gap-2 shrink-0">
             <Cpu className="w-4 h-4 text-cyan-400" />
             <span className="font-semibold text-industrial-100 font-mono text-sm">
               Device Configuration
@@ -51,7 +51,7 @@ export const HardwareConfigEditor: React.FC = () => {
           </div>
 
           {/* CPU Profile Switcher */}
-          <div className="flex items-center gap-1.5 bg-industrial-900 border border-industrial-750 rounded px-2 py-1">
+          <div className="flex items-center gap-1.5 bg-industrial-900 border border-industrial-750 rounded px-2 py-1 min-w-0">
             <span className="text-[11px] text-industrial-400">Profile:</span>
             <select
               value={currentProfile.id}
@@ -62,7 +62,7 @@ export const HardwareConfigEditor: React.FC = () => {
                   markDirty(true)
                 }
               }}
-              className="bg-transparent text-cyan-300 font-mono text-xs focus:outline-hidden cursor-pointer"
+              className="bg-transparent text-cyan-300 font-mono text-xs focus:outline-hidden cursor-pointer min-w-0 truncate"
             >
               {ALL_CPU_PROFILES.map((p) => (
                 <option key={p.id} value={p.id} className="bg-industrial-950 text-industrial-100">
@@ -72,7 +72,7 @@ export const HardwareConfigEditor: React.FC = () => {
             </select>
           </div>
 
-          <span className="text-[11px] text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800 font-mono">
+          <span className="under-900:hidden text-[11px] text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800 font-mono">
             {config.general.targetCpu?.includes('1200') || config.general.cpuName.includes('12')
               ? 'S7-1200 Virtual Rack'
               : 'S7-1500 Virtual Rack'}
@@ -80,7 +80,8 @@ export const HardwareConfigEditor: React.FC = () => {
         </div>
 
         {/* Sub-tab Navigation */}
-        <div className="flex items-center bg-industrial-900 border border-industrial-800 rounded p-0.5">
+        <div className="px-4 pb-1.5">
+        <div className="inline-flex flex-wrap items-center bg-industrial-900 border border-industrial-800 rounded p-0.5">
           <button
             onClick={() => setActiveTab('general')}
             className={`px-3 py-1 rounded transition-colors ${
@@ -132,6 +133,7 @@ export const HardwareConfigEditor: React.FC = () => {
             OB Execution Table
           </button>
         </div>
+        </div>
       </div>
 
       {/* Tab Contents */}
@@ -169,10 +171,10 @@ export const HardwareConfigEditor: React.FC = () => {
               </div>
 
               {/* Hardware Specifications Strip */}
-              <div className="grid grid-cols-4 gap-2 pt-2 text-[11px] font-mono">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2 pt-2 text-[11px] font-mono">
                 <div className="p-2 rounded bg-industrial-900 border border-industrial-800">
                   <div className="text-industrial-400 text-[10px]">Order Number</div>
-                  <div className="text-industrial-200 font-semibold truncate">{currentProfile.orderNumber}</div>
+                  <div className="text-industrial-200 font-semibold">{currentProfile.orderNumber}</div>
                 </div>
                 <div className="p-2 rounded bg-industrial-900 border border-industrial-800">
                   <div className="text-industrial-400 text-[10px]">Work Memory</div>
@@ -327,7 +329,7 @@ export const HardwareConfigEditor: React.FC = () => {
                     />
                   </div>
 
-                  <div className="grid grid-cols-4 gap-2 pt-2 text-[11px] font-mono">
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2 pt-2 text-[11px] font-mono">
                     <div className="p-2 rounded bg-industrial-900 border border-industrial-800">
                       <div className="text-cyan-400 font-bold">FirstScan</div>
                       <div className="text-industrial-400">%M{config.systemMemory.byteAddress}.0</div>
@@ -386,7 +388,7 @@ export const HardwareConfigEditor: React.FC = () => {
                     />
                   </div>
 
-                  <div className="grid grid-cols-4 gap-2 pt-2 text-[11px] font-mono">
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2 pt-2 text-[11px] font-mono">
                     <div className="p-2 rounded bg-industrial-900 border border-industrial-800">
                       <div className="text-cyan-400 font-bold">10 Hz (0.1s)</div>
                       <div className="text-industrial-400">%M{config.clockMemory.byteAddress}.0</div>
@@ -435,7 +437,7 @@ export const HardwareConfigEditor: React.FC = () => {
                 <Binary className="w-4 h-4 text-cyan-400" />
                 Digital Inputs (DI 16x24VDC)
               </h3>
-              <div className="rounded border border-industrial-800 overflow-hidden">
+              <div className="rounded border border-industrial-800 overflow-x-auto">
                 <table className="w-full text-left font-mono">
                   <thead className="bg-industrial-950 text-industrial-400 border-b border-industrial-800 text-[10px] uppercase">
                     <tr>
@@ -445,7 +447,7 @@ export const HardwareConfigEditor: React.FC = () => {
                       <th className="py-2 px-3 w-36">Input Filter Delay</th>
                       <th className="py-2 px-3 w-32 text-center">Rising Edge Int</th>
                       <th className="py-2 px-3 w-32 text-center">Falling Edge Int</th>
-                      <th className="py-2 px-3">Comment</th>
+                      <th className="py-2 px-3 min-w-[200px]">Comment</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-industrial-800/60 text-industrial-200">
@@ -528,14 +530,14 @@ export const HardwareConfigEditor: React.FC = () => {
                 <Binary className="w-4 h-4 text-emerald-400" />
                 Digital Outputs (DQ 16x24VDC)
               </h3>
-              <div className="rounded border border-industrial-800 overflow-hidden">
+              <div className="rounded border border-industrial-800 overflow-x-auto">
                 <table className="w-full text-left font-mono">
                   <thead className="bg-industrial-950 text-industrial-400 border-b border-industrial-800 text-[10px] uppercase">
                     <tr>
                       <th className="py-2 px-3 w-16">Channel</th>
                       <th className="py-2 px-3 w-28">Address</th>
                       <th className="py-2 px-3 w-1/3">Symbol Name</th>
-                      <th className="py-2 px-3">Comment</th>
+                      <th className="py-2 px-3 min-w-[200px]">Comment</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-industrial-800/60 text-industrial-200">
@@ -584,7 +586,7 @@ export const HardwareConfigEditor: React.FC = () => {
                 <Gauge className="w-4 h-4 text-cyan-400" />
                 Analog Inputs (AI 4xU/I)
               </h3>
-              <div className="rounded border border-industrial-800 overflow-hidden">
+              <div className="rounded border border-industrial-800 overflow-x-auto">
                 <table className="w-full text-left font-mono">
                   <thead className="bg-industrial-950 text-industrial-400 border-b border-industrial-800 text-[10px] uppercase">
                     <tr>
@@ -595,7 +597,7 @@ export const HardwareConfigEditor: React.FC = () => {
                       <th className="py-2 px-3 w-28">Smoothing</th>
                       <th className="py-2 px-3 w-28 text-center">Wire Break</th>
                       <th className="py-2 px-3 w-32 text-center">Trigger OB82</th>
-                      <th className="py-2 px-3">Comment</th>
+                      <th className="py-2 px-3 min-w-[200px]">Comment</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-industrial-800/60 text-industrial-200">
@@ -691,7 +693,7 @@ export const HardwareConfigEditor: React.FC = () => {
                 <Gauge className="w-4 h-4 text-emerald-400" />
                 Analog Outputs (AQ 2xU/I)
               </h3>
-              <div className="rounded border border-industrial-800 overflow-hidden">
+              <div className="rounded border border-industrial-800 overflow-x-auto">
                 <table className="w-full text-left font-mono">
                   <thead className="bg-industrial-950 text-industrial-400 border-b border-industrial-800 text-[10px] uppercase">
                     <tr>
@@ -699,7 +701,7 @@ export const HardwareConfigEditor: React.FC = () => {
                       <th className="py-2 px-3 w-28">Address</th>
                       <th className="py-2 px-3 w-1/3">Symbol Name</th>
                       <th className="py-2 px-3 w-36">Output Type</th>
-                      <th className="py-2 px-3">Comment</th>
+                      <th className="py-2 px-3 min-w-[200px]">Comment</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-industrial-800/60 text-industrial-200">
@@ -760,7 +762,7 @@ export const HardwareConfigEditor: React.FC = () => {
               <Layers className="w-4 h-4 text-purple-400" />
               Organization Block (OB) Execution Management
             </h3>
-            <div className="rounded border border-industrial-800 overflow-hidden">
+            <div className="rounded border border-industrial-800 overflow-x-auto">
               <table className="w-full text-left font-mono">
                 <thead className="bg-industrial-950 text-industrial-400 border-b border-industrial-800 text-[10px] uppercase">
                   <tr>

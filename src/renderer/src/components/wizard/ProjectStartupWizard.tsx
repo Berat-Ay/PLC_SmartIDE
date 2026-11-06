@@ -67,10 +67,10 @@ export const ProjectStartupWizard: React.FC = () => {
             </div>
             <div>
               <div className="text-xs font-bold font-mono tracking-wider text-industrial-100 uppercase">
-                Portal View
+                Rungline
               </div>
               <div className="text-[10px] text-industrial-400 font-sans">
-                TIA Engineering V19
+                S7-1200 / S7-1500 IDE
               </div>
             </div>
           </div>
@@ -121,7 +121,7 @@ export const ProjectStartupWizard: React.FC = () => {
       {/* Main Configuration Form */}
       <main className="flex-1 h-full overflow-y-auto flex flex-col bg-[#0f1115]">
         {/* Top Header Strip */}
-        <div className="h-12 px-6 border-b border-[#27272a] bg-[#14161b] flex items-center justify-between">
+        <div className="h-14 shrink-0 px-6 border-b border-[#27272a] bg-[#14161b] flex items-center justify-between gap-4">
           <div>
             <h1 className="text-sm font-bold font-mono tracking-wide text-industrial-100 uppercase">
               Start / Create New S7 Engineering Project
@@ -130,7 +130,7 @@ export const ProjectStartupWizard: React.FC = () => {
               Configure Target Hardware Architecture, Firmware Version & Default Organization Block Language
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs font-mono text-cyan-400 bg-[#16202b] px-3 py-1 border border-[#1e3448]">
+          <div className="shrink-0 flex items-center gap-2 text-xs font-mono text-cyan-400 bg-[#16202b] px-3 py-1 border border-[#1e3448]">
             <HardDrive className="w-3.5 h-3.5" />
             <span>Siemens S7 Architecture</span>
           </div>

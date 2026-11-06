@@ -174,10 +174,12 @@ export const ProjectTree: React.FC = () => {
           className="flex items-center gap-2 px-2 py-1.5 rounded-none cursor-pointer text-industrial-200 hover:text-white hover:bg-industrial-800 transition-colors group"
         >
           <Cpu className="w-4 h-4 text-cyan-400 shrink-0" />
-          <span className="font-medium truncate">Device Configuration</span>
-          <span className="ml-auto text-[10px] text-industrial-400 group-hover:text-industrial-300 font-mono">
-            {config.general.cpuName}
-          </span>
+          <div className="min-w-0">
+            <div className="font-medium truncate">Device Configuration</div>
+            <div className="truncate text-[10px] text-industrial-400 group-hover:text-industrial-300 font-mono" title={config.general.cpuName}>
+              {config.general.cpuName}
+            </div>
+          </div>
         </div>
 
         {/* 2. Program Blocks */}
@@ -215,16 +217,16 @@ export const ProjectTree: React.FC = () => {
                       key={b.fileName}
                       data-testid={`tree-block-${b.fileName}`}
                       onClick={() => handleOpenLad(b.fileName, b.name)}
-                      className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                      className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                     >
-                      <div className="flex items-center gap-2 truncate">
-                        <span className="px-1 py-0.2 rounded-none text-[9px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="shrink-0 px-1 py-0.2 rounded-none text-[9px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800">
                           OB
                         </span>
                         <FileCode2 className="w-3 h-3 text-purple-400 shrink-0" />
-                        <span className="truncate">{b.name}</span>
+                        <span className="truncate" title={b.name}>{b.name}</span>
                       </div>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -264,16 +266,16 @@ export const ProjectTree: React.FC = () => {
                     <div
                       key={b.fileName}
                       onClick={() => handleOpenScl(b.fileName, b.name)}
-                      className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                      className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                     >
-                      <div className="flex items-center gap-2 truncate">
-                        <span className="px-1 py-0.2 rounded-none text-[9px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="shrink-0 px-1 py-0.2 rounded-none text-[9px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800">
                           OB
                         </span>
                         <Code className="w-3 h-3 text-purple-400 shrink-0" />
-                        <span className="truncate">{b.name}</span>
+                        <span className="truncate" title={b.name}>{b.name}</span>
                       </div>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -313,16 +315,16 @@ export const ProjectTree: React.FC = () => {
                   <div
                     key={b.fileName}
                     onClick={() => handleOpenLad(b.fileName, b.name)}
-                    className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                    className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                   >
-                    <div className="flex items-center gap-2 truncate">
-                      <span className="px-1 py-0.2 rounded-none text-[9px] font-bold bg-blue-950/80 text-blue-300 border border-blue-800">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="shrink-0 px-1 py-0.2 rounded-none text-[9px] font-bold bg-blue-950/80 text-blue-300 border border-blue-800">
                         FB
                       </span>
                       <FileCode2 className="w-3 h-3 text-blue-400 shrink-0" />
-                      <span className="truncate">{b.name}</span>
+                      <span className="truncate" title={b.name}>{b.name}</span>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
@@ -357,16 +359,16 @@ export const ProjectTree: React.FC = () => {
                   <div
                     key={b.fileName}
                     onClick={() => handleOpenScl(b.fileName, b.name)}
-                    className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                    className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                   >
-                    <div className="flex items-center gap-2 truncate">
-                      <span className="px-1 py-0.2 rounded-none text-[9px] font-bold bg-blue-950/80 text-blue-300 border border-blue-800">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="shrink-0 px-1 py-0.2 rounded-none text-[9px] font-bold bg-blue-950/80 text-blue-300 border border-blue-800">
                         FB
                       </span>
                       <Code className="w-3 h-3 text-blue-400 shrink-0" />
-                      <span className="truncate">{b.name}</span>
+                      <span className="truncate" title={b.name}>{b.name}</span>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
@@ -403,16 +405,16 @@ export const ProjectTree: React.FC = () => {
                   <div
                     key={b.fileName}
                     onClick={() => handleOpenLad(b.fileName, b.name)}
-                    className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                    className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                   >
-                    <div className="flex items-center gap-2 truncate">
-                      <span className="px-1 py-0.2 rounded-none text-[9px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="shrink-0 px-1 py-0.2 rounded-none text-[9px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800">
                         FC
                       </span>
                       <FileCode2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                      <span className="truncate">{b.name}</span>
+                      <span className="truncate" title={b.name}>{b.name}</span>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
@@ -447,16 +449,16 @@ export const ProjectTree: React.FC = () => {
                   <div
                     key={b.fileName}
                     onClick={() => handleOpenScl(b.fileName, b.name)}
-                    className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                    className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                   >
-                    <div className="flex items-center gap-2 truncate">
-                      <span className="px-1 py-0.2 rounded-none text-[9px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="shrink-0 px-1 py-0.2 rounded-none text-[9px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800">
                         FC
                       </span>
                       <Code className="w-3 h-3 text-emerald-400 shrink-0" />
-                      <span className="truncate">{b.name}</span>
+                      <span className="truncate" title={b.name}>{b.name}</span>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
@@ -491,19 +493,19 @@ export const ProjectTree: React.FC = () => {
                 <div
                   key={b.fileName}
                   onClick={() => handleOpenDb(b.fileName, b.name)}
-                  className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                  className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                 >
-                  <div className="flex items-center gap-2 truncate">
-                    <span className="px-1 py-0.2 rounded-none text-[9px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="shrink-0 px-1 py-0.2 rounded-none text-[9px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800">
                       DB
                     </span>
                     <Database className="w-3 h-3 text-amber-400 shrink-0" />
-                    <span className="truncate">{b.name}</span>
-                    <span className="text-[10px] text-industrial-500 font-mono">
+                    <span className="truncate" title={b.name}>{b.name}</span>
+                    <span className="shrink-0 text-[10px] text-industrial-500 font-mono">
                       {b.optimizedAccess ? 'Opt' : 'Std'}
                     </span>
                   </div>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
@@ -573,13 +575,13 @@ export const ProjectTree: React.FC = () => {
                 <div
                   key={tbl.id}
                   onClick={() => handleOpenTagTable(tbl.id, tbl.name)}
-                  className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                  className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                 >
-                  <div className="flex items-center gap-2 truncate">
+                  <div className="flex items-center gap-2 min-w-0">
                     <Tag className="w-3 h-3 text-industrial-400 group-hover:text-cyan-400" />
                     <span className="truncate">{tbl.name}</span>
                   </div>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
@@ -643,9 +645,9 @@ export const ProjectTree: React.FC = () => {
                 <div
                   key={udt.id}
                   onClick={() => handleOpenUdt(udt.id, udt.name)}
-                  className="flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
+                  className="relative flex items-center justify-between px-2 py-1 rounded-none cursor-pointer text-industrial-300 hover:text-white hover:bg-industrial-800 transition-colors group"
                 >
-                  <div className="flex items-center gap-2 truncate">
+                  <div className="flex items-center gap-2 min-w-0">
                     <Boxes className="w-3 h-3 text-pink-400" />
                     <span className="truncate">{udt.name}</span>
                   </div>
@@ -653,7 +655,7 @@ export const ProjectTree: React.FC = () => {
                     <span className="text-[10px] text-industrial-500 font-mono mr-1">
                       {udt.calculatedSizeInBytes || 0}B
                     </span>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-industrial-800">
                       <button
                         onClick={(e) => {
                           e.stopPropagation()

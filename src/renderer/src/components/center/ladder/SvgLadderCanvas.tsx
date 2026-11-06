@@ -22,7 +22,7 @@ import { useTagStore } from '../../../stores/useTagStore'
 import { useUIStore } from '../../../stores/useUIStore'
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
 import { DoubleCoilConflict } from '../../../services/DoubleCoilDetector'
-import { LadderGridLayoutEngine } from '../../../services/layout/LadderGridLayoutEngine'
+import { LadderGridLayoutEngine, LADDER_MIN_WIDTH } from '../../../services/layout/LadderGridLayoutEngine'
 import { TagAutocompleteCombobox } from './TagAutocompleteCombobox'
 import { InstructionRibbon } from './InstructionRibbon'
 import {
@@ -175,13 +175,13 @@ function getNetworkDropCandidates(net: LadNetwork, netIdx: number): DropCandidat
   const nodes = net.nodes || []
 
   if (nodes.length === 0) {
-    candidates.push({ x: 550, y: 65, target: { netIdx, insertIndex: 0 } })
+    candidates.push({ x: LADDER_MIN_WIDTH / 2, y: 65, target: { netIdx, insertIndex: 0 } })
     return candidates
   }
 
   const maxH = getMaxHorizontalNodes(net.nodes || [])
   const contentW = 48 + Math.max(1, maxH) * 175 + 220 + 60
-  const svgW = Math.max(1100, contentW)
+  const svgW = Math.max(LADDER_MIN_WIDTH, contentW)
   const targetCoilX = svgW - 60 - 70
   const rightRailX = svgW - 60
 
@@ -1617,7 +1617,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
               >
                 {/* Left Steel Gutter */}
                 <div
-                  className={`w-14 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
+                  className={`w-12 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
                     isNetSelected
                       ? 'bg-[#151922] text-[#38bdf8] border-r-2 border-r-[#00a3a6]'
                       : 'bg-[#101216] text-industrial-400'
@@ -1629,7 +1629,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                 {/* Right Content */}
                 <div className="flex-1 flex flex-col min-w-0">
                   <div className="h-7 px-3 bg-[#16181d] border-b border-[#27272a] flex items-center justify-between gap-3 text-xs">
-                    <div className="flex items-center gap-2 flex-1 min-w-[280px]">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
                       <span className="font-mono text-[10px] text-blue-400 font-bold shrink-0">
                         [SCL]
                       </span>
@@ -1642,7 +1642,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                           onUpdateBlock({ ...block, networks: updated })
                         }}
                         placeholder={`Network ${net.networkNumber} title...`}
-                        className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-[200px]"
+                        className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-0"
                       />
                     </div>
 
@@ -1713,7 +1713,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
           const nodes = net.nodes || []
 
           // Deterministic 2D Cellular Matrix Layout Engine (Grid[Row][Col])
-          const layout = LadderGridLayoutEngine.layoutNetwork(net, netIdx, 1100)
+          const layout = LadderGridLayoutEngine.layoutNetwork(net, netIdx, LADDER_MIN_WIDTH)
           const svgWidth = layout.svgWidth
           const netSvgHeight = layout.svgHeight
           const coilX = layout.coilX
@@ -1735,7 +1735,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
             >
               {/* Left Steel Gutter Bar showing NW Number */}
               <div
-                className={`w-14 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
+                className={`w-12 border-r border-[#27272a] flex flex-col items-center justify-start py-2.5 font-mono text-[11px] font-bold select-none shrink-0 ${
                   isNetSelected
                     ? 'bg-[#151922] text-[#38bdf8] border-r-2 border-r-[#00a3a6]'
                     : 'bg-[#101216] text-industrial-400'
@@ -1748,7 +1748,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
               <div className="flex-1 flex flex-col min-w-0">
                 {/* Compact Full-Width Steel Header Strip */}
                 <div className="h-7 px-3 bg-[#16181d] border-b border-[#27272a] flex items-center justify-between gap-3 text-xs">
-                  <div className="flex items-center gap-2 flex-1 min-w-[280px]">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
                     <span className="font-mono text-[10px] text-industrial-400 shrink-0">
                       //
                     </span>
@@ -1761,7 +1761,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                         onUpdateBlock({ ...block, networks: updated })
                       }}
                       placeholder={`Network ${net.networkNumber} title...`}
-                      className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-[200px]"
+                      className="bg-transparent text-[11px] font-mono font-semibold text-industrial-200 border-none focus:outline-hidden hover:bg-[#1a1d24] px-1 flex-1 min-w-0"
                     />
                   </div>
 
@@ -1840,7 +1840,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                       minWidth: `${Math.round(svgWidth * canvasZoom)}px`,
                       height: `${Math.round(netSvgHeight * canvasZoom)}px`
                     }}
-                    className="overflow-visible min-w-[950px]"
+                    className="overflow-visible"
                     onDragOver={(e) => handleSvgDragOver(e, netIdx)}
                     onDragLeave={(e) => handleSvgDragLeave(e, netIdx)}
                     onDrop={(e) => handleSvgDrop(e, netIdx)}
@@ -2203,7 +2203,7 @@ function renderNodes(
 
   const formatOperand = (op: string) => {
     if (!op) return ''
-    return op.length > 18 ? op.slice(0, 17) + '…' : op
+    return op.length > 19 ? op.slice(0, 18) + '…' : op
   }
 
   // Resolve symbolic name and physical address for any operand
@@ -3271,9 +3271,9 @@ function renderNodes(
                 }}
               >
                 <rect
-                  x={boxX + boxWidth / 2 - 28}
+                  x={boxX + boxWidth / 2 - Math.max(56, instName.length * 6 + 10) / 2}
                   y={boxY - 15}
-                  width="56"
+                  width={Math.max(56, instName.length * 6 + 10)}
                   height="14"
                   fill="#0f172a"
                   stroke="#38bdf8"

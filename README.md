@@ -18,6 +18,7 @@ npm run typecheck
 npm test
 npm run build
 npm run test:gui    # Electron arayüzünü Playwright ile dolaşır
+npm run test:layout # Her ekranı dört pencere boyutunda taşma ve çakışma için ölçer
 ```
 
 ## TIA Portal

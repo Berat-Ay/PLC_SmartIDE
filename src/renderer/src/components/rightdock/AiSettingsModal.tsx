@@ -73,7 +73,7 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
                   Dual-Tier Router
                 </span>
               </h2>
-              <p className="text-[11px] text-industrial-400">Configure AI providers, reasoning models & offline zero-key engine</p>
+              <p className="text-[11px] text-industrial-400">Configure AI providers and reasoning models</p>
             </div>
           </div>
           <button

@@ -90,6 +90,9 @@ export interface NetworkLayoutResult {
   dropZones: CellDropZone[]
 }
 
+/** A short rung stays small enough to fit next to both docks without scrolling. */
+export const LADDER_MIN_WIDTH = 720
+
 export class LadderGridLayoutEngine {
   // Grid layout dimensional constants
   public static readonly CELL_WIDTH = 180 // standard contact/coil cell
@@ -142,7 +145,7 @@ export class LadderGridLayoutEngine {
 
     // Empty Network handling
     if (nodes.length === 0) {
-      const svgWidth = Math.max(containerWidth, 1100)
+      const svgWidth = Math.max(containerWidth, LADDER_MIN_WIDTH)
       const svgHeight = 160
       const rightRailX = svgWidth - LadderGridLayoutEngine.RIGHT_MARGIN
       const wireY = LadderGridLayoutEngine.TOP_PADDING
@@ -420,8 +423,8 @@ export class LadderGridLayoutEngine {
     const placeResult = placeNodes(mainNodesToPlace, 0, 0)
 
     // Compute coil placement
-    // Output coil is guaranteed placed at coilCol = Math.max(4, totalSeriesColumns + 1)
-    let coilCol = mainNodesToPlace.length > 0 ? Math.max(4, placeResult.endCol + 1) : 4
+    // Output coil is guaranteed placed at coilCol = Math.max(3, totalSeriesColumns + 1)
+    let coilCol = mainNodesToPlace.length > 0 ? Math.max(3, placeResult.endCol + 1) : 3
     let coilLayout: NodeLayout | null = null
 
     if (hasTrailingOutput) {
@@ -479,7 +482,7 @@ export class LadderGridLayoutEngine {
     }
 
     // Connect wire from end of series logic to output coil (or terminal lead)
-    const rightRailX = colToX(coilCol) + LadderGridLayoutEngine.CELL_WIDTH + 40
+    const rightRailX = colToX(coilCol) + LadderGridLayoutEngine.CELL_WIDTH + 20
     const finalContentX = coilLayout ? coilLayout.entryWireX : colToX(placeResult.endCol)
     const lastPrecedingX =
       mainNodesToPlace.length > 0
@@ -513,13 +516,20 @@ export class LadderGridLayoutEngine {
     }
 
     // Calculate total SVG canvas dimensions
-    const totalColumns = Math.max(coilCol + 2, maxColReached + 2)
-    const calculatedWidth = colToX(totalColumns) + LadderGridLayoutEngine.RIGHT_MARGIN
-    const svgWidth = Math.max(containerWidth, Math.max(1100, calculatedWidth))
+    const calculatedWidth = Math.max(rightRailX, colToX(maxColReached + 1)) + 20
+    const svgWidth = Math.max(containerWidth, Math.max(LADDER_MIN_WIDTH, calculatedWidth))
 
+    // Only an instruction box hangs far below its wire. A contact or coil rung needs no extra row
+    const hasBox = (nodes: LadderNode[]): boolean =>
+      nodes.some((n) =>
+        n.kind === 'parallel'
+          ? (n as LadderParallelBranchNode).branches.some((b) => hasBox(b || []))
+          : n.kind !== 'contact' && n.kind !== 'coil'
+      )
     const calculatedHeight =
       LadderGridLayoutEngine.TOP_PADDING +
-      (maxRowReached + 1) * LadderGridLayoutEngine.ROW_HEIGHT +
+      maxRowReached * LadderGridLayoutEngine.ROW_HEIGHT +
+      (hasBox(net.nodes || []) ? LadderGridLayoutEngine.ROW_HEIGHT : 10) +
       LadderGridLayoutEngine.BOTTOM_PADDING
     const svgHeight = Math.max(160, calculatedHeight)
 
@@ -532,7 +542,7 @@ export class LadderGridLayoutEngine {
       coilX: coilLayout ? coilLayout.x : rightRailX - 175,
       coilCol,
       maxRow: maxRowReached,
-      maxCol: totalColumns,
+      maxCol: Math.max(coilCol + 2, maxColReached + 2),
       nodeLayouts,
       orderedNodes,
       wireSegments,

@@ -36,6 +36,7 @@ import { useBlockStore } from '../../stores/useBlockStore'
 import { DoubleCoilDetector } from '../../services/DoubleCoilDetector'
 import { TiaExportModal } from './TiaExportModal'
 import { LiveGuiDebuggerModal } from '../debug/LiveGuiDebuggerModal'
+import { createPortal } from 'react-dom'
 
 type MenuKey = 'file' | 'edit' | 'view' | 'plc' | 'tools' | null
 
@@ -136,7 +137,7 @@ export const TopAppBar: React.FC = () => {
           {/* S7 Badge */}
           <div className="flex items-center gap-1.5 px-2 py-0.5 mr-2 font-mono font-bold text-[11px] text-[#00a3a6] border-r border-[#27272a]">
             <Cpu className="w-3.5 h-3.5 text-[#00a3a6]" />
-            <span>S7-IDE</span>
+            <span>Rungline</span>
           </div>
 
           {/* FILE MENU */}
@@ -423,24 +424,24 @@ export const TopAppBar: React.FC = () => {
       {/* =========================================================================
           ROW 2: Single-Row Compact Engineering Command Bar (Height: 32px)
           ========================================================================= */}
-      <div className="h-8 bg-[#18191c] px-2 flex items-center justify-between text-xs whitespace-nowrap overflow-x-auto gap-2">
+      <div className="h-8 bg-[#18191c] px-2 flex items-center justify-between text-xs whitespace-nowrap overflow-hidden gap-2">
         {/* Left: Project Badge & CPU Controls */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
           {/* Project Title Badge */}
-          <div className="flex items-center gap-1.5 pr-2 border-r border-[#27272a] text-xs font-mono">
-            <span className="text-industrial-400">Project:</span>
-            <span className="font-bold text-industrial-100 truncate max-w-[140px]">
+          <div className="flex items-center gap-1.5 pr-2 border-r border-[#27272a] text-xs font-mono min-w-0">
+            <span className="text-industrial-400 hidden min-[1120px]:inline">Project:</span>
+            <span title={metadata ? metadata.name : 'Untitled'} className="font-bold text-industrial-100 truncate max-w-[140px]">
               {metadata ? metadata.name : 'Untitled'}
             </span>
             {isDirty && (
-              <span className="text-[10px] text-amber-400 px-1 py-0.2 bg-amber-950/60 border border-amber-800">
+              <span className="text-[10px] text-amber-400 px-1 py-0.2 bg-amber-950/60 border border-amber-800 shrink-0">
                 Modified*
               </span>
             )}
           </div>
 
           {/* CPU RUN / STOP / MRES Cluster */}
-          <div className="flex items-center bg-[#111215] border border-[#27272a] p-0.5">
+          <div className="flex items-center bg-[#111215] border border-[#27272a] p-0.5 shrink-0">
             <button
               data-testid="topbar-run-button"
               onClick={start}
@@ -484,14 +485,14 @@ export const TopAppBar: React.FC = () => {
             data-testid="topbar-monitor-button"
             onClick={toggleMonitoring}
             title={isMonitoring ? 'Disable Online Monitoring' : 'Enable Online Monitoring & Live Power Glow'}
-            className={`h-6 px-2.5 flex items-center gap-1.5 text-[11px] font-mono font-bold border transition-all ${
+            className={`h-6 px-2.5 flex items-center gap-1.5 text-[11px] font-mono font-bold border transition-all shrink-0 ${
               isMonitoring
                 ? 'bg-emerald-600 text-white border-emerald-400 shadow-xs'
                 : 'bg-[#14161b] hover:bg-[#1e222a] text-industrial-300 hover:text-white border-[#27272a]'
             }`}
           >
             <Eye className="w-3 h-3" />
-            <span>{isMonitoring ? 'Monitor ON' : 'Monitor OFF'}</span>
+            <span className="hidden min-[1120px]:inline">{isMonitoring ? 'Monitor ON' : 'Monitor OFF'}</span>
           </button>
 
           <div className="h-4 w-[1px] bg-[#27272a] mx-0.5" />
@@ -499,7 +500,7 @@ export const TopAppBar: React.FC = () => {
           {/* Persistent Scan Metric Pill */}
           <div
             data-testid="topbar-scan-metrics"
-            className={`h-6 flex items-center gap-2 px-2 font-mono text-[11px] border transition-all ${
+            className={`h-6 flex items-center gap-2 px-2 font-mono text-[11px] border transition-all shrink-0 ${
               runtimeState === 'RUN'
                 ? 'bg-[#0f1115] border-emerald-700/60 text-cyan-300'
                 : 'bg-[#0f1115] border-[#27272a] text-industrial-400'
@@ -516,14 +517,14 @@ export const TopAppBar: React.FC = () => {
             {runtimeState === 'RUN' && (
               <>
                 <span className="text-[#3f3f46]">|</span>
-                <span className="text-purple-300">{metrics.activeObs} OB</span>
+                <span className="text-purple-300">{metrics.activeObs}</span>
               </>
             )}
           </div>
         </div>
 
         {/* Center/Right: Engineering Quick Commands */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 shrink-0">
           <button
             data-testid="topbar-compile-btn"
             onClick={handleCompile}
@@ -546,7 +547,7 @@ export const TopAppBar: React.FC = () => {
             className="h-6 px-2 flex items-center gap-1 text-[11px] font-mono text-emerald-300 hover:text-white bg-[#132219] hover:bg-[#1a3023] border border-[#1e442d] transition-colors"
           >
             <Sparkles className="w-3 h-3 text-emerald-400" />
-            <span>Load Demo</span>
+            <span className="hidden min-[1340px]:inline">Load Demo</span>
           </button>
 
           <button
@@ -556,7 +557,7 @@ export const TopAppBar: React.FC = () => {
             className="h-6 px-2 flex items-center gap-1 text-[11px] font-mono text-cyan-200 hover:text-white bg-[#141f2b] hover:bg-[#1b2b3d] border border-[#1e3c5a] transition-colors font-medium"
           >
             <Share2 className="w-3 h-3 text-cyan-400" />
-            <span>Export TIA</span>
+            <span className="hidden min-[1120px]:inline">Export TIA</span>
           </button>
 
           <button
@@ -566,7 +567,7 @@ export const TopAppBar: React.FC = () => {
             className="h-6 px-2 flex items-center gap-1 text-[11px] font-mono text-purple-200 hover:text-white bg-[#22182d] hover:bg-[#302240] border border-[#3f2958] transition-colors font-semibold"
           >
             <Bug className="w-3 h-3 text-purple-400" />
-            <span>Auto-Debug GUI</span>
+            <span className="hidden min-[1340px]:inline">Auto-Debug GUI</span>
           </button>
 
           <button
@@ -576,7 +577,7 @@ export const TopAppBar: React.FC = () => {
             className="h-6 px-2 flex items-center gap-1 text-[11px] font-mono text-cyan-200 hover:text-white bg-[#11242e] hover:bg-[#183444] border border-[#1e465e] transition-colors font-medium rounded-none cursor-pointer"
           >
             <FileText className="w-3 h-3 text-cyan-400" />
-            <span>Flight Log</span>
+            <span className="hidden min-[1340px]:inline">Flight Log</span>
           </button>
 
           <div className="h-4 w-[1px] bg-[#27272a] mx-0.5" />
@@ -626,11 +627,14 @@ export const TopAppBar: React.FC = () => {
         </div>
       </div>
 
-      {/* TIA Portal Export Bridge Modal */}
-      <TiaExportModal isOpen={isExportModalOpen} onClose={() => setExportModalOpen(false)} />
-
-      {/* Autonomous Real-Window GUI Debugger & Chaos Monkey Modal */}
-      <LiveGuiDebuggerModal isOpen={isGuiDebuggerOpen} onClose={() => setGuiDebuggerOpen(false)} />
+      {/* The header forms a stacking context, so its modals are rendered at the document root */}
+      {createPortal(
+        <>
+          <TiaExportModal isOpen={isExportModalOpen} onClose={() => setExportModalOpen(false)} />
+          <LiveGuiDebuggerModal isOpen={isGuiDebuggerOpen} onClose={() => setGuiDebuggerOpen(false)} />
+        </>,
+        document.body
+      )}
     </header>
   )
 }

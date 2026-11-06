@@ -102,9 +102,11 @@ export const CompileMessagesTab: React.FC = () => {
             ) : (
               <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
             )}
-            <span data-testid="compile-banner-text">{lastCompileResult.bannerMessage}</span>
+            <span data-testid="compile-banner-text" className="truncate" title={lastCompileResult.bannerMessage}>
+              {lastCompileResult.bannerMessage}
+            </span>
             {lastCompileResult.metricSummary && (
-              <span data-testid="compile-metrics-text" className="text-[10px] text-industrial-400 font-mono font-normal">
+              <span data-testid="compile-metrics-text" className="under-1100:hidden truncate text-[10px] text-industrial-400 font-mono font-normal">
                 • {lastCompileResult.metricSummary}
               </span>
             )}
@@ -120,7 +122,7 @@ export const CompileMessagesTab: React.FC = () => {
       )}
 
       {/* Summary Header */}
-      <div className="h-8 px-3 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between">
+      <div className="h-8 shrink-0 px-3 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between whitespace-nowrap">
         <div className="flex items-center gap-4 text-[11px]">
           <div className="flex items-center gap-1.5 text-red-400 font-semibold">
             <AlertCircle className="w-3.5 h-3.5" />
@@ -163,7 +165,7 @@ export const CompileMessagesTab: React.FC = () => {
               <tr>
                 <th className="py-1.5 px-3 w-10 text-center">Sev</th>
                 <th className="py-1.5 px-3 w-36">Code</th>
-                <th className="py-1.5 px-3 w-40">Source</th>
+                <th className="under-1100:hidden py-1.5 px-3 w-40">Source</th>
                 <th className="py-1.5 px-3">Message</th>
                 <th className="py-1.5 px-3 w-44">Location</th>
                 <th className="py-1.5 px-3 w-44 text-right">Actions</th>
@@ -196,9 +198,9 @@ export const CompileMessagesTab: React.FC = () => {
                     <td className="py-1.5 px-3 text-red-300 font-bold text-[11px]">
                       {diag.iecCode ? `[${diag.iecCode}] ${diag.code}` : diag.code}
                     </td>
-                    <td className="py-1.5 px-3 text-industrial-400 text-[11px]">{diag.source}</td>
+                    <td className="under-1100:hidden py-1.5 px-3 text-industrial-400 text-[11px]">{diag.source}</td>
                     <td className="py-1.5 px-3 text-industrial-100 font-sans text-xs">{diag.message}</td>
-                    <td className="py-1.5 px-3 text-cyan-300 font-mono text-[11px] truncate" title={locStr}>
+                    <td className="py-1.5 px-3 text-cyan-300 font-mono text-[11px] max-w-[176px] truncate" title={locStr}>
                       {locStr}
                     </td>
                     <td className="py-1.5 px-3 text-right">
