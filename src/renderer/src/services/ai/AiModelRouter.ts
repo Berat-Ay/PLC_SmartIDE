@@ -1,5 +1,5 @@
 /**
- * Antigravity AI Model Router & Deterministic Industrial Synthesis Engine
+ * Rungline AI Model Router & Deterministic Industrial Synthesis Engine
  * Supports real cloud API providers (Gemini, OpenAI-compatible) and a zero-key
  * built-in offline industrial deterministic synthesis engine supporting Turkish and English.
  */
@@ -183,7 +183,7 @@ export function sanitizeUserPrompt(rawPrompt: string): string {
     .replace(/\[DIAGNOSTIC\][\s\S]*$/i, '')
     .replace(/\[TIP\][\s\S]*$/i, '')
     .replace(/RAG Context:\s*[\w_-]+/gi, '')
-    .replace(/Antigravity Agent\s*$/i, '')
+    .replace(/Rungline Agent\s*$/i, '')
     .trim()
 }
 
@@ -1780,8 +1780,8 @@ rPressureBar := rNormalized * 10.0;
     })
     const execution = await tools.executeToolBatch(toolCalls, 'auto-apply')
     const reply = isTurkish
-      ? `Antigravity S7 Mühendislik Asistanı isteğinizi analiz etti: "${prompt}".\n\nCPU ve Derleyici AST denetleyicisi aktif. Belirli bir PLC devresi (örn: mühürlemeli motor devresi, zamanlayıcı kontrolü, vana veya hidrofor mantığı) oluşturmak istediğinizde komutunuzu doğrudan iletebilirsiniz.`
-      : `Antigravity S7 Engineering Agent analyzed your request: "${prompt}".\n\nCPU and Compiler AST inspector active. Feel free to request any ladder circuit synthesis, timer logic, valve control, or booster station automation.`
+      ? `Rungline S7 Mühendislik Asistanı isteğinizi analiz etti: "${prompt}".\n\nCPU ve Derleyici AST denetleyicisi aktif. Belirli bir PLC devresi (örn: mühürlemeli motor devresi, zamanlayıcı kontrolü, vana veya hidrofor mantığı) oluşturmak istediğinizde komutunuzu doğrudan iletebilirsiniz.`
+      : `Rungline S7 Engineering Agent analyzed your request: "${prompt}".\n\nCPU and Compiler AST inspector active. Feel free to request any ladder circuit synthesis, timer logic, valve control, or booster station automation.`
 
     return {
       replyText: reply,
@@ -1835,7 +1835,7 @@ rPressureBar := rNormalized * 10.0;
     const ragPromptSection = ragEngine.formatRetrievedRulesForPrompt(topRules)
     const consultedRuleNames = topRules.map((r) => r.item.name)
 
-    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC Automation Architect in the Antigravity IDE following strict MEB Automation Curriculum standards.
+    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC Automation Architect in the Rungline IDE following strict MEB Automation Curriculum standards.
 When asked to synthesize, create, or modify PLC Ladder logic, circuits, timers, motors, or I/O configurations, output your response in structured JSON or Compact Ladder DSL:
 
 STRUCTURED JSON OUTPUT SCHEMA:
@@ -2270,7 +2270,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
           {
             role: 'system',
             content:
-              'You are an expert Siemens S7-1200/1500 PLC Automation Architect in the Antigravity IDE. Output PLC circuits in Compact Ladder DSL with # TAG DECLARATIONS and # NETWORK DEFINITIONS.'
+              'You are an expert Siemens S7-1200/1500 PLC Automation Architect in the Rungline IDE. Output PLC circuits in Compact Ladder DSL with # TAG DECLARATIONS and # NETWORK DEFINITIONS.'
           },
           { role: 'user', content: prompt }
         ]

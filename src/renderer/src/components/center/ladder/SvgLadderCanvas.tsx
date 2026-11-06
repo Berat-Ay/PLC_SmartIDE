@@ -3862,7 +3862,7 @@ function renderNodes(
               <text x="70" y="12" fill="#fecdd3" fontSize="9" fontWeight="bold" textAnchor="middle" fontFamily="sans-serif">
                 AI: Why is this OFF?
               </text>
-              <title>Analyze unenergized coil condition with Antigravity AI</title>
+              <title>Analyze unenergized coil condition with Rungline AI</title>
             </g>
           )}
 

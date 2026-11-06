@@ -3,7 +3,7 @@ import { TopAppBar } from './components/topbar/TopAppBar'
 import { ProjectTree } from './components/leftdock/ProjectTree'
 import { EditorWorkspace } from './components/center/EditorWorkspace'
 import { BottomInspector } from './components/bottomdock/BottomInspector'
-import { AntigravityAgentPanel } from './components/rightdock/AntigravityAgentPanel'
+import { AgentPanel } from './components/rightdock/AgentPanel'
 import { InstructionsTreePanel } from './components/ladder/InstructionsTreePanel'
 import { AddBlockModal } from './components/leftdock/AddBlockModal'
 import { DebugLogModal } from './components/debug/DebugLogModal'
@@ -256,7 +256,7 @@ export const App: React.FC = () => {
                   {rightActiveTab === 'instructions' ? (
                     <InstructionsTreePanel />
                   ) : (
-                    <AntigravityAgentPanel />
+                    <AgentPanel />
                   )}
                 </div>
               </div>

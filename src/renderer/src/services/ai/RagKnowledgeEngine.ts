@@ -1,5 +1,5 @@
 /**
- * Antigravity 3-Layer Self-Learning RAG Knowledge Engine
+ * Rungline 3-Layer Self-Learning RAG Knowledge Engine
  * Layer 1: Dynamic Context Injector (S7 ASTs, memory map, CPU constraints)
  * Layer 2: Embedded Siemens S7 & MEB Automation Curriculum Reference Library (Canonical Rules & Examples)
  * Layer 3: User Standard Library & Semantic Vectorizer (TF-IDF Cosine Similarity)

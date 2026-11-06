@@ -1,5 +1,5 @@
 /**
- * Antigravity Mathematical DOM & SVG Bounding-Box Visual Inspector
+ * Rungline Mathematical DOM & SVG Bounding-Box Visual Inspector
  * Real-time geometric layout scanner using Element.getBoundingClientRect()
  * and window.getComputedStyle() to detect text overlaps, label clipping,
  * clearance violations, and false self-collision diagnostics.

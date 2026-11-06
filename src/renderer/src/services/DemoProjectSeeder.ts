@@ -190,7 +190,7 @@ export class DemoProjectSeeder {
         targetCpu: 'Virtual S7-1200',
         firmwareVersion: 'V4.6',
         schemaVersion: '1.0.0',
-        author: 'Antigravity Principal Architect',
+        author: 'Rungline',
         description: 'Multi-pump chemical dosing and pressurized header control system with S7-1200 runtime & memory guard',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),

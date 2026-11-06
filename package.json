@@ -1,10 +1,10 @@
 {
-  "name": "plc-next-ide",
+  "name": "rungline",
   "version": "1.0.0",
   "description": "AI-First Industrial PLC Integrated Development Environment (Siemens S7 Architecture)",
   "main": "./out/main/index.js",
   "type": "module",
-  "author": "Antigravity Architect",
+  "author": "Berat-Ay",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

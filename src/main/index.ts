@@ -20,7 +20,7 @@ function createWindow(): void {
     minHeight: 680,
     show: false,
     autoHideMenuBar: true,
-    title: 'Antigravity S7 Industrial IDE',
+    title: 'Rungline',
     backgroundColor: '#0b0d10',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.cjs'),

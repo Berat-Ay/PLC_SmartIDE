@@ -217,7 +217,7 @@ export class BlackBoxLogger {
 
     const aiTrace = this.lastAiTrace
 
-    return `=== ANTIGRAVITY BLACK-BOX DIAGNOSTIC DUMP ===
+    return `=== RUNGLINE BLACK-BOX DIAGNOSTIC DUMP ===
 Exported At: ${nowIso}
 Total Events Captured: ${this.logs.length}
 Flight Recorder Start: ${new Date(this.startTime).toISOString()}

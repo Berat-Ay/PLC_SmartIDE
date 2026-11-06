@@ -119,7 +119,7 @@ function renderInlineMarkdown(str: string): React.ReactNode {
   return parts.length > 0 ? parts : str
 }
 
-export const AntigravityAgentPanel: React.FC = () => {
+export const AgentPanel: React.FC = () => {
   const {
     rightDockCollapsed,
     toggleRightDock,
@@ -304,7 +304,7 @@ export const AntigravityAgentPanel: React.FC = () => {
 
   return (
     <div
-      data-testid="antigravity-agent-panel"
+      data-testid="agent-panel"
       className="w-full h-full bg-[#111215] border-l border-[#27272a] flex flex-col select-none text-xs"
     >
       {/* Header */}
@@ -314,7 +314,7 @@ export const AntigravityAgentPanel: React.FC = () => {
             <Bot className="w-3.5 h-3.5" />
           </div>
           <span className="font-mono font-bold text-industrial-100 tracking-wide uppercase text-xs">
-            Antigravity <span className="text-purple-400">Agent</span>
+            Rungline <span className="text-purple-400">Agent</span>
           </span>
         </div>
 
@@ -533,7 +533,7 @@ export const AntigravityAgentPanel: React.FC = () => {
               {msg.sender === 'agent' ? (
                 <>
                   <Bot className="w-3 h-3 text-purple-400" />
-                  <span>Antigravity Agent</span>
+                  <span>Rungline Agent</span>
                 </>
               ) : (
                 <span>Engineer</span>
