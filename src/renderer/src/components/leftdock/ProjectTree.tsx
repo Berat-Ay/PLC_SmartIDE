@@ -18,6 +18,7 @@ import {
 import { useUIStore } from '../../stores/useUIStore'
 import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
+import { useProjectStore } from '../../stores/useProjectStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
 
 export const ProjectTree: React.FC = () => {
@@ -39,6 +40,31 @@ export const ProjectTree: React.FC = () => {
     deleteDataBlock
   } = useBlockStore()
   const { config } = useHardwareStore()
+
+  // Asks first. The block leaves the project only after its file has safely moved to .trash.
+  const confirmAndTrash = async (
+    label: string,
+    folder: 'blocks' | 'types' | 'tags',
+    fileName: string | undefined,
+    remove: () => void
+  ): Promise<void> => {
+    if (!window.confirm(`Delete ${label}?\n\nIts file moves to the .trash folder inside the project.`)) return
+    const projectStore = useProjectStore.getState()
+    if (window.electronApi && projectStore.projectPath && fileName) {
+      try {
+        projectStore.noteLocalWrite()
+        await window.electronApi.trashProjectFile(projectStore.projectPath, `${folder}/${fileName}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        // The built-in demo lives only in memory, so it has no file to move
+        if (!message.includes('is not an open project')) {
+          window.alert(`${label} was not deleted because its file could not be moved:\n${message}`)
+          return
+        }
+      }
+    }
+    remove()
+  }
 
   // Node expansion states
   const [blocksOpen, setBlocksOpen] = useState(true)
@@ -214,8 +240,10 @@ export const ProjectTree: React.FC = () => {
                           <button
                             onClick={(e) => {
                               e.stopPropagation()
-                              deleteLadBlock(b.fileName)
-                              closeTab(`tab_lad_${b.fileName}`)
+                              void confirmAndTrash(b.name, 'blocks', b.fileName, () => {
+                                deleteLadBlock(b.fileName)
+                                closeTab(`tab_lad_${b.fileName}`)
+                              })
                             }}
                             data-testid="tree-delete-block"
                             title="Delete Block"
@@ -261,8 +289,10 @@ export const ProjectTree: React.FC = () => {
                           <button
                             onClick={(e) => {
                               e.stopPropagation()
-                              deleteSclBlock(b.fileName)
-                              closeTab(`tab_scl_${b.fileName}`)
+                              void confirmAndTrash(b.name, 'blocks', b.fileName, () => {
+                                deleteSclBlock(b.fileName)
+                                closeTab(`tab_scl_${b.fileName}`)
+                              })
                             }}
                             data-testid="tree-delete-block"
                             title="Delete Block"
@@ -307,8 +337,10 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          deleteLadBlock(b.fileName)
-                          closeTab(`tab_lad_${b.fileName}`)
+                          void confirmAndTrash(b.name, 'blocks', b.fileName, () => {
+                            deleteLadBlock(b.fileName)
+                            closeTab(`tab_lad_${b.fileName}`)
+                          })
                         }}
                         data-testid="tree-delete-block"
                         title="Delete FB"
@@ -349,8 +381,10 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          deleteSclBlock(b.fileName)
-                          closeTab(`tab_scl_${b.fileName}`)
+                          void confirmAndTrash(b.name, 'blocks', b.fileName, () => {
+                            deleteSclBlock(b.fileName)
+                            closeTab(`tab_scl_${b.fileName}`)
+                          })
                         }}
                         data-testid="tree-delete-block"
                         title="Delete FB"
@@ -393,8 +427,10 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          deleteLadBlock(b.fileName)
-                          closeTab(`tab_lad_${b.fileName}`)
+                          void confirmAndTrash(b.name, 'blocks', b.fileName, () => {
+                            deleteLadBlock(b.fileName)
+                            closeTab(`tab_lad_${b.fileName}`)
+                          })
                         }}
                         data-testid="tree-delete-block"
                         title="Delete FC"
@@ -435,8 +471,10 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          deleteSclBlock(b.fileName)
-                          closeTab(`tab_scl_${b.fileName}`)
+                          void confirmAndTrash(b.name, 'blocks', b.fileName, () => {
+                            deleteSclBlock(b.fileName)
+                            closeTab(`tab_scl_${b.fileName}`)
+                          })
                         }}
                         data-testid="tree-delete-block"
                         title="Delete FC"
@@ -480,8 +518,10 @@ export const ProjectTree: React.FC = () => {
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
-                        deleteDataBlock(b.fileName)
-                        closeTab(`tab_db_${b.fileName}`)
+                        void confirmAndTrash(b.name, 'blocks', b.fileName, () => {
+                          deleteDataBlock(b.fileName)
+                          closeTab(`tab_db_${b.fileName}`)
+                        })
                       }}
                       data-testid="tree-delete-block"
                       title="Delete DB"
@@ -555,8 +595,10 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          deleteTagTable(tbl.id)
-                          closeTab(`tab_tags_${tbl.id}`)
+                          void confirmAndTrash(tbl.name, 'tags', tbl.fileName, () => {
+                            deleteTagTable(tbl.id)
+                            closeTab(`tab_tags_${tbl.id}`)
+                          })
                         }}
                         data-testid="tree-delete-tag-table"
                         title="Delete Tag Table"
@@ -626,8 +668,10 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          deleteUdt(udt.id)
-                          closeTab(`tab_udt_${udt.id}`)
+                          void confirmAndTrash(udt.name, 'types', udt.fileName, () => {
+                            deleteUdt(udt.id)
+                            closeTab(`tab_udt_${udt.id}`)
+                          })
                         }}
                         data-testid="tree-delete-udt"
                         title="Delete UDT"

@@ -150,6 +150,33 @@ async function run(): Promise<void> {
       useBlockStore.getState().sclBlocks[0].interface.input.some((v) => v.name === 'Renamed')
     )
 
+    // Deleted blocks go to .trash and stay gone
+    {
+      const trashRoot = path.join(root, 'trash_test')
+      await FileEngine.ensureProjectDirectories(trashRoot)
+      await fs.writeFile(path.join(trashRoot, 'blocks', 'FC7_Old.scl'), 'FUNCTION "FC7_Old" : Void\nBEGIN\nEND_FUNCTION\n')
+      check('The block loads before deletion', (await FileEngine.loadProject(trashRoot)).sclBlocks.some((b) => b.name === 'FC7_Old'))
+      check('Moving to the trash succeeds', (await FileEngine.moveToTrash(trashRoot, 'blocks/FC7_Old.scl')) === true)
+      check('A deleted block does not come back on open', !(await FileEngine.loadProject(trashRoot)).sclBlocks.some((b) => b.name === 'FC7_Old'))
+      const trashed = await fs.readdir(path.join(trashRoot, '.trash'))
+      check('The file is kept in .trash', trashed.length === 1 && trashed[0].endsWith('blocks_FC7_Old.scl'), trashed)
+      check('A file that was never saved is not an error', (await FileEngine.moveToTrash(trashRoot, 'blocks/Never.scl')) === false)
+
+      await fs.writeFile(path.join(trashRoot, 'blocks', 'FC7_Old.scl'), 'again')
+      await FileEngine.moveToTrash(trashRoot, '/blocks/FC7_Old.scl')
+      check('A second deletion keeps both copies', (await fs.readdir(path.join(trashRoot, '.trash'))).length === 2)
+
+      const refused = async (rel: string): Promise<boolean> =>
+        FileEngine.moveToTrash(trashRoot, rel).then(
+          () => false,
+          () => true
+        )
+      check('A path outside the project is refused', await refused('../secret.txt'))
+      check('A nested traversal is refused', await refused('blocks/../../secret.txt'))
+      check('Project settings cannot be trashed', await refused('project.plc.json'))
+      check('Files in other folders cannot be trashed', await refused('hardware/cpu_config.json'))
+    }
+
     // RUN refuses a program that does not compile
     const runtimeStore = useRuntimeStore.getState()
     useProjectStore.setState({ metadata: { name: 'gate' } as never, projectPath: root, isLoaded: true })
