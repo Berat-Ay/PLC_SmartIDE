@@ -195,8 +195,8 @@ export function parseSourceBlock(source: string): ParsedSourceBlock {
     }
     if (/^(AUTHOR|FAMILY|NAME|KNOW_HOW_PROTECT|READ_ONLY|DB_SPECIFIC)\b/.test(upper)) continue
 
-    // Instance DB: the FB name on its own line in the header of a DATA_BLOCK
-    if (result.kind === 'DB' && /^"[^"]+"$/.test(text)) {
+    // Instance DB: the FB or system type name on its own line in the header of a DATA_BLOCK
+    if (result.kind === 'DB' && /^("[^"]+"|[A-Za-z_]\w*)$/.test(text) && !/^(VAR|STRUCT|END_VAR|END_STRUCT|BEGIN)$/.test(upper)) {
       result.instanceOf = text.replace(/^"|"$/g, '')
       continue
     }

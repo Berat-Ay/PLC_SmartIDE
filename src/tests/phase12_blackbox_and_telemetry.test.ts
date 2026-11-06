@@ -86,7 +86,7 @@ function testBlackBoxLoggerCore() {
 
   // Verify Markdown Diagnostic Report Export
   const report = logger.exportDiagnosticReport()
-  assert.ok(report.includes('=== ANTIGRAVITY BLACK-BOX DIAGNOSTIC DUMP ==='), 'Contains header')
+  assert.ok(report.includes('=== RUNGLINE BLACK-BOX DIAGNOSTIC DUMP ==='), 'Contains header')
   assert.ok(report.includes('RECENT 50 TELEMETRY EVENTS'), 'Contains telemetry section')
   assert.ok(report.includes('Prompt sent to Gemini 2.5 Flash'), 'Contains sanitized event')
   testPass('Diagnostic Markdown Report generated successfully')
@@ -221,13 +221,13 @@ function testPromptSanitizerAndModelSorting() {
   const dirtyPrompt1 = `10 Araçlık Otopark devresi oluştur\n[DIAGNOSTIC] Canlı Bobin Teşhis Raporu: Motor_Run enerjilenmedi.`
   assert.strictEqual(sanitizeUserPrompt(dirtyPrompt1), '10 Araçlık Otopark devresi oluştur')
 
-  const dirtyPrompt2 = `motoru baslat 5 sn calissin [TIP] Try asking: "3 pompali hidrofor yap" RAG Context: MEB_Motor_StartStop_SealIn Antigravity Agent`
+  const dirtyPrompt2 = `motoru baslat 5 sn calissin [TIP] Try asking: "3 pompali hidrofor yap" RAG Context: MEB_Motor_StartStop_SealIn Rungline Agent`
   assert.strictEqual(sanitizeUserPrompt(dirtyPrompt2), 'motoru baslat 5 sn calissin')
 
   const cleanPrompt = '   start butonuna basinca motor calissin   '
   assert.strictEqual(sanitizeUserPrompt(cleanPrompt), 'start butonuna basinca motor calissin')
 
-  testPass('sanitizeUserPrompt purges [DIAGNOSTIC], [TIP], RAG Context, and Antigravity Agent clipboard pollution')
+  testPass('sanitizeUserPrompt purges [DIAGNOSTIC], [TIP], RAG Context, and Rungline Agent clipboard pollution')
 
   // 5b. Model Priority Sorting
   const discovered: DiscoveredModel[] = [

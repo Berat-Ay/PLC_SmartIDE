@@ -268,27 +268,28 @@ function testTiaExportBridge() {
   assert.ok(dbFile.content.includes('END_DATA_BLOCK'), 'DB file contains END_DATA_BLOCK footer')
   testPass('DB files formatted as valid Siemens S7 DATA_BLOCK sources')
 
-  // Check SimaticML XML export
-  const xmlFile = bundle.files.find((f) => f.type === 'xml')
-  assert.ok(xmlFile, 'SimaticML XML block exists')
-  assert.ok(xmlFile.content.includes('<Document>'), 'SimaticML root tag present')
-  assert.ok(xmlFile.content.includes('<SW.Blocks.CompileUnit'), 'SimaticML CompileUnits present')
-  assert.ok(xmlFile.content.includes('<FlgNet'), 'SimaticML FlgNet LAD wire network present')
-  testPass('SimaticML XML files formatted with Siemens Openness FlgNet & CompileUnits')
+  // Tag table for the bridge
+  const tagFile = bundle.files.find((f) => f.type === 'xml')
+  assert.ok(tagFile, 'Tag table XML exists')
+  assert.ok(tagFile.content.includes('<SW.Tags.PlcTagTable'), 'Tag table element present')
+  assert.ok(tagFile.content.includes('"EmergencyStop"') || tagFile.content.includes('>EmergencyStop<'), 'Contains EmergencyStop tag')
+  testPass('Tag table written as SimaticML')
 
-  // Check PLC_Tags.csv
+  // LAD blocks are reported as skipped until a real SimaticML writer exists
+  assert.ok(!bundle.files.some((f) => f.content.includes('<FlgNet')), 'No hand-made LAD XML is exported')
+  assert.ok(bundle.manifest.skipped.length > 0, 'The demo LAD blocks are listed as skipped')
+  assert.ok(bundle.manifest.warnings.some((w) => w.includes('LAD')), 'Skipping LAD produces a warning')
+  testPass('LAD blocks are skipped with an explicit warning')
+
+  // Spreadsheet input for hand import
   const csvFile = bundle.files.find((f) => f.filename === 'PLC_Tags.csv')
   assert.ok(csvFile, 'PLC_Tags.csv exists')
-  assert.ok(csvFile.content.startsWith('Name,Path,Data Type,Logical Address,Comment'), 'CSV header is TIA Portal standard')
+  assert.ok(csvFile.content.startsWith('Name,Path,Data Type,Logical Address,Comment'), 'CSV header matches the TIA tag columns')
   assert.ok(csvFile.content.includes('"EmergencyStop"'), 'Contains EmergencyStop tag')
-  testPass('PLC_Tags.csv formatted for direct TIA Portal Tag Table import')
+  testPass('PLC_Tags.csv written')
 
-  // Check Openness C# Automation Script
-  const csFile = bundle.files.find((f) => f.filename === 'ImportToTiaPortal.cs')
-  assert.ok(csFile, 'ImportToTiaPortal.cs exists')
-  assert.ok(csFile.content.includes('using Siemens.Engineering;'), 'C# script imports Siemens.Engineering')
-  assert.ok(csFile.content.includes('CreateFromFile'), 'C# script contains Openness import methods')
-  testPass('ImportToTiaPortal.cs ready for standalone Siemens.Engineering CLI automation')
+  assert.ok(bundle.files.some((f) => f.filename === 'manifest.json'), 'manifest.json exists')
+  testPass('Manifest written for the Openness bridge')
 }
 
 async function testDirectLadderSynthesis() {

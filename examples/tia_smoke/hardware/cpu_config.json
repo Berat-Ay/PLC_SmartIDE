@@ -1,0 +1,42 @@
+{
+  "general": {
+    "cpuName": "CPU 1214C DC/DC/DC",
+    "targetCpu": "cpu-1214c",
+    "cycleWatchdogTimeMs": 150,
+    "minCycleTimeEnabled": false,
+    "minCycleTimeMs": 1,
+    "retentiveMemory": {
+      "startByte": 0,
+      "byteCount": 0
+    }
+  },
+  "systemMemory": {
+    "enabled": false,
+    "byteAddress": 1
+  },
+  "clockMemory": {
+    "enabled": false,
+    "byteAddress": 0
+  },
+  "digitalIO": {
+    "diStartByte": 0,
+    "dqStartByte": 0,
+    "diChannels": [],
+    "dqChannels": []
+  },
+  "analogIO": {
+    "aiChannels": [],
+    "aqChannels": []
+  },
+  "organizationBlocks": [
+    {
+      "blockNumber": 30,
+      "name": "OB30_Cyclic",
+      "type": "CyclicInterrupt",
+      "enabled": true,
+      "cycleTimeMs": 100,
+      "priority": 8,
+      "description": "Cyclic interrupt"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "smoke_tags",
+  "name": "Smoke_Tags",
+  "tags": [
+    { "id": "t1", "name": "Start_Button", "dataType": "Bool", "address": "%I0.0", "comment": "Start & run request" },
+    { "id": "t2", "name": "Stop_Button", "dataType": "Bool", "address": "%I0.1", "comment": "Stop request, NC wired" },
+    { "id": "t3", "name": "Motor_Output", "dataType": "Bool", "address": "%Q0.0" },
+    { "id": "t4", "name": "Speed_Raw", "dataType": "Int", "address": "%IW64", "comment": "Analog speed <0..27648>" },
+    { "id": "t5", "name": "Speed_Percent", "dataType": "Real", "address": "%MD100" },
+    { "id": "t6", "name": "Run_Count", "dataType": "DInt", "address": "%MD104" }
+  ]
+}

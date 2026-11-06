@@ -1,0 +1,10 @@
+{
+  "id": "udt_motor",
+  "name": "UDT_Motor",
+  "members": [
+    { "id": "m1", "name": "Running", "dataType": "Bool" },
+    { "id": "m2", "name": "Fault", "dataType": "Bool" },
+    { "id": "m3", "name": "SpeedSetpoint", "dataType": "Real", "defaultValue": "50.0" },
+    { "id": "m4", "name": "StartCount", "dataType": "DInt" }
+  ]
+}

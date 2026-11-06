@@ -1,0 +1,13 @@
+{
+  "blockType": "DB",
+  "blockNumber": 1,
+  "name": "DB1_Plant",
+  "dbType": "Global",
+  "optimizedAccess": true,
+  "variables": [
+    { "id": "v1", "name": "Motor1", "dataType": "UDT_Motor", "retain": false, "accessibleFromHMI": true },
+    { "id": "v2", "name": "Limits", "dataType": "Array[0..3] of Real", "retain": false, "accessibleFromHMI": true },
+    { "id": "v3", "name": "TotalStarts", "dataType": "DInt", "retain": true, "accessibleFromHMI": true },
+    { "id": "v4", "name": "Label", "dataType": "String[16]", "defaultValue": "'Smoke'", "retain": false, "accessibleFromHMI": true }
+  ]
+}

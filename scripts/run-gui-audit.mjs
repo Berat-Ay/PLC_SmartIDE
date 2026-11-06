@@ -1810,7 +1810,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
     })
     await window.waitForTimeout(300)
 
-    const aiAgentPanel = window.locator('[data-testid="antigravity-agent-panel"]')
+    const aiAgentPanel = window.locator('[data-testid="agent-panel"]')
     await aiAgentPanel.waitFor({ state: 'visible', timeout: 3000 })
 
     // 2. Verify model select options adhere strictly to whitelist
@@ -2073,7 +2073,7 @@ NW 4 "Motor Stopped Red Indicator LED": SERIES( NC(Motor_Run), COIL(Kirmizi_Led)
     await window.waitForTimeout(600)
 
     // Verify chat reply has synthesized networks and tags
-    const agentMessages = window.locator('[data-testid="antigravity-agent-panel"]')
+    const agentMessages = window.locator('[data-testid="agent-panel"]')
     await agentMessages.waitFor({ state: 'visible', timeout: 5000 })
     const agentText = await agentMessages.innerText()
     if (!agentText.includes('Yesil_Led') || !agentText.includes('Kirmizi_Led')) {

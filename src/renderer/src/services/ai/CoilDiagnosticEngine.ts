@@ -1,5 +1,5 @@
 /**
- * Antigravity Live "Why is this Coil OFF?" Diagnostics Engine
+ * Rungline Live "Why is this Coil OFF?" Diagnostics Engine
  * Backwards evaluation through unenergized Ladder AST rungs to pinpoint
  * blocking contact conditions in real-time memory snapshots.
  */

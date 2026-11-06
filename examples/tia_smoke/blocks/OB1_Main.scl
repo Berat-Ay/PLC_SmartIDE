@@ -1,0 +1,11 @@
+ORGANIZATION_BLOCK "OB1_Main"
+TITLE = Main program
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+BEGIN
+  "DB2_MotorInstance"(Start := "Start_Button", Stop := "Stop_Button", Run => "Motor_Output");
+
+  "DB1_Plant".Motor1.Running := "Motor_Output";
+  "Speed_Percent" := "FC1_Scale"(Raw := "Speed_Raw");
+  "Run_Count" := "DB2_MotorInstance".Starts;
+END_ORGANIZATION_BLOCK

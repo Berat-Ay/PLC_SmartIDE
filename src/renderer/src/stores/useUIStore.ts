@@ -126,7 +126,7 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
     {
       id: 'msg_welcome',
       sender: 'agent',
-      text: 'Antigravity S7 Engineering Agent online. I am observing project ASTs, S7 memory layouts, and hardware allocation in real-time.',
+      text: 'Rungline S7 Engineering Agent online. I am observing project ASTs, S7 memory layouts, and hardware allocation in real-time.',
       timestamp: Date.now(),
       tier: 'fast-flash'
     }

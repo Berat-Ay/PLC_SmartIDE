@@ -1,0 +1,15 @@
+ORGANIZATION_BLOCK "OB30_Cyclic"
+TITLE = Cyclic interrupt
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+VAR_TEMP
+  i : Int;
+END_VAR
+BEGIN
+  FOR #i := 0 TO 3 DO
+    "DB1_Plant".Limits[#i] := INT_TO_REAL(#i) * 10.0;
+  END_FOR;
+  IF "Motor_Output" THEN
+    "DB1_Plant".TotalStarts := "DB1_Plant".TotalStarts + 1;
+  END_IF;
+END_ORGANIZATION_BLOCK

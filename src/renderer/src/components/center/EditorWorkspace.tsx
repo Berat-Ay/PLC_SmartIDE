@@ -72,7 +72,7 @@ export const EditorWorkspace: React.FC = () => {
 
           <div>
             <h2 className="text-xl font-bold text-industrial-100">
-              Antigravity S7 Industrial IDE
+              Rungline
             </h2>
             <p className="text-xs text-industrial-400 mt-1">
               AI-First Siemens TIA Portal Architecture • Everything-as-Code • Real-Time S7 Memory Overlap Guard

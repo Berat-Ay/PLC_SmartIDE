@@ -4,6 +4,7 @@ import * as path from 'path'
 import * as os from 'os'
 import { FileEngine } from './fileEngine'
 import { assertProjectRoot, registerProjectRoot } from './pathGuard'
+import { BundleFileToWrite, bundleFolderName, readImportFolder, writeBundleFiles } from './tiaFiles'
 import { getSecret, setSecret } from './secretStore'
 import { ProjectWatcher } from './watcher'
 import { ProjectLoadPayload } from '../shared/types/ipc'
@@ -19,7 +20,7 @@ function createWindow(): void {
     minHeight: 680,
     show: false,
     autoHideMenuBar: true,
-    title: 'Antigravity S7 Industrial IDE',
+    title: 'Rungline',
     backgroundColor: '#0b0d10',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.cjs'),
@@ -115,6 +116,28 @@ ipcMain.handle('project:loadDemo', async (_, customDir?: string) => {
   const payload = await FileEngine.loadProject(targetDir)
   projectWatcher.startWatching(targetDir, () => mainWindow)
   return payload
+})
+
+ipcMain.handle('tia:exportBundle', async (_, projectName: string, files: BundleFileToWrite[]) => {
+  if (!mainWindow) return null
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Choose where to create the TIA export folder'
+  })
+  if (result.canceled || result.filePaths.length === 0) return null
+  const root = path.join(result.filePaths[0], bundleFolderName(projectName))
+  await writeBundleFiles(root, files)
+  return root
+})
+
+ipcMain.handle('tia:pickImportFolder', async () => {
+  if (!mainWindow) return null
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'Choose a TIA export or bridge result folder'
+  })
+  if (result.canceled || result.filePaths.length === 0) return null
+  return await readImportFolder(result.filePaths[0])
 })
 
 ipcMain.handle('secrets:get', async (_, key: string) => getSecret(key))
