@@ -480,12 +480,18 @@ export class AiModelRouter {
     this.saveConfig()
   }
 
+  // Null until stored keys are loaded. Saving earlier would erase them with the still empty values.
+  private savedSecrets: Record<'geminiApiKey' | 'openaiApiKey', string> | null = null
+
   private persistSecrets(): void {
     const api = typeof window !== 'undefined' ? window.electronApi : undefined
-    if (!api?.setSecret) return
+    if (!api?.setSecret || !this.savedSecrets) return
     const failed = (): void => console.warn('API key is kept for this session only: encrypted storage is unavailable')
     for (const key of ['geminiApiKey', 'openaiApiKey'] as const) {
-      api.setSecret(key, this.config[key] || '').then((stored) => {
+      const value = this.config[key] || ''
+      if (value === this.savedSecrets[key]) continue
+      this.savedSecrets[key] = value
+      api.setSecret(key, value).then((stored) => {
         if (!stored && this.config[key]) failed()
       }, failed)
     }
@@ -495,11 +501,16 @@ export class AiModelRouter {
   public async hydrateSecrets(): Promise<void> {
     const api = typeof window !== 'undefined' ? window.electronApi : undefined
     if (!api?.getSecret) return
-    const gemini = await api.getSecret('geminiApiKey')
-    const openai = await api.getSecret('openaiApiKey')
-    if (gemini && !this.config.geminiApiKey) this.config.geminiApiKey = gemini
-    if (openai && !this.config.openaiApiKey) this.config.openaiApiKey = openai
-    this.saveConfig()
+    const stored = { geminiApiKey: '', openaiApiKey: '' }
+    try {
+      stored.geminiApiKey = (await api.getSecret('geminiApiKey')) || ''
+      stored.openaiApiKey = (await api.getSecret('openaiApiKey')) || ''
+    } finally {
+      this.savedSecrets = stored
+      if (stored.geminiApiKey && !this.config.geminiApiKey) this.config.geminiApiKey = stored.geminiApiKey
+      if (stored.openaiApiKey && !this.config.openaiApiKey) this.config.openaiApiKey = stored.openaiApiKey
+      this.saveConfig()
+    }
   }
 
   private loadConfig(): AiConfig {

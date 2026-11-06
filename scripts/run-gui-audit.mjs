@@ -3301,6 +3301,39 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
     await window.evaluate((previous) => window.plcTestContext.useProjectStore.setState({ projectPath: previous }), previousProjectPath)
     fs.rmSync(trashProjectDir, { recursive: true, force: true })
 
+    console.log('\n===============================================================')
+    console.log(' SCENARIO 30: Stored API Keys Survive Saves at the Same Time')
+    console.log('===============================================================')
+    const secretsFile = path.join(auditUserData, 'secrets.json')
+    const concurrentResult = await window.evaluate(async () => {
+      const api = window.electronApi
+      await Promise.all([api.setSecret('geminiApiKey', 'audit-gemini-value'), api.setSecret('openaiApiKey', '')])
+      await Promise.all(
+        Array.from({ length: 20 }, (_, i) => api.setSecret(i % 2 ? 'openaiApiKey' : 'geminiApiKey', `audit-value-${i}`))
+      )
+      return { gemini: await api.getSecret('geminiApiKey'), openai: await api.getSecret('openaiApiKey') }
+    })
+    if (concurrentResult.gemini !== 'audit-value-18' || concurrentResult.openai !== 'audit-value-19') {
+      throw new Error(`Keys saved at the same time were lost: ${JSON.stringify(concurrentResult)}`)
+    }
+    JSON.parse(fs.readFileSync(secretsFile, 'utf-8'))
+    console.log('  ✅ PASS: Saves at the same time keep both keys and a valid file')
+
+    // The damaged shape this bug left behind on a real machine
+    fs.writeFileSync(secretsFile, '{}geminiApiKey":"damaged"}', 'utf-8')
+    const repairResult = await window.evaluate(async () => {
+      const api = window.electronApi
+      const afterDamage = await api.getSecret('geminiApiKey')
+      await api.setSecret('geminiApiKey', 'audit-after-damage')
+      return { afterDamage, saved: await api.getSecret('geminiApiKey') }
+    })
+    if (repairResult.afterDamage !== null || repairResult.saved !== 'audit-after-damage') {
+      throw new Error(`A damaged key file blocked saving: ${JSON.stringify(repairResult)}`)
+    }
+    await window.evaluate(() => window.electronApi.setSecret('geminiApiKey', ''))
+    await window.evaluate(() => window.electronApi.setSecret('openaiApiKey', ''))
+    console.log('  ✅ PASS: A damaged key file no longer blocks saving a key again')
+
     auditResults.passed = true
     const reportPath = path.join(artifactsDir, 'gui_audit_report.json')
     fs.writeFileSync(reportPath, JSON.stringify(auditResults, null, 2), 'utf-8')
