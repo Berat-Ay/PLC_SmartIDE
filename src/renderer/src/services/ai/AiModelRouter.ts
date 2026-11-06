@@ -1,7 +1,7 @@
 /**
- * Rungline AI Model Router & Deterministic Industrial Synthesis Engine
- * Supports real cloud API providers (Gemini, OpenAI-compatible) and a zero-key
- * built-in offline industrial deterministic synthesis engine supporting Turkish and English.
+ * Rungline AI Model Router
+ * Sends prompts to a real model: Gemini, an OpenAI-compatible API or a local Ollama server.
+ * There is no built-in answer engine. Without a usable provider the agent reports an error.
  */
 
 import { PlcAgentTools, AgentToolCall, AgentToolResult } from './PlcAgentTools'
@@ -30,7 +30,7 @@ import {
   ComparatorType
 } from '@shared/types/ladder'
 
-export type AiProvider = 'offline_local' | 'gemini' | 'ollama' | 'openai'
+export type AiProvider = 'gemini' | 'ollama' | 'openai'
 export type AiTier = 'fast-flash' | 'deep-pro'
 
 export interface DiscoveredModel {
@@ -136,7 +136,7 @@ export function isStrictGeminiTextModel(id: string): boolean {
 }
 
 export const defaultAiConfig: AiConfig = {
-  provider: 'offline_local',
+  provider: 'gemini',
   geminiApiKey: '',
   openaiApiKey: '',
   openaiEndpoint: 'https://api.openai.com/v1',
@@ -507,8 +507,10 @@ export class AiModelRouter {
       const saved = localStorage.getItem(STORAGE_KEY)
       if (saved) {
         const parsed = { ...defaultAiConfig, ...JSON.parse(saved) }
+        // Settings saved by older versions may name the removed offline engine
+        if (!parsed.provider || parsed.provider === 'offline_local') parsed.provider = 'gemini'
         // Sanitize selectedModelId and availableModels: purge retired 1.5 and invalid 3.8
-        if (parsed.provider === 'gemini' || !parsed.provider || parsed.provider === 'offline_local') {
+        if (parsed.provider === 'gemini') {
           if (
             !isStrictGeminiTextModel(parsed.selectedModelId) ||
             parsed.selectedModelId.includes('1.5') ||
@@ -1205,6 +1207,25 @@ export class AiModelRouter {
       throw new Error('Synthesis cancelled by user.')
     }
 
+    const provider = this.config.provider
+    const apiKey = provider === 'gemini' ? this.config.geminiApiKey : provider === 'openai' ? this.config.openaiApiKey : 'none'
+    if (!apiKey?.trim()) {
+      const providerName = provider === 'gemini' ? 'Gemini' : 'OpenAI'
+      const message = isTurkish
+        ? `Yapay zekâ ajanı için ${providerName} API anahtarı gerekli. Anahtarı AI ayarlarından girin. Projede hiçbir şey değiştirilmedi.`
+        : `The AI agent needs a ${providerName} API key. Enter it in the AI settings. Nothing in the project was changed.`
+      return {
+        replyText: message,
+        tier,
+        providerUsed: provider,
+        toolCallsExecuted: [],
+        toolResults: [],
+        isError: true,
+        errorDetails: message,
+        rawTraceSnippet: message
+      }
+    }
+
     let response: AgentExecutionResponse | null = null
 
     // Check if Ollama provider is selected
@@ -1231,12 +1252,7 @@ export class AiModelRouter {
           rawTraceSnippet: errMsg
         }
       }
-    } else if (
-      this.config.provider === 'gemini' ||
-      (this.config.geminiApiKey &&
-        this.config.geminiApiKey.trim() &&
-        this.config.provider !== 'openai')
-    ) {
+    } else if (this.config.provider === 'gemini') {
       try {
         response = await this.callGeminiApi(trimmed, tier, mode, isTurkish, signal)
       } catch (err) {
@@ -1259,7 +1275,7 @@ export class AiModelRouter {
           rawTraceSnippet: errMsg
         }
       }
-    } else if (this.config.provider === 'openai' && this.config.openaiApiKey) {
+    } else {
       try {
         response = await this.callOpenAiApi(trimmed, tier, mode, isTurkish, signal)
       } catch (err) {
@@ -1288,9 +1304,8 @@ export class AiModelRouter {
       throw new Error('Synthesis cancelled by user.')
     }
 
-    // Default zero-key deterministic industrial synthesis engine
     if (!response) {
-      response = await this.executeDeterministicOffline(trimmed, tier, mode, isTurkish)
+      throw new Error(`Provider '${this.config.provider}' returned no response.`)
     }
 
     // Ensure RAG consulted rules are always populated from Semantic Vectorizer
@@ -1312,484 +1327,6 @@ export class AiModelRouter {
     const trRegex =
       /[ğüşıöçĞÜŞİÖÇ]|pompa|hidrofor|vana|çakışma|cakisma|bobin|bellek|çöz|coz|ekle|oluştur|olustur|neden|çalış|calis|dursun|duran|yansın|yansin|saniye|devre|mühür|muhur|buton|hata|seviye|basınç|basinc|sıcaklık|sicaklik|arıza|ariza/i
     return trRegex.test(text)
-  }
-
-  /**
-   * Built-in Offline Deterministic Industrial Synthesis Engine
-   */
-  private async executeDeterministicOffline(
-    prompt: string,
-    tier: AiTier,
-    mode: 'auto-apply' | 'diff-view',
-    isTurkish: boolean
-  ): Promise<AgentExecutionResponse> {
-    const lower = prompt.toLowerCase()
-    const tools = PlcAgentTools.getInstance()
-    const toolCalls: AgentToolCall[] = []
-
-    // 0. 10-Car Parking Garage (Otopark) Control System with CTUD, N_TRIG, TON, Interlocks (MEB Standard)
-    const isParkingGarage =
-      lower.includes('otopark') ||
-      lower.includes('parking') ||
-      lower.includes('garaj') ||
-      lower.includes('garage') ||
-      (lower.includes('kapı') && lower.includes('araç')) ||
-      (lower.includes('kapi') && lower.includes('arac'))
-
-    if (isParkingGarage) {
-      BlackBoxLogger.getInstance().log('AI_REQUEST', `Offline Deterministic Synthesis: "${prompt}"`, {
-        prompt,
-        intent: 'ParkingGarage_MEB',
-        isTurkish
-      })
-
-      const dslLines = [
-        '# TAG DECLARATIONS',
-        'TAG Giris_Kart %I0.0 BOOL "Giriş Kart Okuyucu (NO)"',
-        'TAG Giris_Fotosel %I0.1 BOOL "Giriş Güvenlik Fotoseli"',
-        'TAG Ust_Limit %I0.2 BOOL "Bariyer Üst Limit Sınır Anahtarı"',
-        'TAG Alt_Limit %I0.3 BOOL "Bariyer Alt Limit Sınır Anahtarı"',
-        'TAG Cikis_Fotosel %I0.4 BOOL "Çıkış Araç Algılama Fotoseli"',
-        'TAG Kapi_Yukari_Motor %Q0.0 BOOL "Bariyer Kapı Yukarı Açma Motoru"',
-        'TAG Kapi_Asagi_Motor %Q0.1 BOOL "Bariyer Kapı Aşağı Kapatma Motoru"',
-        'TAG Otopark_Dolu_Tabela %Q0.2 BOOL "Otopark Dolu Işıklı Tabela"',
-        '',
-        '# NETWORK DEFINITIONS',
-        `NW 1 "${isTurkish ? 'Bariyer Açma ve Emniyet Geri Açılma (Motor %Q0.0)' : 'Door Up & Safety Reopen Motor (%Q0.0)'}": SERIES( PARALLEL( SERIES( CMP_LT(C1.CV, 10), NO(Giris_Kart) ), SERIES( NO(Kapi_Asagi_Motor), NO(Giris_Fotosel) ), NO(Kapi_Yukari_Motor) ), NC(Ust_Limit), NC(Kapi_Asagi_Motor), COIL(Kapi_Yukari_Motor) )`,
-        `NW 2 "${isTurkish ? 'Araç Giriş/Çıkış Sayacı (CTUD C1, PV=10)' : 'Vehicle In/Out Counter (CTUD C1, PV=10)'}": SERIES( N_TRIG(Giris_Fotosel), CTUD(C1, PV=10, CD=Cikis_Fotosel) )`,
-        `NW 3 "${isTurkish ? '7 Saniye Otomatik Kapanma Zamanlayıcısı (TON T1)' : '7-Second Auto-Close Timer (TON T1)'}": SERIES( NO(Ust_Limit), TON(T1, PT=T#7s) )`,
-        `NW 4 "${isTurkish ? 'Bariyer Aşağı Kapatma Motoru (%Q0.1)' : 'Door Down Closing Motor (%Q0.1)'}": SERIES( PARALLEL( NO(T1.Q), NO(Kapi_Asagi_Motor) ), NC(Alt_Limit), NC(Giris_Fotosel), NC(Kapi_Yukari_Motor), COIL(Kapi_Asagi_Motor) )`,
-        `NW 5 "${isTurkish ? 'Otopark Dolu Tabelası Kontrolü (%Q0.2)' : 'Parking Full Sign Control (%Q0.2)'}": SERIES( CMP_GE(C1.CV, 10), COIL(Otopark_Dolu_Tabela) )`
-      ]
-
-      const dslResult = LadderDslCompiler.compileLadderDslToAst(dslLines.join('\n'))
-
-      const explanation = isTurkish
-        ? `10 Araçlık Otomatik Otopark Bariyer Kontrol Sistemi (MEB Standartı) başarıyla oluşturuldu:\n\n1. **Ağ 1 (Bariyer Açma & Emniyet Mühürlemesi):** Otopark dolu değilse (C1.CV < 10) ve Giriş Kartı okutulursa veya kapı inerken fotosel kesilirse bariyer açılmaya başlar, üst limit ve mekanik kilit ile korunur.\n2. **Ağ 2 (CTUD Araç Sayacı C1, PV=10):** Giriş fotoseli düşen kenarında (N_TRIG Giris_Fotosel) araç sayısını artırır (CU); çıkış fotoseli yükselen kenarında sayıyı azaltır (CD).\n3. **Ağ 3 (7s Otomatik Kapanma Zamanlayıcısı TON T1):** Bariyer en üst limite ulaştığında 7 saniyelik bekleme süresi başlar.\n4. **Ağ 4 (Bariyer Kapatma Motoru %Q0.1):** Süre dolduğunda (T1.Q) veya mühürleme ile kapı aşağı iner. Alt limit, giriş fotoseli veya karşı yön motoru devredeyken kapanma kilitlenir.\n5. **Ağ 5 (Otopark Dolu Tabelası %Q0.2):** Araç sayısı 10'a ulaştığında (CMP >= 10) tabela enerjilenir.\n\n**Semboller:** Giris_Kart (%I0.0), Giris_Fotosel (%I0.1), Ust_Limit (%I0.2), Alt_Limit (%I0.3), Cikis_Fotosel (%I0.4), Kapi_Yukari_Motor (%Q0.0), Kapi_Asagi_Motor (%Q0.1), Otopark_Dolu_Tabela (%Q0.2).`
-        : `10-Car Automatic Parking Garage Barrier System created successfully:\n\n1. **Network 1 (Door Up & Safety Reopen):** Latches if not full (C1.CV < 10) AND Giris_Kart, or if closing motor active AND photocell blocked. Interlocked with NC Ust_Limit and NC Kapi_Asagi_Motor.\n2. **Network 2 (CTUD Vehicle Counter C1, PV=10):** Counts UP on N_TRIG Giris_Fotosel falling edge; counts DOWN on Cikis_Fotosel (CD).\n3. **Network 3 (7-Second TON Timer T1):** 7-second dwell starts when door reaches Ust_Limit (%I0.2).\n4. **Network 4 (Door Down Motor %Q0.1):** Latches on T1.Q done bit, cut off by NC Alt_Limit, NC Giris_Fotosel, and electrical interlock NC Kapi_Yukari_Motor.\n5. **Network 5 (Parking Full Sign %Q0.2):** Energizes when vehicle count reaches 10 (CMP >= 10).\n\n**Tags:** Giris_Kart (%I0.0), Giris_Fotosel (%I0.1), Ust_Limit (%I0.2), Alt_Limit (%I0.3), Cikis_Fotosel (%I0.4), Kapi_Yukari_Motor (%Q0.0), Kapi_Asagi_Motor (%Q0.1), Otopark_Dolu_Tabela (%Q0.2).`
-
-      const parkingPayload: AiCircuitSynthesisPayload = {
-        explanation,
-        operationMode: 'replace_ob1_networks',
-        tagsToUpsert: dslResult.tags.map((t) => ({
-          name: t.name,
-          dataType: t.dataType as any,
-          address: t.address,
-          comment: t.comment
-        })),
-        networks: dslResult.networks
-      }
-
-      BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', 'Generated Deterministic Parking Garage AST (5 networks, 8 tags)', {
-        networks: dslResult.networks.length,
-        tags: dslResult.tags.length
-      })
-
-      const res = this.applyCircuitPayload(parkingPayload, mode)
-      return {
-        replyText: res.summaryText,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: [],
-        stagedChangeset: res.stagedChangeset,
-        rawTraceSnippet: 'Offline Deterministic MEB Parking Garage'
-      }
-    }
-
-    // 1. Memory Overlap resolution intent
-    if (
-      (lower.includes('overlap') ||
-        lower.includes('collision') ||
-        lower.includes('çakışma') ||
-        lower.includes('bellek')) &&
-      !lower.includes('valve') &&
-      !lower.includes('vana') &&
-      !lower.includes('pompa') &&
-      !lower.includes('pump') &&
-      !lower.includes('booster') &&
-      !lower.includes('hidrofor')
-    ) {
-      toolCalls.push({
-        tool: 'manage_plc_tags',
-        params: { action: 'resolve_overlaps' }
-      })
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `S7 Bellek Haritası analiz edildi. Tespit edilen çakışan adresler S7 byte/word sınırlarına (even-byte boundary) uygun güvenli boş alanlara otomatik olarak yeniden taşındı.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `S7 Memory Map analyzed. Detected address collisions were reallocated to safe, non-overlapping addresses respecting S7 even-byte word alignments.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 2. Double-Coil merge intent
-    if (
-      lower.includes('double coil') ||
-      lower.includes('double-coil') ||
-      lower.includes('çift bobin') ||
-      lower.includes('auto-merge') ||
-      lower.includes('bobin birleştir')
-    ) {
-      toolCalls.push({
-        tool: 'create_or_update_lad_block',
-        params: { action: 'auto_refactor_double_coils', blockName: 'OB1_Main' }
-      })
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `OB1_Main bloğu içerisindeki çift bobin (double-coil) yazma çakışmaları tespit edildi. TIA Portal standart Çözüm A (Intermediate Temp Coils + Consolidation OR Network) deseni ile tek bir nihai ağda birleştirildi.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `Double-coil write conflicts in OB1_Main detected. Auto-refactored using Siemens Solution A pattern (Intermediate temp coils consolidated into a final deterministic OR-network).\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 3. Multi-Pump booster station / Hidrofor sistemi intent
-    if (
-      lower.includes('hidrofor') ||
-      lower.includes('booster') ||
-      (lower.includes('pompa') && (lower.includes('3') || lower.includes('eş yaşlandırma') || lower.includes('alternation'))) ||
-      (lower.includes('pump') && (lower.includes('lead-lag') || lower.includes('staging') || lower.includes('3') || lower.includes('pumpcontrol') || lower.includes('fb_pumpcontrol')))
-    ) {
-      const sclBlockName = lower.includes('fb_pumpcontrol') || lower.includes('pumpcontrol') ? 'FB_PumpControl' : 'FC_BoosterAlternation'
-      const sclBlockType = lower.includes('fb_pumpcontrol') || lower.includes('pumpcontrol') ? 'FB' : 'FC'
-
-      // Create UDT
-      toolCalls.push({
-        tool: 'create_or_update_udt',
-        params: {
-          name: 'UDT_BoosterPump',
-          fields: [
-            { name: 'RunCmd', dataType: 'BOOL', comment: 'Coil command to contactor' },
-            { name: 'RunFeedback', dataType: 'BOOL', comment: 'Auxiliary contact feedback' },
-            { name: 'TripFault', dataType: 'BOOL', comment: 'Thermal overload or VFD fault' },
-            { name: 'RunHours', dataType: 'REAL', comment: 'Runtime accumulated operating hours' }
-          ]
-        }
-      })
-
-      // Create DB
-      toolCalls.push({
-        tool: 'create_or_update_db',
-        params: {
-          name: 'DB_BoosterStation',
-          isOptimized: true,
-          variables: [
-            { name: 'Pump1', dataType: 'UDT_BoosterPump', initialValue: '', comment: 'Hydraulic Booster Pump 1' },
-            { name: 'Pump2', dataType: 'UDT_BoosterPump', initialValue: '', comment: 'Hydraulic Booster Pump 2' },
-            { name: 'Pump3', dataType: 'UDT_BoosterPump', initialValue: '', comment: 'Hydraulic Booster Pump 3' },
-            { name: 'TargetPressure_Bar', dataType: 'REAL', initialValue: '4.5', comment: 'Header setpoint pressure' },
-            { name: 'ActualPressure_Bar', dataType: 'REAL', initialValue: '0.0', comment: 'Header actual pressure' },
-            { name: 'ActivePumpsCount', dataType: 'INT', initialValue: '0', comment: 'Currently energized pumps' }
-          ]
-        }
-      })
-
-      // Create SCL Logic Block
-      toolCalls.push({
-        tool: 'create_or_update_scl_block',
-        params: {
-          name: sclBlockName,
-          blockType: sclBlockType,
-          sourceCode: `// Siemens S7-1200/1500 3-Pump Equal Wear Alternation (Eş Yaşlandırma)
-IF "DB_BoosterStation".ActualPressure_Bar < ("DB_BoosterStation".TargetPressure_Bar - 0.5) THEN
-    // Low pressure: Stage on least worn pump
-    IF NOT "DB_BoosterStation".Pump1.RunCmd AND NOT "DB_BoosterStation".Pump1.TripFault THEN
-        "DB_BoosterStation".Pump1.RunCmd := TRUE;
-    ELSIF NOT "DB_BoosterStation".Pump2.RunCmd AND NOT "DB_BoosterStation".Pump2.TripFault THEN
-        "DB_BoosterStation".Pump2.RunCmd := TRUE;
-    ELSIF NOT "DB_BoosterStation".Pump3.RunCmd AND NOT "DB_BoosterStation".Pump3.TripFault THEN
-        "DB_BoosterStation".Pump3.RunCmd := TRUE;
-    END_IF;
-ELSIF "DB_BoosterStation".ActualPressure_Bar > ("DB_BoosterStation".TargetPressure_Bar + 0.5) THEN
-    // High pressure: Stage off highest hour pump
-    IF "DB_BoosterStation".Pump3.RunCmd THEN
-        "DB_BoosterStation".Pump3.RunCmd := FALSE;
-    ELSIF "DB_BoosterStation".Pump2.RunCmd THEN
-        "DB_BoosterStation".Pump2.RunCmd := FALSE;
-    ELSIF "DB_BoosterStation".Pump1.RunCmd THEN
-        "DB_BoosterStation".Pump1.RunCmd := FALSE;
-    END_IF;
-END_IF;`
-        }
-      })
-
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `3 Pompalı Eş Yaşlandırmalı Hidrofor Sistemi başarıyla oluşturuldu:\n\n1. **UDT_BoosterPump**: Pompa çalıştırma, geri bildirim, termik arıza ve çalışma saati alanları tanımlandı.\n2. **DB_BoosterStation**: 3 adet hidrofor pompası, hedef basınç (4.5 Bar) ve anlık basınç parametreleri ile optimize DB olarak oluşturuldu.\n3. **${sclBlockName}**: Histerezisli basınç bandına göre pompaları devreye alan/çıkaran SCL algoritması yazıldı.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `3-Pump Equal Wear Booster Station created successfully:\n\n1. **UDT_BoosterPump**: RunCmd, RunFeedback, TripFault, and RunHours fields declared.\n2. **DB_BoosterStation**: Optimized DB with 3 pump instances, TargetPressure_Bar (4.5 Bar), and ActualPressure_Bar.\n3. **${sclBlockName}**: SCL staging logic with hysteresis pressure band and wear balancing.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 4. Valve Control intent (UDT_Valve, Tags, FB_ValveControl, Compiler Verification)
-    if (
-      lower.includes('valve') ||
-      lower.includes('vana') ||
-      lower.includes('fb_valvecontrol') ||
-      lower.includes('udt_valve')
-    ) {
-      const isOverride =
-        lower.includes('emergency') ||
-        lower.includes('override') ||
-        lower.includes('acil kapatma') ||
-        lower.includes('update') ||
-        lower.includes('güncelle')
-
-      if (isOverride) {
-        toolCalls.push({
-          tool: 'create_or_update_scl_block',
-          params: {
-            name: 'FB_ValveControl',
-            blockType: 'FB',
-            sourceCode: `FUNCTION_BLOCK "FB_ValveControl"
-{ S7_Optimized_Access := 'TRUE' }
-VERSION : 0.1
-VAR_INPUT
-  EmergencyStop : Bool;
-  OpenRequest : Bool;
-  CloseRequest : Bool;
-  OpenedLimit : Bool;
-  ClosedLimit : Bool;
-END_VAR
-VAR_OUTPUT
-  OpenCmd : Bool;
-  CloseCmd : Bool;
-  IsOpen : Bool;
-  IsClosed : Bool;
-END_VAR
-BEGIN
-// Updated with Emergency Close Priority Override
-IF #EmergencyStop THEN
-    #OpenCmd := FALSE;
-    #CloseCmd := TRUE;
-ELSIF #OpenRequest AND NOT #CloseRequest THEN
-    #OpenCmd := TRUE;
-    #CloseCmd := FALSE;
-ELSIF #CloseRequest AND NOT #OpenRequest THEN
-    #OpenCmd := FALSE;
-    #CloseCmd := TRUE;
-ELSE
-    #OpenCmd := FALSE;
-    #CloseCmd := FALSE;
-END_IF;
-
-// Position Feedback Status
-#IsOpen := #OpenedLimit AND NOT #ClosedLimit;
-#IsClosed := #ClosedLimit AND NOT #OpenedLimit;
-END_FUNCTION_BLOCK`
-          }
-        })
-      } else {
-        // 1. UDT_Valve
-        toolCalls.push({
-          tool: 'create_or_update_udt',
-          params: {
-            name: 'UDT_Valve',
-            description: 'Siemens Standard Valve Control UDT',
-            fields: [
-              { name: 'OpenCmd', dataType: 'BOOL', comment: 'Solenoid coil open command' },
-              { name: 'CloseCmd', dataType: 'BOOL', comment: 'Solenoid coil close command' },
-              { name: 'OpenedLimit', dataType: 'BOOL', comment: 'End position open limit switch' },
-              { name: 'ClosedLimit', dataType: 'BOOL', comment: 'End position close limit switch' },
-              { name: 'TransitFault', dataType: 'BOOL', comment: 'Travel time exceeded alarm' }
-            ]
-          }
-        })
-
-        // 2. Tags without overlap
-        toolCalls.push({
-          tool: 'manage_plc_tags',
-          params: {
-            action: 'upsert',
-            tags: [
-              { id: 'tag_v_open', name: 'Valve_OpenCmd', address: '%Q0.3', dataType: 'BOOL', comment: 'Valve Open Solenoid' },
-              { id: 'tag_v_close', name: 'Valve_CloseCmd', address: '%Q0.4', dataType: 'BOOL', comment: 'Valve Close Solenoid' },
-              { id: 'tag_v_opened', name: 'Valve_OpenedLimit', address: '%I0.4', dataType: 'BOOL', comment: 'Valve Opened Prox Sensor' },
-              { id: 'tag_v_closed', name: 'Valve_ClosedLimit', address: '%I0.5', dataType: 'BOOL', comment: 'Valve Closed Prox Sensor' }
-            ]
-          }
-        })
-
-        // 3. FB_ValveControl SCL Block
-        toolCalls.push({
-          tool: 'create_or_update_scl_block',
-          params: {
-            name: 'FB_ValveControl',
-            blockType: 'FB',
-            sourceCode: `FUNCTION_BLOCK "FB_ValveControl"
-{ S7_Optimized_Access := 'TRUE' }
-VERSION : 0.1
-VAR_INPUT
-  OpenRequest : Bool;
-  CloseRequest : Bool;
-  OpenedLimit : Bool;
-  ClosedLimit : Bool;
-END_VAR
-VAR_OUTPUT
-  OpenCmd : Bool;
-  CloseCmd : Bool;
-  IsOpen : Bool;
-  IsClosed : Bool;
-END_VAR
-BEGIN
-// Manages open/close actuation with limit switch feedback and travel timeout supervision
-IF #OpenRequest AND NOT #CloseRequest THEN
-    #OpenCmd := TRUE;
-    #CloseCmd := FALSE;
-ELSIF #CloseRequest AND NOT #OpenRequest THEN
-    #OpenCmd := FALSE;
-    #CloseCmd := TRUE;
-ELSE
-    #OpenCmd := FALSE;
-    #CloseCmd := FALSE;
-END_IF;
-
-// Position Feedback Status
-#IsOpen := #OpenedLimit AND NOT #ClosedLimit;
-#IsClosed := #ClosedLimit AND NOT #OpenedLimit;
-END_FUNCTION_BLOCK`
-          }
-        })
-      }
-
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? isOverride
-          ? `FB_ValveControl bloğu acil kapatma önceliği (Emergency Close Override) ile güncellendi.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-          : `Endüstriyel Vana Kontrol Sistemi başarıyla oluşturuldu:\n\n1. **UDT_Valve**: OpenCmd, CloseCmd, OpenedLimit, ClosedLimit ve TransitFault alanları tanımlandı.\n2. **PLC Tagleri**: Çakışmasız güvenli adreslere (Q0.3, Q0.4, I0.4, I0.5) vana I/O etiketleri eklendi.\n3. **FB_ValveControl**: Çift yönlü aktüasyon ve konum izleme algoritmaları SCL olarak oluşturuldu.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : isOverride
-          ? `FB_ValveControl block updated with Emergency Close Priority Override logic.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-          : `Industrial Valve Control System created successfully:\n\n1. **UDT_Valve**: OpenCmd, CloseCmd, OpenedLimit, ClosedLimit, and TransitFault members declared.\n2. **PLC Tags**: Non-overlapping I/O tags allocated at %Q0.3, %Q0.4, %I0.4, %I0.5.\n3. **FB_ValveControl**: Bidirectional actuation and position feedback supervisory SCL block created.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // 5. OB30 PID & Analog Scaling intent
-    if (
-      lower.includes('pid') ||
-      lower.includes('ob30') ||
-      (lower.includes('analog') && (lower.includes('scale') || lower.includes('ölçek')))
-    ) {
-      toolCalls.push({
-        tool: 'update_hardware_parameters',
-        params: {
-          obCyclicInterruptIntervalMs: 100,
-          aiWireBreakDetection: true
-        }
-      })
-
-      toolCalls.push({
-        tool: 'create_or_update_scl_block',
-        params: {
-          name: 'OB30_CyclicInterrupt',
-          blockType: 'OB',
-          sourceCode: `// OB30 100ms Cyclic Interrupt for Analog Scaling and PID Control
-// Normalize %IW64 (0..27648) and scale to Engineering Units (0.0 .. 10.0 Bar)
-VAR_TEMP
-    rNormalized : REAL;
-    rPressureBar : REAL;
-END_VAR
-
-// Siemens S7-1200 NORM_X formula
-rNormalized := INT_TO_REAL("TankLevel_Raw") / 27648.0;
-IF rNormalized < 0.0 THEN rNormalized := 0.0; END_IF;
-IF rNormalized > 1.0 THEN rNormalized := 1.0; END_IF;
-
-// Siemens S7-1200 SCALE_X formula
-rPressureBar := rNormalized * 10.0;
-"TankPressure_Bar" := rPressureBar;`
-        }
-      })
-
-      toolCalls.push({
-        tool: 'run_compiler_and_self_heal',
-        params: {}
-      })
-
-      const execution = await tools.executeToolBatch(toolCalls, mode)
-      const reply = isTurkish
-        ? `OB30 100ms Döngüsel Kesme (Cyclic Interrupt) ve Analog NORM_X/SCALE_X modülü yapılandırıldı:\n\n1. CPU donanım parametrelerinde OB30 periyodu 100ms olarak ayarlandı ve AI tel kopması teşhisi etkinleştirildi.\n2. OB30_CyclicInterrupt SCL bloğu oluşturularak %IW64 ham analog verisi 0..27648 aralığından 0.0..10.0 Bar mühendislik birimine dönüştürüldü.\n\n${execution.compilerReport?.message || '[OK] Derleyici Doğrulandı: 0 Hata'}`
-        : `OB30 100ms Cyclic Interrupt and Analog NORM_X/SCALE_X module configured:\n\n1. Hardware configuration updated for 100ms OB30 interval and AI wire-break diagnostic enabled.\n2. OB30_CyclicInterrupt SCL block created with Siemens NORM_X/SCALE_X converting %IW64 raw count (0..27648) to 0.0..10.0 Bar.\n\n${execution.compilerReport?.message || '[OK] Compiler Verified: 0 Errors'}`
-
-      return {
-        replyText: reply,
-        tier,
-        providerUsed: 'offline_local',
-        toolCallsExecuted: toolCalls,
-        toolResults: execution.results,
-        compilerVerification: execution.compilerReport,
-        stagedChangeset: execution.stagedChangeset
-      }
-    }
-
-    // Default conversational engineering synthesis
-    toolCalls.push({
-      tool: 'read_project_overview',
-      params: {}
-    })
-    const execution = await tools.executeToolBatch(toolCalls, 'auto-apply')
-    const reply = isTurkish
-      ? `Rungline S7 Mühendislik Asistanı isteğinizi analiz etti: "${prompt}".\n\nCPU ve Derleyici AST denetleyicisi aktif. Belirli bir PLC devresi (örn: mühürlemeli motor devresi, zamanlayıcı kontrolü, vana veya hidrofor mantığı) oluşturmak istediğinizde komutunuzu doğrudan iletebilirsiniz.`
-      : `Rungline S7 Engineering Agent analyzed your request: "${prompt}".\n\nCPU and Compiler AST inspector active. Feel free to request any ladder circuit synthesis, timer logic, valve control, or booster station automation.`
-
-    return {
-      replyText: reply,
-      tier,
-      providerUsed: 'offline_local',
-      toolCallsExecuted: toolCalls,
-      toolResults: execution.results
-    }
   }
 
   /**

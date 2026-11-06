@@ -343,7 +343,7 @@ export class DemoProjectSeeder {
                   id: 'node_first_scan',
                   kind: 'contact',
                   contactType: 'NO_CONTACT',
-                  operand: 'FirstScan'
+                  operand: '%M1.0'
                 } as LadderContactNode,
                 {
                   id: 'node_alarm_silenced',
@@ -353,7 +353,7 @@ export class DemoProjectSeeder {
                 } as LadderCoilNode
               ],
               elements: [
-                { id: 'el_82_1', kind: 'contact', data: { type: 'NO', operand: 'FirstScan' } },
+                { id: 'el_82_1', kind: 'contact', data: { type: 'NO', operand: '%M1.0' } },
                 { id: 'el_82_2', kind: 'coil', data: { type: 'COIL', operand: 'Alarm_Silenced' } }
               ]
             }

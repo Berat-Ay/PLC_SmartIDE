@@ -221,12 +221,34 @@ console.log('✓ Ollama model auto-discovery parser verified.')
 ;(globalThis as any).fetch = originalFetch
 
 // Test Prompt Execution Attaches RAG Rules
-router.updateConfig({ provider: 'offline_local' })
+router.updateConfig({ provider: 'gemini', geminiApiKey: 'test-key' })
+;(globalThis as any).fetch = async () =>
+  new Response(
+    JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: JSON.stringify({
+                  explanation: 'Motor',
+                  dsl: 'TAG Motor_Run %Q0.0 BOOL "Motor"\nNW 1 "Motor": SERIES( NO(Motor_Run), COIL(Motor_Run) )'
+                })
+              }
+            ]
+          }
+        }
+      ]
+    }),
+    { status: 200 }
+  )
 const execResponse = await router.executePrompt(
   '10 saniye sonra duran mühürlemeli motor devresi',
   'fast-flash',
   'auto-apply'
 )
+;(globalThis as any).fetch = originalFetch
+router.updateConfig({ geminiApiKey: '' })
 
 console.log('\nAgent Execution Reply Text Length:', execResponse.replyText.length)
 console.log('Agent Execution RAG Rules Consulted:', execResponse.ragRulesConsulted)

@@ -80,55 +80,81 @@ assert.strictEqual(router.detectTurkish('Create 3-pump booster system with lead-
 testPass('Router accurately detects Turkish and English engineering intents')
 
 async function testSynthesis() {
-  const responseTr = await router.executePrompt(
-    '3 pompalı eş yaşlandırmalı hidrofor sistemi kur',
-    'fast-flash',
+  // Without a key the agent must refuse, and must not answer from a built-in plan
+  const realFetch = globalThis.fetch
+  let requests = 0
+  globalThis.fetch = (async () => {
+    requests++
+    throw new Error('No request is expected')
+  }) as typeof fetch
+  router.updateConfig({ provider: 'gemini', geminiApiKey: '' })
+  const blocksBefore = useBlockStore.getState().sclBlocks.length
+  const noKey = await router.executePrompt('3 pompalı hidrofor sistemi kur', 'fast-flash', 'auto-apply')
+  globalThis.fetch = realFetch
+  assert.strictEqual(noKey.isError, true, 'A missing key is an error')
+  assert.ok(noKey.replyText.includes('API anahtarı'), 'The reply says a key is needed')
+  assert.strictEqual(requests, 0, 'No request is sent without a key')
+  assert.strictEqual(useBlockStore.getState().sclBlocks.length, blocksBefore, 'The project is unchanged')
+  testPass('Without an API key the agent reports an error and changes nothing')
+
+  router.updateConfig({ provider: 'openai', openaiApiKey: '' })
+  const noOpenAiKey = await router.executePrompt('create a pump', 'fast-flash', 'auto-apply')
+  assert.strictEqual(noOpenAiKey.isError, true, 'OpenAI without a key is an error too')
+  router.updateConfig({ provider: 'gemini' })
+  testPass('OpenAI without a key is refused the same way')
+
+  // The agent tools build a block, and the compiler step checks the result
+  const tools = PlcAgentTools.getInstance()
+  const valve = await tools.executeToolBatch(
+    [
+      {
+        tool: 'create_or_update_udt',
+        params: {
+          name: 'UDT_Valve',
+          fields: [
+            { name: 'OpenCmd', dataType: 'BOOL' },
+            { name: 'CloseCmd', dataType: 'BOOL' }
+          ]
+        }
+      },
+      {
+        tool: 'create_or_update_scl_block',
+        params: {
+          name: 'FB_ValveControl',
+          blockType: 'FB',
+          sourceCode: `FUNCTION_BLOCK "FB_ValveControl"
+VAR_INPUT
+  OpenRequest : Bool;
+END_VAR
+VAR_OUTPUT
+  OpenCmd : Bool;
+END_VAR
+BEGIN
+  #OpenCmd := #OpenRequest;
+END_FUNCTION_BLOCK`
+        }
+      },
+      { tool: 'run_compiler_and_self_heal', params: {} }
+    ],
     'auto-apply'
   )
-
-  assert.ok(responseTr.replyText.includes('Hidrofor Sistemi'), 'Response includes booster pump confirmation')
-  assert.strictEqual(responseTr.providerUsed, 'offline_local')
-  assert.ok(responseTr.toolCallsExecuted.length >= 3, 'Executed UDT, DB, and SCL tool calls')
-  assert.ok(responseTr.compilerVerification?.success, 'Compiler-in-the-loop verified with 0 errors')
-  testPass('Deterministic offline engine synthesized 3-pump booster station in Turkish with 0 errors')
-
-  // Verify created artifacts in stores
-  const blockStore = useBlockStore.getState()
-  const boosterUdt = blockStore.udts.find((u) => u.name === 'UDT_BoosterPump')
-  assert.ok(boosterUdt, 'UDT_BoosterPump created in block store')
-  assert.strictEqual(boosterUdt.members.length, 4, 'UDT has 4 members (RunCmd, RunFeedback, TripFault, RunHours)')
-  testPass('UDT_BoosterPump verified with 4 operational pump members')
-
-  const boosterDb = blockStore.dataBlocks.find((d) => d.name === 'DB_BoosterStation')
-  assert.ok(boosterDb, 'DB_BoosterStation created in block store')
-  assert.strictEqual(boosterDb.variables.length, 6, 'DB has 3 pumps, target pressure, actual pressure, active count')
-  testPass('DB_BoosterStation verified with S7 optimized access and 3 pump instances')
-
-  const boosterScl = blockStore.sclBlocks.find((s) => s.name === 'FC_BoosterAlternation')
-  assert.ok(boosterScl, 'FC_BoosterAlternation created in block store')
-  assert.ok(boosterScl.code.includes('ActualPressure_Bar'), 'SCL code includes pressure control logic')
-  testPass('FC_BoosterAlternation verified with hysteresis wear-balancing SCL logic')
-
-  // Test Valve Intent Synthesis in English with UDT, Tags, FB and Compiler Check
-  const responseValve = await router.executePrompt(
-    'Create a new UDT_Valve, add Valve tags without memory overlap, create FB_ValveControl in SCL, and verify compiler',
-    'deep-pro',
-    'auto-apply'
-  )
-  assert.ok(responseValve.replyText.includes('Valve Control System'), 'Response includes valve confirmation')
-  assert.ok(responseValve.compilerVerification?.success, 'Valve synthesis verified by compiler')
-  testPass('Deterministic offline engine synthesized Valve Control system with 0 errors')
-
+  assert.ok(valve.compilerReport?.success, `Compiler accepted the tool output: ${valve.compilerReport?.message}`)
   const currentStore = useBlockStore.getState()
-  const valveUdt = currentStore.udts.find((u) => u.name === 'UDT_Valve')
-  assert.ok(valveUdt, 'UDT_Valve created')
-  assert.strictEqual(valveUdt.members.length, 5, 'UDT_Valve has 5 members')
-  testPass('UDT_Valve verified with OpenCmd, CloseCmd, OpenedLimit, ClosedLimit, TransitFault')
+  assert.ok(currentStore.udts.find((u) => u.name === 'UDT_Valve'), 'UDT_Valve created')
+  const valveFb = currentStore.sclBlocks.find((b) => b.name === 'FB_ValveControl')
+  assert.strictEqual(valveFb?.interface.input.length, 1, 'The interface comes from the source header')
+  testPass('Agent tools create a UDT and an FB that pass the compiler')
 
-  const valveFb = currentStore.sclBlocks.find((s) => s.name === 'FB_ValveControl')
-  assert.ok(valveFb, 'FB_ValveControl created')
-  assert.ok(valveFb.code.includes('OpenRequest'), 'FB_ValveControl contains actuation logic')
-  testPass('FB_ValveControl SCL block verified with bidirectional actuation logic')
+  const broken = await tools.executeToolBatch(
+    [
+      { tool: 'create_or_update_scl_block', params: { name: 'FB_Broken', blockType: 'FB', sourceCode: '#Undeclared := TRUE;' } },
+      { tool: 'run_compiler_and_self_heal', params: {} }
+    ],
+    'auto-apply'
+  )
+  assert.strictEqual(broken.compilerReport?.success, false, 'The compiler step reports an undeclared variable')
+  useBlockStore.getState().deleteSclBlock('FB_Broken.scl')
+  testPass('The compiler step catches a block with an undeclared variable')
 }
 
 // -------------------------------------------------------------
@@ -176,16 +202,22 @@ async function testDiffViewAndRevert() {
   assert.strictEqual(useBlockStore.getState().sclBlocks.length, initialSclCount, 'Store rolled back to previous snapshot')
   testPass('revertLastTurn rolled back all AST mutations to clean previous snapshot')
 
-  // Test Diff-View execution through router
-  const routerDiff = await router.executePrompt(
-    'Update FB_ValveControl with emergency close override',
-    'deep-pro',
+  const diffUpdate = await tools.executeToolBatch(
+    [
+      {
+        tool: 'create_or_update_scl_block',
+        params: { name: 'FB_ValveControl', blockType: 'FB', sourceCode: '// Updated\n#EmergencyStop := TRUE;' }
+      }
+    ],
     'diff-view'
   )
-  assert.ok(routerDiff.stagedChangeset, 'Changeset staged via router')
-  assert.strictEqual(routerDiff.stagedChangeset.length, 1)
-  assert.ok(routerDiff.stagedChangeset[0].afterContent.includes('#EmergencyStop'))
-  testPass('Router in Diff-View mode staged Emergency Stop override for FB_ValveControl')
+  assert.strictEqual(diffUpdate.stagedChangeset?.length, 1)
+  assert.ok(diffUpdate.stagedChangeset?.[0].afterContent.includes('#EmergencyStop'))
+  assert.ok(
+    !useBlockStore.getState().sclBlocks.find((b) => b.name === 'FB_ValveControl')?.code.includes('#EmergencyStop'),
+    'The block stays as it was until approval'
+  )
+  testPass('Diff-View stages an update of an existing block without applying it')
 }
 
 // -------------------------------------------------------------

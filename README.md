@@ -1,6 +1,6 @@
 # Rungline
 
-Siemens S7-1200/S7-1500 için yapay zekâ destekli, modern bir PLC IDE'si. TIA Portal'ın yerine geçmeyi değil, önce yanında daha hızlı bir yardımcı olmayı hedefler. Electron, React ve TypeScript ile yazıldı. İçinde sanal bir S7 PLC vardır. Gerçek donanıma bağlanmaz.
+Siemens S7-1200/S7-1500 için yapay zekâ destekli, modern bir PLC IDE'si. TIA Portal'dan ayrı açılan bağımsız bir uygulamadır, eklentisi değildir. Geliştirme ve simülasyon TIA olmadan yapılır, program hazır olunca TIA'ya aktarılır. Electron, React ve TypeScript ile yazıldı. İçinde sanal bir S7 PLC vardır. Gerçek donanıma bağlanmaz.
 
 ## Çalıştırma
 
@@ -48,6 +48,7 @@ Gerçek CPU'dan farklı veya doğrulanmamış davranışlar:
 - INT taşması yalnızca belleğe yazılırken sarar, ara işlem sonuçlarında sarmaz
 - LAD güç akışı durumu aynı FB'nin örnekleri arasında paylaşılır
 - DATE ve TOD sabitleri desteklenmez
+- TIA'nın sistem belleği açıkken kendiliğinden eklediği `FirstScan` gibi semboller yok. Adresle yazılmalı: `%M1.0`
 - REAL'den tamsayıya örtük atamada yuvarlama bir varsayımdır
 - CPU bellek boyutları ve watchdog'da STOP kuralı Siemens belgeleriyle karşılaştırılmadı
 
@@ -58,6 +59,7 @@ Gerçek CPU'dan farklı veya doğrulanmamış davranışlar:
 
 **IDE**
 
-- Silinen bloklar diskte kalır, elle silinmesi gerekir
+- Silinen blok, UDT ve etiket tablolarının dosyaları projedeki `.trash` klasörüne taşınır. Geri almak için dosya elle taşınmalıdır
 - Arayüz tablosu bir kaynağı yeniden yazarken bildirim bölümleri arasındaki yorumlar kaybolur
 - Gemini bağlantısı gerçek bir anahtarla denenmedi
+- Yapay zekâ ajanı API anahtarı veya Ollama sunucusu olmadan çalışmaz. Yerleşik hazır yanıtlar yoktur

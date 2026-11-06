@@ -11,7 +11,7 @@ import { useHardwareStore } from '../../stores/useHardwareStore'
 import { useSimulationStore } from '../../stores/useSimulationStore'
 import { useUIStore } from '../../stores/useUIStore'
 import { DoubleCoilDetector } from '../DoubleCoilDetector'
-import { SclInterpreter } from '../../runtime/SclInterpreter'
+import { ProjectCompilerEngine } from '../compiler/ProjectCompilerEngine'
 import { MemoryOverlapEngine } from '../MemoryOverlapEngine'
 import {
   DataBlockDefinition,
@@ -719,32 +719,14 @@ export class PlcAgentTools {
     errors: string[]
     warnings: string[]
   } {
+    // The same compiler as the COMPILE button, so the agent and the user see the same result
+    const result = ProjectCompilerEngine.runFullProjectCompilation()
     const errors: string[] = []
     const warnings: string[] = []
-
-    // 1. SCL Syntax Check
-    const sclBlocks = useBlockStore.getState().sclBlocks
-    for (const b of sclBlocks) {
-      const res = SclInterpreter.validateSyntax(b.code)
-      if (!res.valid) {
-        errors.push(`SCL Syntax Error in ${b.name}: ${res.errors.join(', ')}`)
-      }
-    }
-
-    // 2. Double Coil AST Check
-    const ladBlocks = useBlockStore.getState().ladBlocks
-    for (const l of ladBlocks) {
-      const conflicts = DoubleCoilDetector.scanBlock(l)
-      if (conflicts.length > 0) {
-        warnings.push(`Double Coil Conflict in ${l.name}: operand '${conflicts[0].operand}' written across multiple networks.`)
-      }
-    }
-
-    // 3. Memory Overlap Check
-    const tagTables = useTagStore.getState().tagTables
-    const collisions = MemoryOverlapEngine.analyzeCollisions(tagTables, useHardwareStore.getState().config)
-    if (collisions.totalCollisionCount > 0) {
-      warnings.push(`S7 Memory Overlap detected across ${collisions.totalCollisionCount} tag(s).`)
+    for (const diagnostic of result.diagnostics) {
+      const blocksProgram = diagnostic.severity === 'Error' && diagnostic.blocksDownload !== false
+      if (blocksProgram) errors.push(diagnostic.message)
+      else warnings.push(diagnostic.message)
     }
 
     const success = errors.length === 0
