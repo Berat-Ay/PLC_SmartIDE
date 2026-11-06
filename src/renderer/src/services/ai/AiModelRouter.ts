@@ -6,10 +6,15 @@
 
 import { PlcAgentTools, AgentToolCall, AgentToolResult } from './PlcAgentTools'
 import { useTagStore } from '../../stores/useTagStore'
+import { useHardwareStore } from '../../stores/useHardwareStore'
+import { useProjectStore } from '../../stores/useProjectStore'
+import { BehaviorTest, parseBehaviorTest, runBehaviorTest } from './CircuitBehaviorTest'
+import { TagDefinition } from '@shared/types/tags'
+import { ProjectLoadPayload } from '@shared/types/ipc'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useUIStore } from '../../stores/useUIStore'
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
-import { LadderDslCompiler } from '../compiler/LadderDslCompiler'
+import { LadderDslCompiler, DslCompilerOptions } from '../compiler/LadderDslCompiler'
 import { RagKnowledgeEngine } from './RagKnowledgeEngine'
 import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
 import {
@@ -84,7 +89,15 @@ export interface AiConfig {
 }
 
 const MAX_AGENT_ROUNDS = 6
-const READ_ONLY_TOOLS = new Set(['read_project_overview', 'read_block'])
+const READ_ONLY_TOOLS = new Set(['read_project_overview', 'read_block', 'read_pattern'])
+
+const LADDER_RULES = `LADDER RULES:
+1. Read a timer or counter through its instance: T1.Q, T1.ET, C1.QU, C1.QD, C1.CV. A timer or counter box ends its rung, and a coil that only copies its Q adds nothing. Use %M bits freely for real program state, such as a running flag or a sequence step.
+2. A timer whose own Q is in the path to its IN is TRUE for one scan only. Never use that to hold a lamp, a motor or a stage of a cycle. For a repeating cycle chain the timers and let the last one reset the first (pattern timer_ring).
+3. Drive each output coil from one network. If two networks write the same coil, the last one wins.
+4. FIELD WIRING: A contact tests the input bit, not the physical button. A stop button wired normally closed reads 1 at rest, so it needs an NO contact in ladder. Use an NC contact for it only when the button is wired normally open. If the wiring is not stated, assume normally closed and say so.
+5. Give different signals different addresses.
+6. A program does not replace hard-wired safety. Say so when a circuit has an emergency stop or contactors that must never close together.`
 // What the model may call. Hardware, plant scripts, undo and deleting stay with the user.
 const AGENT_TOOLS = new Set([
   ...READ_ONLY_TOOLS,
@@ -100,6 +113,7 @@ interface GeminiContent {
 }
 
 interface AgentModelReply {
+  behaviorTest?: BehaviorTest
   explanation: string
   toolCalls: AgentToolCall[]
   circuit?: AiCircuitSynthesisPayload
@@ -783,9 +797,8 @@ export class AiModelRouter {
   }
 
   /**
-   * MEB Golden Rulebook AST Optimizer & Self-Critic
-   * Strips redundant %M dummy coils following timers/counters, rewires interlock contacts directly
-   * to native timer sub-bits (e.g. T1.Q), and purges redundant %M tags from project tag tables.
+   * Removes a plain %M coil that only copies a timer's or counter's Q, and reads the instance bit instead.
+   * Other coil types stay: a SET coil latches and a negated coil inverts, so they are not the same as Q.
    */
   public optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload): AiCircuitSynthesisPayload {
     if (!payload.networks || payload.networks.length === 0) return payload
@@ -801,11 +814,21 @@ export class AiModelRouter {
         const current = originalNodes[i]
         const next = originalNodes[i + 1]
 
-        if ((current.kind === 'timer' || current.kind === 'counter') && next && next.kind === 'coil') {
+        if (
+          (current.kind === 'timer' || current.kind === 'counter') &&
+          next?.kind === 'coil' &&
+          (next as LadderCoilNode).coilType === 'OUTPUT_COIL'
+        ) {
           const t = current as LadderTimerNode | LadderCounterNode
           const c = next as LadderCoilNode
+          const declared = (payload.tagsToUpsert || []).find((tag) => tag.name.toLowerCase() === c.operand.toLowerCase())
+          if (/^%?[IQ]/i.test(c.address || declared?.address || '')) {
+            newNodes.push(current)
+            continue
+          }
           const instName = t.instanceDb || (current.kind === 'timer' ? 'T1' : 'C1')
-          const nativeBit = current.kind === 'timer' ? `${instName}.Q` : `${instName}.QU`
+          const countsDown = current.kind === 'counter' && (current as LadderCounterNode).counterType === 'CTD'
+          const nativeBit = current.kind === 'timer' ? `${instName}.Q` : `${instName}.${countsDown ? 'QD' : 'QU'}`
 
           strippedCoilMap.set(c.operand.toLowerCase(), nativeBit)
           if (c.address) strippedCoilMap.set(c.address.toLowerCase(), nativeBit)
@@ -863,38 +886,10 @@ export class AiModelRouter {
       nodes: rewireContacts(net.nodes)
     }))
 
-    // 3. Filter out dummy %M tags from tagsToUpsert
-    const cleanedTags = (payload.tagsToUpsert || []).filter((tag) => {
-      const lowerName = tag.name.toLowerCase()
-      const lowerAddr = tag.address.toLowerCase()
-      if (strippedCoilMap.has(lowerName) || strippedCoilMap.has(lowerAddr)) {
-        return false
-      }
-      if (
-        lowerAddr.startsWith('%m') &&
-        (lowerName.includes('timer') || lowerName.includes('done') || lowerName.includes('aux_t'))
-      ) {
-        return false
-      }
-      return true
-    })
-
-    // Also remove any matching dummy %M tag from live tagStore
-    try {
-      const tagStore = useTagStore.getState()
-      tagStore.tagTables.forEach((tbl) => {
-        const toDelete = tbl.tags.filter(
-          (t) =>
-            strippedCoilMap.has(t.name.toLowerCase()) ||
-            strippedCoilMap.has(t.address.toLowerCase()) ||
-            (t.address.toLowerCase().startsWith('%m') &&
-              (t.name.toLowerCase().includes('timer') || t.name.toLowerCase().includes('done')))
-        )
-        toDelete.forEach((t) => tagStore.deleteTag(tbl.id, t.id))
-      })
-    } catch {
-      // outside react
-    }
+    // 3. Drop the tags of the coils removed above
+    const cleanedTags = (payload.tagsToUpsert || []).filter(
+      (tag) => !strippedCoilMap.has(tag.name.toLowerCase()) && !strippedCoilMap.has(tag.address.toLowerCase())
+    )
 
     return {
       ...payload,
@@ -957,7 +952,8 @@ export class AiModelRouter {
   public static sanitizeAndAllocateUniqueAddresses(
     tagsToUpsert: Array<{ name: string; dataType: 'BOOL' | 'INT' | 'DINT' | 'REAL' | 'TIME'; address: string; comment?: string }>,
     networks: LadderNetwork[] = [],
-    existingTags: Array<{ id: string; name: string; address: string; dataType: string }> = []
+    existingTags: Array<{ id: string; name: string; address: string; dataType: string }> = [],
+    reservedMerkerBytes: number[] = []
   ): {
     tags: Array<{ name: string; dataType: 'BOOL' | 'INT' | 'DINT' | 'REAL' | 'TIME'; address: string; comment?: string }>
     networks: LadderNetwork[]
@@ -965,6 +961,10 @@ export class AiModelRouter {
     const usedAddresses = new Map<string, string>() // normalizedAddr -> tagName
     const addressRewrites = new Map<string, string>() // oldNormalizedAddr -> newNormalizedAddr
     const nameToAddressMap = new Map<string, string>() // tagName.toLowerCase() -> newNormalizedAddr
+
+    for (const byte of reservedMerkerBytes) {
+      for (let bit = 0; bit < 8; bit++) usedAddresses.set(`%M${byte}.${bit}`, 'CPU system or clock memory')
+    }
 
     // Register existing tags that are not being replaced by name
     const newTagNames = new Set(tagsToUpsert.map((t) => t.name.trim().toLowerCase()))
@@ -1061,12 +1061,68 @@ export class AiModelRouter {
     }
   }
 
+  /** Merker bytes the configured CPU writes itself. */
+  private reservedMerkerBytes(): number[] {
+    const config = useHardwareStore.getState().config
+    const bytes: number[] = []
+    if (config?.clockMemory?.enabled) bytes.push(config.clockMemory.byteAddress)
+    if (config?.systemMemory?.enabled) bytes.push(config.systemMemory.byteAddress)
+    return bytes
+  }
+
+  /**
+   * Replacing OB1 removes the tags only OB1 used, so their addresses are free for the new program.
+   * A tag stays if it is in another table or anything outside OB1 mentions it, at any depth of a network or
+   * in SCL source. A false match only keeps a tag, while a missed one would break that block.
+   */
+  private tagsKeptWhenReplacingOb1(): TagDefinition[] {
+    const { tagTables } = useTagStore.getState()
+    const blocks = useBlockStore.getState()
+    const otherProgramText = [
+      JSON.stringify(blocks.ladBlocks.filter((b) => !(b.blockType === 'OB' && b.blockNumber === 1) && b.name !== 'OB1_Main')),
+      ...blocks.sclBlocks.map((b) => b.code)
+    ]
+      .join('\n')
+      .toLowerCase()
+    return tagTables.flatMap((table, index) =>
+      table.tags.filter(
+        (t) => index > 0 || otherProgramText.includes(t.name.toLowerCase()) || otherProgramText.includes(t.address.toLowerCase())
+      )
+    )
+  }
+
+  private dslOptions(operationMode: AiCircuitSynthesisPayload['operationMode'] = this.defaultCircuitMode()): DslCompilerOptions {
+    const allTags = useTagStore.getState().tagTables.flatMap((t) => t.tags)
+    const reservedMerkerBytes = this.reservedMerkerBytes()
+    if (operationMode !== 'replace_ob1_networks') return { existingTags: allTags, reservedMerkerBytes }
+    const keptTags = this.tagsKeptWhenReplacingOb1()
+    return { keptTags, releasedTags: allTags.filter((t) => !keptTags.includes(t)), reservedMerkerBytes }
+  }
+
+  /** Adds the JSON tag list to the DSL text as TAG lines. A tag already declared in the DSL wins. */
+  private dslWithDeclaredTags(dsl: string, tags: unknown): string {
+    if (!Array.isArray(tags)) return dsl
+    const inDsl = new Set(Array.from(dsl.matchAll(/^\s*TAG\s+(\S+)/gim)).map((m) => m[1].toLowerCase()))
+    const lines = tags
+      .filter(
+        (t) =>
+          typeof t?.name === 'string' &&
+          typeof t?.address === 'string' &&
+          t.address.trim() &&
+          /^[A-Za-z]*$/.test(String(t.dataType || '')) &&
+          !inDsl.has(t.name.toLowerCase())
+      )
+      .map((t) => `TAG ${t.name} ${t.address} ${t.dataType || 'BOOL'} "${String(t.comment || '').replace(/["\r\n]/g, ' ')}"`)
+    return [...lines, dsl].join('\n')
+  }
+
   /**
    * Applies the synthesized circuit payload into Tag Tables, LAD Block (OB1), and opens workspace tab
    */
   public applyCircuitPayload(
     payload: AiCircuitSynthesisPayload,
-    mode: 'auto-apply' | 'diff-view'
+    mode: 'auto-apply' | 'diff-view',
+    options: { trialRun?: boolean } = {}
   ): {
     summaryText: string
     stagedChangeset?: Array<{
@@ -1081,7 +1137,7 @@ export class AiModelRouter {
     if (normalizedNetworks.length === 0 || hasEmptyNetwork(normalizedNetworks)) {
       throw new Error('The model returned an empty network, so the project was not changed.')
     }
-    if (mode === 'auto-apply') PlcAgentTools.getInstance().captureSnapshot()
+    if (mode === 'auto-apply' && !options.trialRun) PlcAgentTools.getInstance().captureSnapshot()
     const tablesBefore = structuredClone(useTagStore.getState().tagTables)
     const effectivePayload = this.optimizeAndCleanGeneratedAst({
       ...payload,
@@ -1092,7 +1148,8 @@ export class AiModelRouter {
     const sanitized = AiModelRouter.sanitizeAndAllocateUniqueAddresses(
       effectivePayload.tagsToUpsert || [],
       effectivePayload.networks || [],
-      existingLiveTags
+      existingLiveTags,
+      this.reservedMerkerBytes()
     )
     effectivePayload.tagsToUpsert = sanitized.tags
     effectivePayload.networks = sanitized.networks
@@ -1107,27 +1164,11 @@ export class AiModelRouter {
       // Prune orphaned tags if completely replacing OB1 networks to prevent collision duplicates (%Q0.0, %I0.0)
       if (effectivePayload.operationMode === 'replace_ob1_networks') {
         const newTagNames = new Set((effectivePayload.tagsToUpsert || []).map((t) => t.name.toLowerCase()))
-        const newTagAddrs = new Set((effectivePayload.tagsToUpsert || []).map((t) => t.address.toLowerCase()))
-
-        // A tag stays if anything outside OB1 mentions it, at any depth of a network or in SCL source.
-        // A false match only keeps a tag, while a missed one would break that block.
-        const blockState = useBlockStore.getState()
-        const otherProgramText = [
-          JSON.stringify(blockState.ladBlocks.filter((b) => !(b.blockType === 'OB' && b.blockNumber === 1) && b.name !== 'OB1_Main')),
-          ...blockState.sclBlocks.map((b) => b.code)
-        ]
-          .join('\n')
-          .toLowerCase()
+        const kept = new Set(this.tagsKeptWhenReplacingOb1())
 
         const currentTable = tagStore.tagTables.find((t) => t.id === tableId)
         if (currentTable) {
-          const tagsToRemove = currentTable.tags.filter((t) => {
-            const nameLower = t.name.toLowerCase()
-            const addrLower = t.address.toLowerCase()
-            if (newTagNames.has(nameLower) || newTagAddrs.has(addrLower)) return false
-            if (otherProgramText.includes(nameLower) || otherProgramText.includes(addrLower)) return false
-            return true
-          })
+          const tagsToRemove = currentTable.tags.filter((t) => !newTagNames.has(t.name.toLowerCase()) && !kept.has(t))
           for (const t of tagsToRemove) {
             tagStore.deleteTag(tableId, t.id)
           }
@@ -1207,23 +1248,25 @@ export class AiModelRouter {
         blockStore.updateLadBlock(ob1.fileName, { networks: updatedNetworks })
 
         // 3. Auto-navigate to OB1_Main in workspace
-        try {
-          const uiStore = useUIStore.getState()
-          const existingTab = uiStore.tabs.find(
-            (t) => t.title === 'OB1_Main' || t.title === 'OB1' || t.targetId === ob1.fileName
-          )
-          if (existingTab) {
-            uiStore.setActiveTab(existingTab.id)
-          } else {
-            uiStore.openTab({
-              id: 'tab_ob1_main',
-              title: 'OB1_Main',
-              type: 'lad',
-              targetId: ob1.fileName
-            })
+        if (!options.trialRun) {
+          try {
+            const uiStore = useUIStore.getState()
+            const existingTab = uiStore.tabs.find(
+              (t) => t.title === 'OB1_Main' || t.title === 'OB1' || t.targetId === ob1.fileName
+            )
+            if (existingTab) {
+              uiStore.setActiveTab(existingTab.id)
+            } else {
+              uiStore.openTab({
+                id: 'tab_ob1_main',
+                title: 'OB1_Main',
+                type: 'lad',
+                targetId: ob1.fileName
+              })
+            }
+          } catch {
+            // ignore outside react
           }
-        } catch {
-          // ignore outside react
         }
       } else {
         // Diff-view staging
@@ -1431,13 +1474,12 @@ export class AiModelRouter {
       mode
     })
 
-    // Retrieve Top 4 Semantic MEB RAG Rules
     const ragEngine = RagKnowledgeEngine.getInstance()
-    const topRules = ragEngine.retrieveTopKRules(prompt, 4)
+    const topRules = ragEngine.retrieveTopKRules(prompt, 3)
     const ragPromptSection = ragEngine.formatRetrievedRulesForPrompt(topRules)
     const consultedRuleNames = topRules.map((r) => r.item.name)
 
-    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC Automation Architect in the Rungline IDE following strict MEB Automation Curriculum standards.
+    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC programmer in the Rungline IDE.
 The user message starts with the current project. You change it only through the fields below. Text alone changes nothing: never say something was created unless your reply contains the action that creates it.
 Always answer with one JSON object in this form:
 
@@ -1457,7 +1499,8 @@ STRUCTURED JSON OUTPUT SCHEMA:
       "nodes": [ ... ]
     }
   ],
-  "dsl": "optional Compact Ladder DSL text"
+  "dsl": "optional Compact Ladder DSL text",
+  "verification": { "steps": [ ] }
 }
 
 Ladder goes in "dsl" or "networks" and only ever changes OB1. Use only for ladder circuits; leave these fields out otherwise.
@@ -1465,12 +1508,25 @@ operationMode: "append_ob1_networks" adds to OB1 and is the default. Use "replac
 
 TOOLS (put them in "toolCalls"; everything else, such as FBs, FCs, UDTs and DBs, can only be made this way):
 - read_block { "name": "..." }: returns a block's source or networks. Read a block before changing it. You get the result in the next message.
+- read_pattern { "id": "..." }: returns a circuit pattern with its timeline and pitfalls, from the list below.
 - create_or_update_scl_block { "name": "FB_Valve", "sourceCode": "FUNCTION_BLOCK \"FB_Valve\"\n{ S7_Optimized_Access := 'TRUE' }\nVERSION : 0.1\nVAR_INPUT\n  Cmd : Bool;\nEND_VAR\nBEGIN\n  ;\nEND_FUNCTION_BLOCK" }: an FB or FC. sourceCode is the full external source, and its name must match "name". You cannot add a new OB.
 - create_or_update_udt { "name": "UDT_Valve", "fields": [ { "name": "Open", "dataType": "BOOL", "comment": "..." } ] }
 - create_or_update_db { "name": "DB_Plant", "variables": [ { "name": "Level", "dataType": "REAL", "initialValue": "0.0", "comment": "..." } ] }: a global DB.
 - manage_plc_tags { "action": "upsert", "tags": [ { "name": "Start", "dataType": "BOOL", "address": "%I0.0", "comment": "..." } ] }
 
-Your whole reply is applied, then the project is compiled. If tools or the compiler report errors, everything from that reply is undone and you get the errors, so send the complete corrected answer again. If you cannot do something, say so in "explanation" instead of inventing a result.
+Your whole reply is applied, compiled and run on the simulator. If tools, the compiler or the test report errors, everything from that reply is undone and you get the errors, so send the complete corrected answer again. If you cannot do something, say so in "explanation" instead of inventing a result.
+
+SIMULATION TEST ("verification"): every ladder circuit needs one. It says what the circuit must do over time, starting from the moment the CPU goes to RUN with all inputs at 0:
+"verification": { "steps": [
+  { "atMs": 0, "set": { "Stop": true } },
+  { "atMs": 100, "set": { "Start": true } },
+  { "atMs": 300, "set": { "Start": false }, "expect": { "Motor": true } },
+  { "atMs": 5300, "expect": { "Motor": false } }
+] }
+- "set" changes inputs only. An NC-wired stop button is 1 at rest, so set it to true at the start.
+- "expect" can read tags and instance bits such as T1.Q. Check 200 ms or more away from a timer's expiry.
+- Follow the behaviour the user described, not your circuit: cover the whole cycle, at least one repeat of a cycle, and stopping.
+- If it fails you get the real timeline of the program. Find the cause in the circuit before changing anything. Do not change the expected behaviour to match a wrong circuit.
 
 COMPACT LADDER DSL SYNTAX (for the "dsl" field):
 TAG <Name> <Address> <DataType> "<Comment>"
@@ -1486,20 +1542,13 @@ DSL Elements:
 - Math: ADD(in1, in2, out), SUB, MUL, DIV, MOVE, NORM_X, SCALE_X
 - Combinators: SERIES(elem1, elem2, ...), PARALLEL(branch1, branch2, ...)
 
-CRITICAL MEB INDUSTRIAL RULES:
-1. STRICT BAN ON DUMMY %M TIMER COILS: Never create dummy %M coils following a timer. Timers terminate cleanly at the rung end without a coil.
-2. NATIVE SUB-BIT ADDRESSING: Contacts reading a timer done bit MUST use 'T1.Q' directly. Counter bits use 'C1.QU', 'C1.QD', 'C1.CV'.
-3. MOTOR SEAL-IN: Network 1 has Start NO parallel with Motor NO, series with Stop NC and T1.Q NC, driving Motor coil. Network 2 has Motor NO driving TON T1.
-4. ZERO DUMMY %M TAGS: Do not declare dummy %M tags for timer done flags.
-5. INDICATOR LAMPS & LEDS: If the user requests indicator lamps/LEDs (e.g. green LED when motor runs, red LED when motor stops), assign distinct safe addresses (e.g. Green LED %Q0.1, Red LED %Q0.2) and add dedicated networks: Network 3 (Motor NO driving Green LED coil) and Network 4 (Motor NC driving Red LED coil). NEVER assign duplicate addresses to different tags.
-FIELD WIRING: A contact tests the input bit, not the physical button. A stop button wired normally closed reads 1 at rest, so it needs an NO contact in ladder. Use an NC contact for it only when the button is wired normally open. If the wiring is not stated, say which one you assumed.
-6. PARKING GARAGE / BARRIER AUTOMATION:
-   - Giris_Kart (%I0.0), Giris_Fotosel (%I0.1), Ust_Limit (%I0.2), Alt_Limit (%I0.3), Cikis_Fotosel (%I0.4)
-   - Kapi_Yukari_Motor (%Q0.0), Kapi_Asagi_Motor (%Q0.1), Otopark_Dolu_Tabela (%Q0.2)
-   - Use CTUD C1 (PV=10) with CU triggered by N_TRIG Giris_Fotosel, and CD triggered by Cikis_Fotosel.
-   - Use TON T1 (PT=T#7s) for auto-close dwell after reaching Ust_Limit.
+${LADDER_RULES}
+
+CIRCUIT PATTERNS you can read with read_pattern:
+${ragEngine.patternCatalogForPrompt()}
 ${ragPromptSection}
-Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.
+The current project lists this CPU's inputs, outputs, clock memory and system memory. Use those.
+Give every new tag its address, either as a TAG line in "dsl" or in "tagsToUpsert". A tag that already exists keeps its address if you do not declare it again. Never use the CPU's clock or system memory bytes for your own bits.
 If the prompt is purely informational without ladder logic, provide an explanation directly.`
 
     const cleanKey = (this.config.geminiApiKey || '').trim()
@@ -1724,8 +1773,8 @@ If the prompt is purely informational without ladder logic, provide an explanati
   private interpretModelReply(rawText: string): AgentModelReply {
     const reply: AgentModelReply = { explanation: '', toolCalls: [], problems: [] }
     let dslErrors: string[] = []
-    const fromDsl = (text: string): AiCircuitSynthesisPayload | undefined => {
-      const compiled = LadderDslCompiler.compileLadderDslToAst(text)
+    const fromDsl = (text: string, operationMode = this.defaultCircuitMode()): AiCircuitSynthesisPayload | undefined => {
+      const compiled = LadderDslCompiler.compileLadderDslToAst(text, this.dslOptions(operationMode))
       if (!compiled.success || compiled.networks.length === 0) {
         dslErrors = compiled.errors
         return undefined
@@ -1745,7 +1794,11 @@ If the prompt is purely informational without ladder logic, provide an explanati
 
     const extracted = this.extractValidJsonBlock(rawText)
     if (extracted?.json && typeof extracted.json === 'object') {
-      const parsed = extracted.json as Partial<AiCircuitSynthesisPayload> & { dsl?: unknown; toolCalls?: unknown }
+      const parsed = extracted.json as Partial<AiCircuitSynthesisPayload> & {
+        dsl?: unknown
+        toolCalls?: unknown
+        verification?: unknown
+      }
       reply.explanation = typeof parsed.explanation === 'string' ? parsed.explanation : ''
       reply.rawJson = extracted.raw
 
@@ -1761,7 +1814,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
       }
 
       if (typeof parsed.dsl === 'string' && parsed.dsl.trim()) {
-        reply.circuit = fromDsl(parsed.dsl)
+        reply.circuit = fromDsl(this.dslWithDeclaredTags(parsed.dsl, parsed.tagsToUpsert), parsed.operationMode)
         if (!reply.circuit) reply.problems.push(`The "dsl" field did not compile: ${dslErrors.join('; ') || 'it has no networks'}`)
       } else if (Array.isArray(parsed.networks) && parsed.networks.length > 0) {
         reply.circuit = {
@@ -1770,6 +1823,11 @@ If the prompt is purely informational without ladder logic, provide an explanati
           tagsToUpsert: Array.isArray(parsed.tagsToUpsert) ? parsed.tagsToUpsert : [],
           networks: normalizeAiGeneratedNetworks(parsed.networks)
         }
+      }
+      if (parsed.verification !== undefined) {
+        const verification = parseBehaviorTest(parsed.verification)
+        reply.behaviorTest = verification.test
+        reply.problems.push(...verification.problems)
       }
       if (reply.circuit) {
         reply.circuit.explanation = reply.explanation || reply.circuit.explanation || 'Synthesized Ladder Logic via Google Gemini.'
@@ -1802,8 +1860,74 @@ If the prompt is purely informational without ladder logic, provide an explanati
   }
 
   /**
-   * Model, tools and compiler in a loop. A reply is applied as a whole and kept only if it compiles
-   * without new errors. Otherwise the project goes back to where it was and the model gets the errors.
+   * Runs the reply's test on the project as it stands now. A wrong behaviour always goes back to the model.
+   * A missing test or a very short output pulse is raised once, and accepted with a note if the model repeats it.
+   */
+  private checkCircuitBehavior(
+    test: BehaviorTest | undefined,
+    askedOnce: Set<string>,
+    isTurkish: boolean
+  ): { problems: string[]; note: string } {
+    const askOnce = (kind: string, problems: string[], note: string): { problems: string[]; note: string } => {
+      if (askedOnce.has(kind)) return { problems: [], note }
+      askedOnce.add(kind)
+      return { problems, note: '' }
+    }
+
+    if (!test) {
+      return askOnce(
+        'missing test',
+        ['A ladder circuit needs a "verification" timeline, so it can be run on the simulator. Send the complete answer with one.'],
+        isTurkish
+          ? '**Simülasyon testi:** Model test göndermedi, devrenin davranışı doğrulanmadı.'
+          : '**Simulation test:** The model sent no test, so the behaviour was not verified.'
+      )
+    }
+
+    const blocks = useBlockStore.getState()
+    const metadata = useProjectStore.getState().metadata
+    const result = runBehaviorTest(test, {
+      projectPath: metadata?.projectPath || '',
+      metadata,
+      hardware: useHardwareStore.getState().config,
+      tagTables: useTagStore.getState().tagTables,
+      udts: blocks.udts,
+      dataBlocks: blocks.dataBlocks,
+      ladBlocks: blocks.ladBlocks,
+      sclBlocks: blocks.sclBlocks
+    } as ProjectLoadPayload)
+    BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', `Simulation test: ${result.checks} checks, ${result.failures.length} failed`, {
+      failures: result.failures,
+      pulses: result.pulses,
+      timeline: result.timeline
+    })
+
+    const whatHappened = result.timeline ? [`What the program really did:\n${result.timeline}`] : []
+    if (result.failures.length > 0) {
+      return { problems: [`The simulation test failed:`, ...result.failures, ...result.pulses, ...whatHappened], note: '' }
+    }
+    const passed = isTurkish
+      ? `**Simülasyon testi:** ${result.checks} kontrolün hepsi geçti.`
+      : `**Simulation test:** all ${result.checks} checks passed.`
+    if (result.pulses.length > 0) {
+      const asked = askOnce(
+        'short pulse',
+        [
+          ...result.pulses,
+          'A timer whose own Q output resets its IN gives a one-scan pulse. Fix the circuit. If such a short pulse is really wanted, send the same answer again.',
+          ...whatHappened
+        ],
+        `${passed}\n\n${result.pulses.map((p) => `- ${p}`).join('\n')}`
+      )
+      return asked
+    }
+    return { problems: [], note: passed }
+  }
+
+  /**
+   * Model, tools, compiler and simulator in a loop. A reply is applied as a whole and kept only if it compiles
+   * without new errors and behaves as its test says. Otherwise the project goes back to where it was and the
+   * model gets the errors.
    */
   private async runAgentTurn(
     prompt: string,
@@ -1815,7 +1939,11 @@ If the prompt is purely informational without ladder logic, provide an explanati
   ): Promise<AgentExecutionResponse> {
     const tools = PlcAgentTools.getInstance()
     const turnStart = tools.takeSnapshot()
-    const errorsBefore = new Set(tools.runCompilerVerification().errors)
+    const reportBefore = tools.runCompilerVerification()
+    const errorsBefore = new Set(reportBefore.errors)
+    const warningsBefore = new Set(reportBefore.warnings)
+    // Things that are unusual but can be right: the model is asked once and believed if it repeats them
+    const askedOnce = new Set<string>()
     const contents: GeminiContent[] = [
       { role: 'user', parts: [{ text: `CURRENT PROJECT:\n${tools.describeProjectForModel()}\n\nUSER REQUEST:\n${prompt}` }] }
     ]
@@ -1890,24 +2018,60 @@ If the prompt is purely informational without ladder logic, provide an explanati
         }
 
         if (mode === 'diff-view' && problems.length === 0) {
-          const note = isTurkish
-            ? 'Derleyici kontrolü onaydan sonra çalışır.'
-            : 'The compiler check runs after you approve the changes.'
-          return respond({ replyText: `${lines.join('\n')}\n\n*${note}*`, stagedChangeset: staged })
+          // Try the staged circuit on the project for a moment. New tools are not applied yet, so it cannot run with them
+          let behaviorNote = ''
+          if (reply.circuit && writes.length === 0) {
+            tools.holdDiskWrites()
+            this.applyCircuitPayload(reply.circuit, 'auto-apply', { trialRun: true })
+            const behavior = this.checkCircuitBehavior(reply.behaviorTest, askedOnce, isTurkish)
+            tools.discardDiskWrites()
+            tools.restoreSnapshot(turnStart)
+            problems.push(...behavior.problems)
+            behaviorNote = behavior.note
+          } else if (reply.circuit) {
+            behaviorNote = isTurkish
+              ? '**Simülasyon testi:** Bu yanıt yeni blok veya etiket de oluşturduğu için onaydan önce çalıştırılamadı, devrenin davranışı doğrulanmadı.'
+              : '**Simulation test:** This reply also creates blocks or tags, so it could not run before approval and the behaviour was not verified.'
+          }
+          if (problems.length === 0) {
+            const note = isTurkish
+              ? 'Derleyici kontrolü onaydan sonra çalışır.'
+              : 'The compiler check runs after you approve the changes.'
+            const parts = [lines.join('\n'), behaviorNote, `*${note}*`].filter(Boolean)
+            return respond({ replyText: parts.join('\n\n'), stagedChangeset: staged })
+          }
         }
 
         if (problems.length === 0) {
           const report = tools.runCompilerVerification()
           const newErrors = report.errors.filter((e) => !errorsBefore.has(e))
+          // TIA accepts a bit with no channel and overlapping tags, so these are questions and not errors
+          const newAddressWarnings = report.warnings.filter(
+            (w) => (w.includes('[S7-IO-009]') || w.includes('[S7-MEM-001]')) && !warningsBefore.has(w)
+          )
           problems.push(...newErrors)
-          if (newErrors.length === 0) {
+          if (newErrors.length === 0 && newAddressWarnings.length > 0 && !askedOnce.has('address warning')) {
+            askedOnce.add('address warning')
+            problems.push(
+              ...newAddressWarnings,
+              'Use a free address that exists on this CPU. If the user asked for this address, has an expansion module or really wants two tags on one address, send the same answer again.'
+            )
+          }
+          let behaviorNote = ''
+          if (problems.length === 0 && reply.circuit) {
+            const behavior = this.checkCircuitBehavior(reply.behaviorTest, askedOnce, isTurkish)
+            problems.push(...behavior.problems)
+            behaviorNote = behavior.note ? `\n\n${behavior.note}` : ''
+          }
+          if (problems.length === 0) {
             tools.releaseDiskWrites()
             tools.setUndoSnapshot(turnStart)
             const older = report.errors.length
               ? ` ${report.errors.length} error(s) were already in the project before this change.`
               : ''
+            const addressNote = newAddressWarnings.length ? `\n\n${newAddressWarnings.map((w) => `- ${w}`).join('\n')}` : ''
             return respond({
-              replyText: `${lines.join('\n')}\n\n**Compiler:** no new errors, ${report.warnings.length} warning(s).${older}`,
+              replyText: `${lines.join('\n')}\n\n**Compiler:** no new errors, ${report.warnings.length} warning(s).${older}${addressNote}${behaviorNote}`,
               compilerVerification: { success: report.success, message: report.message }
             })
           }
@@ -2000,7 +2164,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
         .replace(/```$/gm, '')
         .trim()
 
-      const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl)
+      const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl, this.dslOptions())
       if (dslResult.success && dslResult.networks.length > 0) {
         const circuitPayload: AiCircuitSynthesisPayload = {
           explanation: dslResult.explanation || 'Synthesized Ladder Logic via Compact Ladder DSL Engine.',
@@ -2047,13 +2211,12 @@ If the prompt is purely informational without ladder logic, provide an explanati
     const endpoint = (this.config.ollamaEndpoint || 'http://localhost:11434').replace(/\/$/, '')
     const model = this.config.selectedModelId || 'qwen2.5-coder'
 
-    // Retrieve Top 4 Semantic MEB RAG Rules
     const ragEngine = RagKnowledgeEngine.getInstance()
-    const topRules = ragEngine.retrieveTopKRules(prompt, 4)
+    const topRules = ragEngine.retrieveTopKRules(prompt, 3)
     const ragPromptSection = ragEngine.formatRetrievedRulesForPrompt(topRules)
     const consultedRuleNames = topRules.map((r) => r.item.name)
 
-    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC Automation Architect running on a local industrial factory server following strict MEB Automation Curriculum standards.
+    const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC programmer.
 When asked to synthesize, create, or modify PLC Ladder logic, circuits, timers, motors, or I/O configurations, output your response strictly in Compact Ladder DSL:
 
 # EXPLANATION
@@ -2075,12 +2238,7 @@ Compact Ladder DSL Syntax:
 - Math: ADD(in1, in2, out), SUB, MUL, DIV, MOVE, NORM_X, SCALE_X
 - Combinators: SERIES(elem1, elem2, ...), PARALLEL(branch1, branch2, ...)
 
-CRITICAL MEB INDUSTRIAL RULES:
-1. STRICT BAN ON DUMMY %M TIMER COILS: Never create dummy %M coils following a timer. Timers terminate cleanly at the rung end without a coil.
-2. NATIVE SUB-BIT ADDRESSING: Contacts reading a timer done bit MUST use 'T1.Q' directly.
-3. MOTOR SEAL-IN: Network 1 has Start NO parallel with Motor NO, series with Stop NC and T1.Q NC, driving Motor coil. Network 2 has Motor NO driving TON T1.
-4. ZERO DUMMY %M TAGS: Do not declare dummy %M tags for timer done flags.
-5. INDICATOR LAMPS & LEDS: If the user requests indicator lamps/LEDs (e.g. green LED when motor runs, red LED when motor stops), assign distinct safe addresses (e.g. Green LED %Q0.1, Red LED %Q0.2) and add dedicated networks: Network 3 (Motor NO driving Green LED coil) and Network 4 (Motor NC driving Red LED coil). NEVER assign duplicate addresses to different tags.
+${LADDER_RULES}
 ${ragPromptSection}
 Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.`
 
@@ -2137,7 +2295,7 @@ Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.`
           .replace(/```$/gm, '')
           .trim()
 
-        const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl)
+        const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl, this.dslOptions())
         if (dslResult.success && dslResult.networks.length > 0) {
           const circuitPayload: AiCircuitSynthesisPayload = {
             explanation: dslResult.explanation || 'Synthesized Ladder Logic via Local Ollama Model.',

@@ -1,14 +1,16 @@
 /**
- * Rungline 3-Layer Self-Learning RAG Knowledge Engine
- * Layer 1: Dynamic Context Injector (S7 ASTs, memory map, CPU constraints)
- * Layer 2: Embedded Siemens S7 & MEB Automation Curriculum Reference Library (Canonical Rules & Examples)
- * Layer 3: User Standard Library & Semantic Vectorizer (TF-IDF Cosine Similarity)
+ * What the agent knows besides the project.
+ * - The CPU context (memory map and limits from the hardware configuration)
+ * - The circuit patterns in PatternLibrary.ts, which are tested on the simulator
+ * - The user's own notes and saved blocks, which are not tested
+ * Requests are matched to them with TF-IDF cosine similarity.
  */
 
 import { useProjectStore } from '../../stores/useProjectStore'
 import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
+import { CIRCUIT_PATTERNS, CircuitPattern } from './PatternLibrary'
 
 export interface StandardLibraryItem {
   id: string
@@ -19,6 +21,9 @@ export interface StandardLibraryItem {
   contentJson: string
   dslExample?: string
   rulesList?: string[]
+  keywords?: string
+  /** Set on a built-in pattern. Anything without it comes from the user and is not tested. */
+  pattern?: CircuitPattern
   createdAt: number
 }
 
@@ -29,6 +34,36 @@ export interface RetrievedRagRule {
 }
 
 const RAG_STORAGE_KEY = 'antigravity_user_standards_rag_v1'
+const USER_ITEM_PREFIX = 'std_'
+const MAX_USER_TEXT_IN_PROMPT = 1500
+
+function patternToItem(pattern: CircuitPattern): StandardLibraryItem {
+  return {
+    id: `pattern_${pattern.id}`,
+    name: pattern.id,
+    category: pattern.category,
+    description: pattern.summary,
+    blockType: 'LAD',
+    contentJson: '',
+    dslExample: pattern.dsl,
+    rulesList: pattern.pitfalls,
+    keywords: pattern.keywords,
+    pattern,
+    createdAt: 0
+  }
+}
+
+/** The text of a user's entry. Notes saved by older versions keep the note in contentJson next to fixed rules. */
+function userText(item: StandardLibraryItem): string {
+  if (!item.contentJson) return item.description
+  try {
+    const notes = JSON.parse(item.contentJson)?.notes
+    if (typeof notes === 'string') return notes
+  } catch {
+    // SCL source is not JSON
+  }
+  return `${item.description}\n${item.contentJson}`
+}
 
 /**
  * Normalizes and stems Turkish and English technical terms for zero-dependency semantic matching
@@ -255,170 +290,6 @@ export class RagKnowledgeEngine {
   private userStandards: StandardLibraryItem[] = []
   private vectorizer: TfIdfSemanticVectorizer = new TfIdfSemanticVectorizer()
 
-  // Canonical Seeded MEB Automation Curriculum Golden Rules
-  private static readonly CANONICAL_MEB_RULES: StandardLibraryItem[] = [
-    {
-      id: 'rule_meb_motor_seal_in',
-      name: 'MEB_Motor_StartStop_SealIn',
-      category: 'motor',
-      description: 'MEB Automation Standard: Canonical 3-wire motor start/stop seal-in latch. Start PB (%I0.0) in parallel with motor NO latch (%Q0.0), series with NC Stop PB (%I0.1) and thermal overload trip.',
-      blockType: 'LAD',
-      dslExample: `# NETWORK 1: Motor Seal-In
-NW 1 "Motor Start/Stop Seal-In": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(Stop_Btn), COIL(Motor_Run) )`,
-      rulesList: [
-        'Motor auxiliary contact (Motor_Run NO) seals in parallel with Start_Btn NO',
-        'Stop_Btn must be wired as NC_CONTACT in series with coil path',
-        'Zero dummy intermediate %M coils for primary motor control'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Canonical Motor Start-Stop Seal-In Standard',
-        inputs: ['Start_Btn (%I0.0)', 'Stop_Btn (%I0.1)'],
-        outputs: ['Motor_Run (%Q0.0)']
-      }),
-      createdAt: 1700000000000
-    },
-    {
-      id: 'rule_meb_timer_t1q_cutoff',
-      name: 'MEB_Timer_T1Q_Cutoff',
-      category: 'motor',
-      description: 'MEB Automation Standard: Direct native timer sub-bit (T1.Q) addressing without dummy %M helper coils. TON timer T1 is energized directly by motor run contact; when PT expires, native NC T1.Q cuts power to motor coil.',
-      blockType: 'LAD',
-      dslExample: `# NETWORK 1: Motor Seal-In with T1.Q Cutoff
-NW 1 "Motor Start with T1.Q Auto-Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(Stop_Btn), NC(T1.Q), COIL(Motor_Run) )
-# NETWORK 2: TON Timer Box (No trailing dummy coil)
-NW 2 "10-Second Auto-Stop Timer": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )`,
-      rulesList: [
-        'STRICT BAN ON DUMMY %M TIMER COILS: Timers terminate cleanly at rung end without trailing coils',
-        'Native sub-bit addressing: downstream rungs read T1.Q directly',
-        'IEC preset time formatting: T#10s, T#5s, T#500ms'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Timer T1.Q Direct Trip Standard',
-        timer: 'TON T1',
-        tripBit: 'T1.Q'
-      }),
-      createdAt: 1700000000001
-    },
-    {
-      id: 'rule_meb_star_delta',
-      name: 'MEB_Star_Delta_Starter',
-      category: 'motor',
-      description: 'MEB Automation Standard: Star-Delta (Y-Δ) induction motor starter with TON transition timer (5s) and reciprocal software & hardware interlocks between Star (%Q0.1) and Delta (%Q0.2) contactors.',
-      blockType: 'LAD',
-      dslExample: `NW 1 "Main Contactor Latch": SERIES( PARALLEL( NO(Start_Btn), NO(Main_K1) ), NC(Stop_Btn), COIL(Main_K1) )
-NW 2 "Star-to-Delta Transition Timer": SERIES( NO(Main_K1), TON(T_Star, PT=T#5s) )
-NW 3 "Star Contactor (Interlocked with Delta)": SERIES( NO(Main_K1), NC(T_Star.Q), NC(Delta_K3), COIL(Star_K2) )
-NW 4 "Delta Contactor (Interlocked with Star)": SERIES( NO(Main_K1), NO(T_Star.Q), NC(Star_K2), COIL(Delta_K3) )`,
-      rulesList: [
-        'Star contactor (K2) and Delta contactor (K3) must have reciprocal NC interlocks',
-        'Main contactor (K1) remains continuously energized during transition',
-        'Timer T_Star.Q switches from Star to Delta cleanly without shoot-through'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Star-Delta Starter Standard',
-        main: '%Q0.0',
-        star: '%Q0.1',
-        delta: '%Q0.2'
-      }),
-      createdAt: 1700000000002
-    },
-    {
-      id: 'rule_meb_fwd_rev_interlock',
-      name: 'MEB_Forward_Reverse_Interlock',
-      category: 'motor',
-      description: 'MEB Automation Standard: Bi-directional forward/reverse motor circuit with cross-electrical interlocking. NC Forward contact guards Reverse coil; NC Reverse contact guards Forward coil.',
-      blockType: 'LAD',
-      dslExample: `NW 1 "Forward Direction": SERIES( PARALLEL( NO(Fwd_Btn), NO(Fwd_K1) ), NC(Stop_Btn), NC(Rev_K2), NC(Fwd_Limit), COIL(Fwd_K1) )
-NW 2 "Reverse Direction": SERIES( PARALLEL( NO(Rev_Btn), NO(Rev_K2) ), NC(Stop_Btn), NC(Fwd_K1), NC(Rev_Limit), COIL(Rev_K2) )`,
-      rulesList: [
-        'Cross electrical interlocks prevent simultaneous activation of Forward and Reverse contactors',
-        'Independent limit switches (NC) provide physical end-of-travel protection',
-        'Stop button de-energizes both directions unconditionally'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Forward-Reverse Motor Interlock Standard',
-        forward: '%Q0.0',
-        reverse: '%Q0.1'
-      }),
-      createdAt: 1700000000003
-    },
-    {
-      id: 'rule_meb_sequential_staging',
-      name: 'MEB_Sequential_Motor_Staging',
-      category: 'sequencing',
-      description: 'MEB Automation Standard: Cascade sequential motor staging (M1 -> M2 -> M3). Motor 1 starts first. Motor 2 only starts after Motor 1 is confirmed and timer T1 expires. Motor 3 follows Motor 2.',
-      blockType: 'LAD',
-      dslExample: `NW 1 "Motor 1 Start": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_1) ), NC(Stop_Btn), COIL(Motor_1) )
-NW 2 "Delay Timer T1 (M1 to M2)": SERIES( NO(Motor_1), TON(T1, PT=T#5s) )
-NW 3 "Motor 2 Start (Permissive from M1 & T1.Q)": SERIES( NO(Motor_1), NO(T1.Q), COIL(Motor_2) )`,
-      rulesList: [
-        'Downstream motors must have permissive series NO contacts from preceding stages',
-        'Cascade stop: stopping M1 automatically stops M2 and M3 safely',
-        'Individual timers provide staggered inrush current mitigation'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Sequential Motor Staging Standard'
-      }),
-      createdAt: 1700000000004
-    },
-    {
-      id: 'rule_meb_two_timer_flasher',
-      name: 'MEB_Two_Timer_Flasher',
-      category: 'sequencing',
-      description: 'MEB Automation Standard: Dual-timer symmetric or asymmetric flasher loop using two TON timers (T1 for ON duration, T2 for OFF duration) to drive alarm beacons or sirens.',
-      blockType: 'LAD',
-      dslExample: `NW 1 "Flasher Timer 1 (ON Pulse)": SERIES( NC(T2.Q), TON(T1, PT=T#1s) )
-NW 2 "Flasher Timer 2 (OFF Interval)": SERIES( NO(T1.Q), TON(T2, PT=T#1s) )
-NW 3 "Warning Beacon Output": SERIES( NO(T1.Q), COIL(Beacon_Lamp) )`,
-      rulesList: [
-        'Self-resetting dual timer oscillator: T2.Q NC resets T1',
-        'Pulse duty cycle is easily tuned via T1 and T2 PT parameters',
-        'No external clock memory required'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Two-Timer Flasher Circuit Standard'
-      }),
-      createdAt: 1700000000005
-    },
-    {
-      id: 'rule_meb_counter_batch',
-      name: 'MEB_Counter_Packaging_Batch',
-      category: 'sequencing',
-      description: 'MEB Automation Standard: Packaging batch counter using IEC CTU. Proximity sensor increments C1 up to PV=10; C1.QU trips part feeder and pulses packaging ejector piston.',
-      blockType: 'LAD',
-      dslExample: `NW 1 "Part Increment CTU": SERIES( NO(Part_Sensor), CTU(C1, PV=10, R=Batch_Reset) )
-NW 2 "Batch Complete Trip": SERIES( NO(C1.QU), COIL(Ejector_Piston) )`,
-      rulesList: [
-        'Count Up (CTU) triggered by proximity sensor NO edge',
-        'Native sub-bit C1.QU signals batch completion directly',
-        'Reset pin R clears accumulator CV back to 0'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Counter Packaging Batch Standard'
-      }),
-      createdAt: 1700000000006
-    },
-    {
-      id: 'rule_meb_analog_norm_scale',
-      name: 'MEB_Analog_NormX_ScaleX',
-      category: 'analog',
-      description: 'MEB Automation Standard: Siemens S7-1200 analog sensor signal conditioning pipeline. Raw integer (%IW64, 0..27648) normalized to 0.0..1.0 REAL via NORM_X, then mapped to engineering units via SCALE_X.',
-      blockType: 'SCL',
-      dslExample: `// Siemens S7-1200 Analog Normalization & Scaling
-#NormVal := NORM_X(MIN := 0, VALUE := #Raw_IW64, MAX := 27648);
-#EngineeringVal := SCALE_X(MIN := 0.0, VALUE := #NormVal, MAX := 10.0);`,
-      rulesList: [
-        'Raw S7-1200 analog input range is strictly 0..27648 for unipolar 0-10V / 4-20mA',
-        'NORM_X normalizes raw INT to 0.0..1.0 REAL',
-        'SCALE_X maps normalized REAL to user engineering units (Bar, °C, Liters)'
-      ],
-      contentJson: JSON.stringify({
-        title: 'MEB Analog NORM_X / SCALE_X Pipeline Standard'
-      }),
-      createdAt: 1700000000007
-    }
-  ]
-
   private constructor() {
     this.userStandards = this.loadStandards()
     this.rebuildVectorIndex()
@@ -436,15 +307,20 @@ NW 2 "Batch Complete Trip": SERIES( NO(C1.QU), COIL(Ejector_Piston) )`,
       const data = localStorage.getItem(RAG_STORAGE_KEY)
       if (data) {
         const parsed = JSON.parse(data)
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed
+        // Only the user's entries are stored. Older versions also stored the built-in rules, which hid every later change to them
+        if (Array.isArray(parsed)) {
+          return parsed.filter((item) => String(item?.id).startsWith(USER_ITEM_PREFIX))
         }
       }
     } catch {
       // fallback
     }
 
-    return [...RagKnowledgeEngine.CANONICAL_MEB_RULES]
+    return []
+  }
+
+  private allItems(): StandardLibraryItem[] {
+    return [...CIRCUIT_PATTERNS.map(patternToItem), ...this.userStandards]
   }
 
   private saveStandards(): void {
@@ -457,21 +333,24 @@ NW 2 "Batch Complete Trip": SERIES( NO(C1.QU), COIL(Ejector_Piston) )`,
   }
 
   private rebuildVectorIndex(): void {
-    const docs = this.userStandards.map((item) => ({
+    const docs = this.allItems().map((item) => ({
       id: item.id,
-      text: `${item.name} ${item.category} ${item.description} ${item.dslExample || ''} ${(item.rulesList || []).join(' ')}`
+      // A pattern's circuit text is the same words everywhere, so it would only blur what the pattern is about
+      text: item.pattern
+        ? `${item.name.replace(/_/g, ' ')} ${item.description} ${item.keywords}`
+        : `${item.name} ${item.category} ${item.description} ${item.dslExample || ''} ${(item.rulesList || []).join(' ')}`
     }))
     this.vectorizer.fit(docs)
   }
 
   public getStandards(): StandardLibraryItem[] {
-    return [...this.userStandards]
+    return this.allItems()
   }
 
   public saveStandardBlock(item: Omit<StandardLibraryItem, 'id' | 'createdAt'>): StandardLibraryItem {
     const newItem: StandardLibraryItem = {
       ...item,
-      id: `std_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: `${USER_ITEM_PREFIX}${Date.now()}_${Math.floor(Math.random() * 1000)}`,
       createdAt: Date.now()
     }
     this.userStandards.push(newItem)
@@ -484,14 +363,12 @@ NW 2 "Batch Complete Trip": SERIES( NO(C1.QU), COIL(Ejector_Piston) )`,
     this.saveStandards()
   }
 
-  /**
-   * Retrieves the Top K most relevant MEB & Standard Library rules via TF-IDF Cosine Similarity
-   */
+  /** The K most relevant patterns and notes. Nothing relevant means an empty list. */
   public retrieveTopKRules(queryText: string, k = 4): RetrievedRagRule[] {
     const scores = this.vectorizer.query(queryText)
     const ranked: RetrievedRagRule[] = []
 
-    for (const item of this.userStandards) {
+    for (const item of this.allItems()) {
       const score = scores.get(item.id) || 0
       ranked.push({
         item,
@@ -503,41 +380,47 @@ NW 2 "Batch Complete Trip": SERIES( NO(C1.QU), COIL(Ejector_Piston) )`,
     // Sort descending by cosine similarity score
     ranked.sort((a, b) => b.score - a.score)
 
-    // If query has matches with score > 0, take top k
-    const matching = ranked.filter((r) => r.score > 0.05)
-    const finalSelection = matching.length > 0 ? matching.slice(0, k) : ranked.slice(0, Math.min(k, 2))
-
-    return finalSelection.map((r, idx) => ({
+    return ranked.filter((r) => r.score > 0.05).slice(0, k).map((r, idx) => ({
       ...r,
       relevanceRank: idx + 1
     }))
   }
 
-  /**
-   * Formats retrieved rules into LLM prompt context injection block
-   */
+  /** One line per pattern, so the model knows what it can ask for with read_pattern. */
+  public patternCatalogForPrompt(): string {
+    return CIRCUIT_PATTERNS.map((p) => `- ${p.id}: ${p.summary}`).join('\n')
+  }
+
+  /** The matched patterns and notes for the prompt, saying how far each of them can be trusted. */
   public formatRetrievedRulesForPrompt(retrieved: RetrievedRagRule[]): string {
     if (!retrieved || retrieved.length === 0) return ''
 
-    const ruleBlocks = retrieved.map((r) => {
-      const item = r.item
-      const dsl = item.dslExample ? `\nDSL Reference:\n${item.dslExample}` : ''
-      const rules = item.rulesList && item.rulesList.length > 0
-        ? `\nKey Constraints:\n- ${item.rulesList.join('\n- ')}`
-        : ''
-      return `[RULE ${r.relevanceRank}: ${item.name} (Relevance Score: ${r.score.toFixed(2)})]
-Description: ${item.description}${rules}${dsl}`
+    const blocks = retrieved.map(({ item }) => {
+      if (item.pattern) {
+        return `PATTERN ${item.pattern.id}: ${item.pattern.summary}
+Circuit:
+${item.pattern.dsl}
+Timeline it passes:
+${JSON.stringify(item.pattern.test)}
+Pitfalls:
+- ${item.pattern.pitfalls.join('\n- ')}`
+      }
+      const example = item.dslExample ? `\nCircuit:\n${item.dslExample}` : ''
+      return `USER NOTE ${item.name}:\n${userText(item).slice(0, MAX_USER_TEXT_IN_PROMPT)}${example}`
     })
 
-    return `\n[RETRIEVED MEB RAG RULES & DSL EXAMPLES]
-The following verified MEB Automation Curriculum rules and DSL circuit patterns were semantically retrieved for this request. Strictly follow these topologies:
+    return `
+[RELEVANT PATTERNS AND NOTES]
+A PATTERN is written for this IDE and passes its timeline on its simulator. It has not been run on a real CPU. Adapt names, addresses and times to the request, and write the test for what the user asked.
+A USER NOTE is the user's own text and has not been tested. Follow it for how this plant works, but it does not excuse a failing test.
 
-${ruleBlocks.join('\n\n')}
-[/RETRIEVED MEB RAG RULES & DSL EXAMPLES]\n`
+${blocks.join('\n\n')}
+[/RELEVANT PATTERNS AND NOTES]
+`
   }
 
   /**
-   * Layer 1: Build dynamic context prompt from active project state + Top matching RAG rules
+   * The project state, the CPU's memory map and the matching patterns as prompt text
    */
   public buildDynamicContextPrompt(query?: string): string {
     const proj = useProjectStore.getState()
@@ -552,6 +435,10 @@ ${ruleBlocks.join('\n\n')}
     const sclBlocks = blocks.sclBlocks.map((s) => s.name)
 
     const ob30 = hw.config.organizationBlocks.find((o) => o.blockNumber === 30)
+    const { clockMemory, systemMemory, digitalIO, analogIO } = hw.config
+    const channelRange = (channels: Array<{ address: string }>): string =>
+      channels.length > 0 ? `${channels[0].address}..${channels[channels.length - 1].address}` : 'none'
+    const m = systemMemory.byteAddress
 
     let ragSection = ''
     if (query) {
@@ -561,24 +448,22 @@ ${ruleBlocks.join('\n\n')}
 
     return `[S7_PROJECT_CONTEXT]
 Target CPU: ${proj.metadata?.targetCpu || 'SIMATIC S7-1200 (CPU 1214C DC/DC/DC V4.6)'}
-Clock Memory: %MB0 (8 Square waves 0.1Hz..10Hz)
-System Memory: %MB1 (FirstScan %M1.0, DiagStatus %M1.1, AlwaysTrue %M1.2, AlwaysFalse %M1.3)
+Clock Memory: ${clockMemory.enabled ? `%MB${clockMemory.byteAddress} (bit 0 to 7: 10, 5, 2.5, 2, 1.25, 1, 0.625, 0.5 Hz)` : 'off'}
+System Memory: ${systemMemory.enabled ? `%MB${m} (FirstScan %M${m}.0, DiagStatus %M${m}.1, AlwaysTrue %M${m}.2, AlwaysFalse %M${m}.3)` : 'off'}
 OB30 Cyclic Interrupt: ${ob30?.cycleTimeMs || 100}ms
-Onboard I/O: DI 14x24VDC (%IB0..%IB1), DQ 10x24VDC (%QB0..%QB1), AI 2x10V (%IW64..%IW66)
+Onboard I/O: DI ${channelRange(digitalIO.diChannels)}, DQ ${channelRange(digitalIO.dqChannels)}, AI ${channelRange(analogIO.aiChannels)}
 Declared Tags: [${allTags.slice(0, 15).join(', ')}${allTags.length > 15 ? '...' : ''}]
 Declared UDTs: [${udts.join(', ')}]
 Declared DBs: [${dataBlocks.join(', ')}]
 LAD Blocks: [${ladBlocks.join(', ')}]
 SCL Blocks: [${sclBlocks.join(', ')}]
-Siemens S7 Architecture & MEB Curriculum Rules:
-1. STRICT BAN ON DUMMY %M TIMER/COUNTER HELPER COILS: Never create or attach dummy intermediate marker coils (e.g. %M2.0, Aux_TimerDone) directly after a timer or counter box. In authentic Siemens S7-1200 / MEB programming, IEC Timers and Counters expose their own direct instance bits (e.g., T1.Q, T1.ET, C1.QU, C1.CV). Downstream networks or interlock rungs MUST read T1.Q directly.
-2. STANDARD MEB SEAL-IN TOPOLOGY: Motor start/stop circuits MUST follow the canonical 3-wire latch.
-3. PRESET TIME SYNTAX: Preset time PT must use authentic IEC format like T#10s, T#500ms, T#1m.
-4. ZERO REDUNDANT %M TAGS: Do not add useless %M helper tags into tag tables when timers are used.
-5. All S7 blocks MUST use { S7_Optimized_Access := 'TRUE' } unless explicitly declared standard.
-6. Analog scaling must use NORM_X (0..27648 to 0.0..1.0) and SCALE_X (0.0..1.0 to Eng Units).
-7. Timers/Counters require IEC instance DBs (TON, TOF, TP, CTU, CTD).
-8. Edge triggers require dedicated M or DB bit flags (P_TRIG, N_TRIG).
+S7 rules:
+1. Read IEC timers and counters through their instance bits (T1.Q, T1.ET, C1.QU, C1.CV). A helper coil that only copies one adds nothing.
+2. Preset times use the IEC format: T#10s, T#500ms, T#1m.
+3. All S7 blocks use { S7_Optimized_Access := 'TRUE' } unless declared standard.
+4. Analog scaling uses NORM_X (0..27648 to 0.0..1.0) and SCALE_X (0.0..1.0 to engineering units).
+5. Timers and counters need IEC instance DBs (TON, TOF, TP, CTU, CTD).
+6. Edge triggers need their own M or DB bit (P_TRIG, N_TRIG).
 ${ragSection}
 [/S7_PROJECT_CONTEXT]`
   }

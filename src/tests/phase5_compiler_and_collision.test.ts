@@ -339,7 +339,7 @@ function testCompilerEngine() {
   assert.strictEqual(cleanResult.errorsCount, 0, 'Zero errors in clean project')
   assert.strictEqual(cleanResult.warningsCount, 0, 'Zero warnings in clean project')
   assert.ok(cleanResult.bannerMessage.includes('COMPILE SUCCESS — 0 Error(s), 0 Warning(s)'), 'Banner displays COMPILE SUCCESS')
-  testPass('CompileEngine verifies valid MEB project with 0 errors and generates timestamped success banner')
+  testPass('CompileEngine verifies valid project with 0 errors and generates timestamped success banner')
 }
 
 async function runAll() {

@@ -22,6 +22,7 @@ import {
 import { UdtDefinition, UdtMember } from '@shared/types/types'
 import { TagDefinition } from '@shared/types/tags'
 import { effectiveInterface, emptyInterface, parseSourceBlock } from '@shared/scl/sourceBlock'
+import { CIRCUIT_PATTERNS, findPattern } from './PatternLibrary'
 
 export interface AgentToolCall {
   tool: string
@@ -161,8 +162,16 @@ export class PlcAgentTools {
   public describeProjectForModel(): string {
     const blocks = useBlockStore.getState()
     const ob1 = blocks.ladBlocks.find((b) => b.blockType === 'OB' && b.blockNumber === 1)
+    const { digitalIO, analogIO, clockMemory, systemMemory } = useHardwareStore.getState().config
+    const range = (channels: Array<{ address: string }>): string =>
+      channels.length > 0 ? `${channels[0].address}..${channels[channels.length - 1].address}` : 'none'
     return JSON.stringify({
       targetCpu: useProjectStore.getState().metadata?.targetCpu,
+      inputs: range(digitalIO.diChannels),
+      outputs: range(digitalIO.dqChannels),
+      analogInputs: range(analogIO.aiChannels),
+      clockMemory: clockMemory.enabled ? `%MB${clockMemory.byteAddress}` : 'off',
+      systemMemory: systemMemory.enabled ? `%MB${systemMemory.byteAddress}` : 'off',
       tags: useTagStore.getState().tagTables.flatMap((t) => t.tags.map((x) => `${x.name} ${x.address} ${x.dataType}`)),
       udts: blocks.udts.map((u) => u.name),
       dataBlocks: blocks.dataBlocks.map((d) => `${d.name} (DB${d.blockNumber})`),
@@ -364,6 +373,9 @@ export class PlcAgentTools {
       case 'read_block':
         return this.toolReadBlock(call.params)
 
+      case 'read_pattern':
+        return this.toolReadPattern(call.params)
+
       case 'manage_plc_tags':
         return this.toolManagePlcTags(call.params, mode, staged)
 
@@ -432,6 +444,16 @@ export class PlcAgentTools {
       return { tool: 'read_block', success: false, message: `No block or UDT named '${params.name}'.` }
     }
     return { tool: 'read_block', success: true, message: `Read ${params.name}.`, data: found }
+  }
+
+  // Tool: read_pattern
+  private toolReadPattern(params: Record<string, unknown>): AgentToolResult {
+    const pattern = findPattern(String(params.id || ''))
+    if (!pattern) {
+      const ids = CIRCUIT_PATTERNS.map((p) => p.id).join(', ')
+      return { tool: 'read_pattern', success: false, message: `No pattern '${params.id}'. These exist: ${ids}.` }
+    }
+    return { tool: 'read_pattern', success: true, message: `Read pattern ${pattern.id}.`, data: pattern }
   }
 
   // Tool 2: manage_plc_tags

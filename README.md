@@ -42,7 +42,9 @@ Bu komut, TIA kurulu bir bilgisayara taşınacak `tia-package` klasörünü haz�
 
 Ayarlardan bir Gemini anahtarı girin. Anahtar işletim sisteminin şifreli deposunda saklanır.
 
-Ajan projenin mevcut halini görür. FB, FC, UDT, global DB ve etiket oluşturur, OB1'e ladder ekler ve blokları okuyabilir. Her yanıt bir bütün olarak uygulanır ve derlenir. Yeni bir hata çıkarsa yanıt geri alınır, hata modele gönderilir ve en fazla 6 istekte yeniden denenir. Yine çözülmezse proje değişmez ve hata gösterilir.
+Ajan projenin mevcut halini görür. FB, FC, UDT, global DB ve etiket oluşturur, OB1'e ladder ekler ve blokları okuyabilir. Her yanıt bir bütün olarak uygulanır, derlenir ve simülatörde çalıştırılır. Model her ladder devresiyle birlikte bir zaman çizelgesi gönderir: hangi anda hangi giriş değişir, hangi çıkış ne olmalı. Yeni bir hata çıkarsa veya devre çizelgeye uymazsa yanıt geri alınır, hata ve programın gerçekte yaptıkları modele gönderilir ve en fazla 6 istekte yeniden denenir. Yine çözülmezse proje değişmez ve hata gösterilir.
+
+Ajan 19 hazır devre kalıbını okuyabilir (mühürleme, yıldız-üçgen, timer zinciri, sayıcılar, adım dizisi...). Kalıplar bu proje için yazıldı ve `npm test` her birini simülatörde çalıştırır. Bir ders kitabından veya standarttan alınmadılar ve gerçek bir CPU'da denenmediler.
 
 Donanım ayarlarını, simülasyon betiklerini değiştiremez ve etiket silemez.
 
@@ -75,11 +77,12 @@ Gerçek CPU'dan farklı veya doğrulanmamış davranışlar:
 
 - API anahtarı veya Ollama sunucusu olmadan çalışmaz. Yerleşik hazır yanıtlar yoktur
 - Gemini etiketleri, blok adlarını ve okuduğu blokların kaynağını Google'a gönderir. Gizli bir projede kullanmadan önce Google'ın koşullarını okuyun
-- Yalnızca Gemini yolu araç döngüsü kullanır. OpenAI ve Ollama yalnızca OB1'e ladder ekler, derleyici kontrolünden geçmez
+- Yalnızca Gemini yolu araç döngüsü kullanır. OpenAI ve Ollama yalnızca OB1'e ladder ekler, derleyici kontrolünden ve simülasyon testinden geçmez
 - Ladder yalnızca OB1'e yazılır. Ajan bir FB veya FC üretebilir, ama onu ladder'dan çağıramaz ve yeni OB ekleyemez
-- Derleyiciden geçmek, mantığın doğru olduğunu göstermez. Model hata yapabilir, programı simülatörde sınayın
-- Modelin "MEB standardına uygun" demesi doğrulanmış bir iddia değildir
-- Diff-View'da derleyici kontrolü onaydan sonra çalışır ve hata varsa değişiklik geri alınmaz, Undo Turn ile alınır
+- Simülasyon testini geçmek, devrenin isteğinizi yaptığını kanıtlamaz. Testi de model yazar ve eksik yazabilir. Çizelgeyi ve programı kendiniz sınayın
+- Simülasyon testi yalnızca OB1 ve başlangıç OB'lerini çalıştırır, çevrimsel kesme OB'lerini (OB30..OB38) çalıştırmaz. FB ve FC üreten araç çağrılarında sınanan da sadece ladder devresidir
+- Model test göndermezse bir kez istenir, yine göndermezse devre "doğrulanmadı" notuyla kabul edilir
+- Diff-View'da simülasyon testi onaydan önce çalışır, ama yanıtta yeni blok veya etiket oluşturan araç çağrıları da varsa çalışamaz ve bu yanıtta belirtilir. Derleyici kontrolü onaydan sonra çalışır ve hata varsa değişiklik geri alınmaz, Undo Turn ile alınır
 - Undo Turn, ajanın diske yazdığı yeni dosyaları silmez. Proje yeniden açılınca bu bloklar geri gelir
 
 ## Lisans

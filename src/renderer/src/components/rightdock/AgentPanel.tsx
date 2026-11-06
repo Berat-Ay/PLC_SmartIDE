@@ -332,7 +332,7 @@ export const AgentPanel: React.FC = () => {
             data-testid="btn-open-book-trainer"
             onClick={() => setBookTrainerOpen(true)}
             className="flex items-center gap-1 text-industrial-400 hover:text-amber-400 p-1 hover:bg-[#1f2228] transition-colors rounded-none"
-            title="MEB Automation Rulebook & Curriculum Trainer"
+            title="Circuit patterns and your notes"
           >
             <BookOpen className="w-3.5 h-3.5 text-amber-400" />
             <span className="under-600:hidden font-mono text-[10px] text-amber-300">Rules</span>

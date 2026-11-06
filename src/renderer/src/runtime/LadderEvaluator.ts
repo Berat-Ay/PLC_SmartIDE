@@ -92,6 +92,18 @@ export class LadderEvaluator {
     this.edgeStates.clear()
   }
 
+  /** Keeps the current state aside and returns how to bring it back, for a second CPU run in between. */
+  public static saveInternalStates(): () => void {
+    const fallbackMemory = this.fallbackMemory
+    const edgeStates = this.edgeStates
+    this.fallbackMemory = new S7BinaryMemory()
+    this.edgeStates = new Map()
+    return () => {
+      this.fallbackMemory = fallbackMemory
+      this.edgeStates = edgeStates
+    }
+  }
+
   /** Reads an operand that may be a literal, a symbol or a small expression. */
   private static readOperand(op: string | undefined, context: SclExecutionContext): unknown {
     const trimmed = (op || '').trim()
@@ -178,7 +190,9 @@ export class LadderEvaluator {
         const c = node as LadderContactNode
         const cleanOp = (c.operand || '').replace(/"/g, '').trim()
         const operandQuoted = (c.operand || '').trim().startsWith('"')
-        let rawVal: unknown = c.address ? context.getVar(c.address) : undefined
+        // The tag table decides where a symbol lives. The address stored on the node can be out of date
+        const isSymbol = !!context.hasSymbol?.(cleanOp, operandQuoted)
+        let rawVal: unknown = c.address && !isSymbol ? context.getVar(c.address) : undefined
         if (rawVal === undefined) rawVal = context.getVar(cleanOp, operandQuoted)
         const isTrue = !!rawVal
         let isConducting = false
@@ -219,7 +233,12 @@ export class LadderEvaluator {
         const c = node as LadderCoilNode
         const operandQuoted = (c.operand || '').trim().startsWith('"')
         const cleanOp = (c.operand || '').replace(/"/g, '').trim()
+        const isSymbol = !!context.hasSymbol?.(cleanOp, operandQuoted)
         const write = (value: boolean): void => {
+          if (isSymbol) {
+            context.setVar(cleanOp, value, operandQuoted)
+            return
+          }
           if (c.address) context.setVar(c.address, value)
           // With real memory the address and the symbol are one location
           if (!c.address || (!memory && cleanOp && c.address !== cleanOp)) context.setVar(cleanOp, value, operandQuoted)

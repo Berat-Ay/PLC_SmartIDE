@@ -45,7 +45,7 @@ interface UIStoreState {
   // Add Block Modal
   isAddBlockModalOpen: boolean
 
-  // MEB Book / Curriculum RAG Trainer Modal
+  // Circuit patterns and notes modal
   isBookTrainerOpen: boolean
 
   // Black-Box Flight Recorder / Telemetry Log Modal

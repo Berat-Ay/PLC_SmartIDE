@@ -325,3 +325,27 @@ export function runProgramChecks(input: ProgramCheckInput): ProgramFinding[] {
   checker.checkLadBlocks()
   return checker.findings
 }
+
+/**
+ * I/O bits with no channel on the configured CPU. TIA Portal accepts them because they are inside the
+ * process image, but nothing is wired there: an output never reaches a lamp and an input never changes.
+ */
+export function findIoBitsWithoutChannel(tagTables: TagTable[], cpuConfig?: CpuConfig): ProgramFinding[] {
+  const inputs = (cpuConfig?.digitalIO?.diChannels || []).map((c) => c.address.toUpperCase())
+  const outputs = (cpuConfig?.digitalIO?.dqChannels || []).map((c) => c.address.toUpperCase())
+  const findings: ProgramFinding[] = []
+  for (const table of tagTables) {
+    for (const tag of table.tags || []) {
+      const parsed = parseS7Address(tag.address || '')
+      if (!parsed.isValid || parsed.sizeCategory !== 'BIT') continue
+      const channels = parsed.area === 'I' ? inputs : parsed.area === 'Q' ? outputs : []
+      if (channels.length === 0 || channels.includes(tag.address.toUpperCase())) continue
+      findings.push({
+        iecCode: 'S7-IO-009',
+        tagName: tag.name,
+        message: `[S7-IO-009] Tag '${tag.name}' uses ${tag.address}, but this CPU has no channel there (${channels[0]}..${channels[channels.length - 1]}).`
+      })
+    }
+  }
+  return findings
+}

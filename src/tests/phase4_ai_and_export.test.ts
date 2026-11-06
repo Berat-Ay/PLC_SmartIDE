@@ -343,7 +343,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
   const dslResult = LadderDslCompiler.compileLadderDslToAst(dslInput)
   const res = router.applyCircuitPayload(
     {
-      explanation: '10 Saniye Sonra Otomatik Duran Mühürlemeli Motor Devresi (MEB Standartı)',
+      explanation: '10 Saniye Sonra Otomatik Duran Mühürlemeli Motor Devresi',
       operationMode: 'replace_ob1_networks',
       tagsToUpsert: dslResult.tags as any,
       networks: dslResult.networks
@@ -354,7 +354,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
   assert.ok(res.summaryText.includes('10 Saniye Sonra Otomatik Duran Mühürlemeli Motor Devresi'), 'Response includes timer circuit summary')
   testPass('Direct natural-language prompt synthesized 10s timer ladder logic')
 
-  // Check tags in TagStore (Strict MEB Standard: 0 %M dummy helper tags!)
+  // Check tags in TagStore (0 %M helper tags that only copy a timer)
   const tagStore = useTagStore.getState()
   const allTags = tagStore.tagTables.flatMap((t) => t.tags)
   const startBtn = allTags.find((t) => t.name === 'Start_Btn')
@@ -365,8 +365,8 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
   assert.ok(startBtn && startBtn.address === '%I0.0', 'Start_Btn at %I0.0 created')
   assert.ok(stopBtn && stopBtn.address === '%I0.1', 'Stop_Btn at %I0.1 created')
   assert.ok(motorRun && motorRun.address === '%Q0.0', 'Motor_Run at %Q0.0 created')
-  assert.ok(!dummyTimerTag, 'Zero dummy %M timer helper tags in TagStore (MEB Rule 1)')
-  testPass('Canonical MEB tags (%I0.0, %I0.1, %Q0.0) registered with zero dummy %M flags')
+  assert.ok(!dummyTimerTag, 'Zero dummy %M timer helper tags in TagStore')
+  testPass('Tags (%I0.0, %I0.1, %Q0.0) registered with zero dummy %M flags')
 
   // Check OB1_Main networks in BlockStore
   const ladBlocks = useBlockStore.getState().ladBlocks
@@ -380,7 +380,7 @@ NW 2 "10-Second Timer (TON T1)": SERIES( NO(Motor_Run), TON(T1, PT=T#10s) )
   assert.strictEqual((net1.nodes[2] as any).operand, 'T1.Q', 'Network 1 uses native T1.Q trip contact')
   assert.strictEqual(net2.nodes[1].kind, 'timer', 'Network 2 contains TON timer')
   assert.strictEqual(net2.nodes.length, 2, 'Network 2 has zero trailing dummy coils (terminates at terminal bar)')
-  testPass('OB1_Main contains valid MEB 2-network Ladder AST with native T1.Q addressing')
+  testPass('OB1_Main contains valid 2-network Ladder AST with native T1.Q addressing')
 
   // Test live simulation execution
   const engine = new PlcRuntimeEngine()
