@@ -150,9 +150,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
         const pending = late[i]
         pending.scans++
         if (matches(read(pending.name), pending.value)) {
-          failures[pending.failure] +=
-            ` It becomes ${formatValue(pending.value)} ${pending.scans} scan(s) later, at ${now - startedAt} ms.` +
-            ' The program reacts in the scans after an input changes. If that delay is right, check this value later in the test and keep the circuit.'
+          failures[pending.failure] += ` It becomes ${formatValue(pending.value)} ${pending.scans} scan(s) later, at ${now - startedAt} ms.`
           late.splice(i, 1)
         } else if (--pending.scansLeft === 0) {
           late.splice(i, 1)

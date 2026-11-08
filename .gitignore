@@ -31,3 +31,7 @@ tools/tia-bridge/TiaBridge.exe
 
 # Screenshots shared while reviewing the GUI
 ScreenShots/
+
+# Benchmark results and diagnostic dumps: raw model output, kept local
+bench-results/
+dumps/

@@ -1,0 +1,16 @@
+Tek yönlü bir yol için trafik lambası programı yaz. CPU: S7-1214C.
+
+Giriş:
+• Sistem açık anahtarı: I0.0 (1 = açık)
+
+Çıkışlar:
+• Kırmızı lamba: Q0.0
+• Sarı lamba: Q0.1
+• Yeşil lamba: Q0.2
+
+İstenen davranış:
+1. Sistem açılınca kırmızı yanar.
+2. Döngü şu sırayla gider: kırmızı 6 saniye → kırmızı ve sarı birlikte 2 saniye → yalnız yeşil 6 saniye → yalnız sarı 3 saniye → tekrar kırmızı.
+3. Döngü sistem açık kaldığı sürece sonsuza kadar tekrar eder.
+4. Sistem kapatılınca bütün lambalar hemen söner.
+5. Sistem yeniden açılınca döngü kaldığı yerden değil, en baştan (kırmızıdan) başlar.

@@ -4,6 +4,7 @@
  * block may take up to 9 s.
  */
 import { PathStep, Scenario } from './ScenarioAcceptance'
+import { TEXTBOOK_SCENARIOS } from './textbookScenarios'
 
 // ---------------- Robot welding cell with two robots ----------------
 const RC = {
@@ -285,6 +286,7 @@ const robotDoneStaysOnPath: PathStep[] = [
 export const PICK_AND_PLACE: Scenario = {
   id: 'pick-place',
   title: 'Hücre içi kartezyen taşıma ekseni (pick & place)',
+  notInBenchmark: "MC_ hareket blokları bu IDE'de yok: ölçülen, modelin TON ile yaptığı taklit olur",
   checks: [
     { id: 'power', kind: 'spec', title: 'NW1: E-stop sağlam ve sürücü hazırken Eksen_Enerjili (M10.0)' },
     { id: 'home', kind: 'spec', title: 'NW2: Start ile M20.0; home hareketi süre alır, bitince M20.1 ve M20.0 sıfır' },
@@ -310,4 +312,4 @@ export const PICK_AND_PLACE: Scenario = {
   ]
 }
 
-export const SCENARIOS: Scenario[] = [ROBOT_CELL, PICK_AND_PLACE]
+export const SCENARIOS: Scenario[] = [ROBOT_CELL, PICK_AND_PLACE, ...TEXTBOOK_SCENARIOS]

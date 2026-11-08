@@ -1,0 +1,18 @@
+Bir asenkron motor için yıldız-üçgen yol verme programı yaz. CPU: S7-1214C.
+
+Girişler:
+• Start butonu: I0.0 (normalde açık, basınca 1)
+• Stop butonu: I0.1 (normalde kapalı kontak: basılı değilken 1, basınca 0)
+• Termik röle kontağı: I0.2 (normalde kapalı: normalde 1, termik atınca 0)
+
+Çıkışlar:
+• Ana kontaktör K1: Q0.0
+• Yıldız kontaktörü K2: Q0.1
+• Üçgen kontaktörü K3: Q0.2
+
+İstenen davranış:
+1. Start'a basılınca K1 ve K2 (yıldız) birlikte çeker. Start bırakılınca da çalışma devam eder.
+2. 5 saniye sonra K2 bırakır. K2 bıraktıktan 0,5 saniye sonra K3 (üçgen) çeker ve motor K1 + K3 ile çalışmaya devam eder.
+3. K2 ve K3 hiçbir an birlikte çekili olmamalıdır (elektriksel kilitleme).
+4. Stop'a basılınca ya da termik atınca bütün kontaktörler hemen bırakır. Yeniden Start'a basılınca yol verme yıldızdan başlar.
+5. Motor çalışırken Start'a tekrar basılması hiçbir şeyi değiştirmez.

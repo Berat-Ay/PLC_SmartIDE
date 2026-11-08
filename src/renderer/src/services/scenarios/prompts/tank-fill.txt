@@ -1,0 +1,20 @@
+Bir su deposunun dolum kontrolü için ladder programı yaz. CPU: S7-1214C.
+
+Girişler:
+• Alt seviye sensörü: I0.0 (su alt seviyenin üstündeyse 1)
+• Üst seviye sensörü: I0.1 (su üst seviyeye ulaştıysa 1)
+• Otomatik mod anahtarı: I0.2 (1 = otomatik)
+• Alarm reset butonu: I0.3 (normalde açık, basınca 1)
+
+Çıkışlar:
+• Dolum pompası: Q0.0
+• Dolum hatası alarm lambası: Q0.1
+
+İstenen davranış:
+1. Otomatik moddayken su alt seviyenin altına düşerse (I0.0 = 0) pompa çalışır.
+2. Pompa, üst seviyeye ulaşılana kadar (I0.1 = 1) çalışmaya devam eder. Su alt seviyenin üstüne çıktığında durmaz.
+3. Üst seviyeye ulaşılınca pompa durur ve su tekrar alt seviyenin altına düşene kadar çalışmaz.
+4. Pompa çalışmaya başladıktan sonra 10 saniye içinde alt seviye sensörü 1 olmazsa (depoya su gelmiyor demektir) pompa durur ve alarm lambası yanar.
+5. Alarm, Alarm reset'e basılana kadar yanık kalır ve bu sürede pompa çalışmaz. Reset'ten sonra şartlar uygunsa pompa yeniden çalışabilir.
+6. Otomatik mod kapatılınca pompa hemen durur.
+7. Üst seviye sensörü 1 iken pompa hiçbir koşulda çalışmaz (sensör arızasında taşmayı önlemek için).

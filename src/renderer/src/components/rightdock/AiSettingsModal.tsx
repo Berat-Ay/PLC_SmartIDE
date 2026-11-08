@@ -406,6 +406,22 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
             <span className="ml-2 text-industrial-500 text-[10px]">Long ladder answers can take minutes</span>
           </div>
 
+          {/* Test first: the user approves the simulation test before the circuit is written */}
+          <div>
+            <label className="flex items-center gap-2 text-industrial-300 font-semibold cursor-pointer">
+              <input
+                data-testid="ai-test-first-toggle"
+                type="checkbox"
+                checked={!!config.testFirst}
+                onChange={(e) => setConfig({ ...config, testFirst: e.target.checked })}
+              />
+              <span>Test first</span>
+            </label>
+            <p className="mt-1 text-industrial-500 text-[10px]">
+              The agent first writes the simulation test from your request and shows it to you. The circuit is written only after you approve it, and the agent cannot change the approved test. Not used with Ollama.
+            </p>
+          </div>
+
           {/* Language Preference */}
           <div>
             <label className="block text-industrial-300 font-semibold mb-1.5 flex items-center gap-1.5">

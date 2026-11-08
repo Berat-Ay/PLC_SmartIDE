@@ -18,6 +18,7 @@ import { LadderDslCompiler, DslCompilerOptions } from '../compiler/LadderDslComp
 import { RagKnowledgeEngine } from './RagKnowledgeEngine'
 import { aiHttp } from './aiHttp'
 import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
+import { approvedTagsMoved, approvedTestRequest, formatTestForUser, ProposedTag, TEST_FIRST_REQUEST, validateTestProposal } from './TestFirst'
 import {
   LadderNode,
   LadderSeriesNode,
@@ -92,6 +93,8 @@ export interface AiConfig {
   openaiModels: DiscoveredModel[]
   /** How long one model request may take. Long ladder answers need minutes */
   requestTimeoutSec: number
+  /** The model writes the simulation test first; the user approves it before the circuit is written */
+  testFirst: boolean
 }
 
 const MAX_AGENT_ROUNDS = 6
@@ -121,6 +124,13 @@ interface GeminiContent {
   role: 'user' | 'model'
   parts: Array<{ text: string }>
 }
+
+/** Test first: write the test (or correct it), or write the circuit to an approved test */
+type TurnPlan =
+  | { stage: 'test'; correctionOf?: { contents: GeminiContent[]; correction: string } }
+  | { stage: 'circuit'; test: BehaviorTest; tags: ProposedTag[] }
+
+const MAX_TEST_ROUNDS = 3
 
 interface AgentModelReply {
   behaviorTest?: BehaviorTest
@@ -257,6 +267,8 @@ export interface AgentExecutionResponse {
   rawJson?: string
   isError?: boolean
   errorDetails?: string
+  /** Test first: a test that waits for the user's approval before the circuit is written */
+  pendingTest?: { test: BehaviorTest; tags: ProposedTag[] }
 }
 
 const STORAGE_KEY = 'antigravity_ai_config_v1'
@@ -307,7 +319,8 @@ export const defaultAiConfig: AiConfig = {
   language: 'auto',
   openaiModel: '',
   openaiModels: [],
-  requestTimeoutSec: 180
+  requestTimeoutSec: 180,
+  testFirst: false
 }
 
 // Newer versions first. At one version: flash, then pro (slow), then flash-lite (weakest); a release before its preview
@@ -624,6 +637,10 @@ export class AiModelRouter {
   private modelTimeoutMs = 180000
   // Tags the last applied circuit could not keep at the address the model gave
   private lastAddressMoves: AddressMove[] = []
+  /** Test first: the test the user has not approved yet, with the conversation that made it */
+  private pendingTest?: { prompt: string; tier: AiTier; test: BehaviorTest; tags: ProposedTag[]; contents: GeminiContent[] }
+  /** What the next agent turn does. Set by executePrompt and approvePendingTest, read once by runAgentTurn */
+  private turnPlan?: TurnPlan
   // Models that answer HTTP 400 to thinkingConfig
   private noThinkingConfig = new Set<string>()
   private config: AiConfig
@@ -1456,6 +1473,47 @@ export class AiModelRouter {
     mode: 'auto-apply' | 'diff-view',
     signal?: AbortSignal
   ): Promise<AgentExecutionResponse> {
+    // Ollama does not run the agent loop, so it has no test step
+    if (!this.config.testFirst || this.config.provider === 'ollama') {
+      this.pendingTest = undefined
+      return this.runPrompt(prompt, tier, mode, signal)
+    }
+    // While a test waits for approval, a message from the user is a correction of that test
+    const pending = this.pendingTest
+    if (pending) {
+      return this.runPrompt(pending.prompt, pending.tier, mode, signal, {
+        stage: 'test',
+        correctionOf: { contents: pending.contents, correction: sanitizeUserPrompt(prompt).trim() }
+      })
+    }
+    return this.runPrompt(prompt, tier, mode, signal, { stage: 'test' })
+  }
+
+  /** Test first: a test waits for the user's approval */
+  public hasPendingTest(): boolean {
+    return !!this.pendingTest
+  }
+
+  public cancelPendingTest(): void {
+    this.pendingTest = undefined
+  }
+
+  /** Test first: the user approved the test, so the circuit is written to it */
+  public async approvePendingTest(mode: 'auto-apply' | 'diff-view', signal?: AbortSignal): Promise<AgentExecutionResponse> {
+    const pending = this.pendingTest
+    if (!pending) throw new Error('No test is waiting for approval.')
+    this.pendingTest = undefined
+    return this.runPrompt(pending.prompt, pending.tier, mode, signal, { stage: 'circuit', test: pending.test, tags: pending.tags })
+  }
+
+  private async runPrompt(
+    prompt: string,
+    tier: AiTier,
+    mode: 'auto-apply' | 'diff-view',
+    signal?: AbortSignal,
+    plan?: TurnPlan
+  ): Promise<AgentExecutionResponse> {
+    this.turnPlan = plan
     const sanitized = sanitizeUserPrompt(prompt)
     const trimmed = sanitized.trim()
     const isTurkish = this.detectTurkish(trimmed)
@@ -1957,7 +2015,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
   }
 
   /** Reads one model reply. Problems go back to the model instead of reaching the project. */
-  private interpretModelReply(rawText: string): AgentModelReply {
+  private interpretModelReply(rawText: string, ignoreVerification = false): AgentModelReply {
     const reply: AgentModelReply = { explanation: '', toolCalls: [], problems: [] }
     let dslErrors: string[] = []
     const fromDsl = (text: string, operationMode = this.defaultCircuitMode()): AiCircuitSynthesisPayload | undefined => {
@@ -2019,7 +2077,8 @@ If the prompt is purely informational without ladder logic, provide an explanati
           networks: normalizeAiGeneratedNetworks(parsed.networks)
         }
       }
-      if (parsed.verification !== undefined) {
+      // With an approved test the model's own test is not read: it could not change anything
+      if (parsed.verification !== undefined && !ignoreVerification) {
         const verification = parseBehaviorTest(parsed.verification)
         reply.behaviorTest = verification.test
         reply.problems.push(...verification.problems)
@@ -2064,7 +2123,9 @@ If the prompt is purely informational without ladder logic, provide an explanati
     test: BehaviorTest | undefined,
     askedOnce: Set<string>,
     isTurkish: boolean,
-    circuit?: AiCircuitSynthesisPayload
+    circuit?: AiCircuitSynthesisPayload,
+    /** The user approved the test, so how much it checks is not the model's to answer for */
+    approvedTest = false
   ): { problems: string[]; note: string } {
     const askOnce = (kind: string, problems: string[], note: string): { problems: string[]; note: string } => {
       if (askedOnce.has(kind)) return { problems: [], note }
@@ -2108,7 +2169,17 @@ If the prompt is purely informational without ladder logic, provide an explanati
       const deadReads = unwritten.length
         ? [`Your circuit reads ${unwritten.join(', ')}, but nothing in OB1 writes it, so the rungs that need it never work. P_TRIG and N_TRIG take the signal itself: P_TRIG(Signal).`]
         : []
-      return { problems: [`The simulation test failed:`, ...result.failures, ...result.pulses, ...deadReads, ...whatHappened], note: '' }
+      // A value that arrives a scan or two after the check is a matter of timing, not of a wrong circuit
+      const late = result.failures.some((f) => f.includes('scan(s) later'))
+      const lateAdvice = !late
+        ? []
+        : approvedTest
+          ? ['Some values come one or a few scans later than the approved test expects. Make the circuit set them sooner: a value written in a network below the one that needs it, or through an extra step bit, lags a scan.']
+          : ['Some values come one or a few scans late. If that delay is right, check this value later in the test and keep the circuit.']
+      return {
+        problems: [`The simulation test failed:`, ...result.failures, ...lateAdvice, ...result.pulses, ...deadReads, ...whatHappened],
+        note: ''
+      }
     }
     if (unwritten.length > 0 && !askedOnce.has('unwritten read')) {
       askedOnce.add('unwritten read')
@@ -2142,7 +2213,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
     const thinTest =
       untestedOutput || (writtenNames.size >= 4 && (writtenNames.size - untested.length) * 3 < writtenNames.size)
     if (!thinTest) untested.length = 0
-    if (untested.length > 0 && !askedOnce.has('untested writes')) {
+    if (untested.length > 0 && !approvedTest && !askedOnce.has('untested writes')) {
       askedOnce.add('untested writes')
       return {
         problems: [
@@ -2164,8 +2235,8 @@ If the prompt is purely informational without ladder logic, provide an explanati
       : ''
     const passed =
       (isTurkish
-        ? `**Simülasyon testi:** ${result.checks} kontrolün hepsi geçti.`
-        : `**Simulation test:** all ${result.checks} checks passed.`) +
+        ? `**Simülasyon testi${approvedTest ? ' (onaylı)' : ''}:** ${result.checks} kontrolün hepsi geçti.`
+        : `**Simulation test${approvedTest ? ' (approved)' : ''}:** all ${result.checks} checks passed.`) +
       untestedNote +
       unwrittenNote
     if (result.pulses.length > 0) {
@@ -2252,6 +2323,109 @@ If the prompt is purely informational without ladder logic, provide an explanati
   }
 
   /**
+   * Test first, step one: the model writes the test from the request (or corrects it after the user's word),
+   * and the user is asked to approve it. Nothing in the project changes here.
+   */
+  private async runTestStage(
+    prompt: string,
+    tier: AiTier,
+    mode: 'auto-apply' | 'diff-view',
+    isTurkish: boolean,
+    ragRulesConsulted: string[],
+    requestModel: (contents: GeminiContent[]) => Promise<string>,
+    plan: Extract<TurnPlan, { stage: 'test' }>
+  ): Promise<AgentExecutionResponse> {
+    const tools = PlcAgentTools.getInstance()
+    const contents: GeminiContent[] = plan.correctionOf
+      ? [
+          ...plan.correctionOf.contents,
+          {
+            role: 'user',
+            parts: [{ text: `The user did not approve this test and says:\n${plan.correctionOf.correction}\n\nSend the corrected test in the same form.` }]
+          }
+        ]
+      : [{ role: 'user', parts: [{ text: `CURRENT PROJECT:\n${tools.describeProjectForModel()}\n\nUSER REQUEST:\n${prompt}\n\n${TEST_FIRST_REQUEST}` }] }]
+    const existingTags = useTagStore.getState().tagTables.flatMap((t) => t.tags)
+    const userIo = ioAddressesInPrompt(prompt)
+    const askedOnce = new Set<string>()
+    const executed: AgentToolCall[] = []
+    const toolResults: AgentToolResult[] = []
+    let rawText = ''
+    let problems: string[] = []
+    const respond = (fields: Partial<AgentExecutionResponse> & { replyText: string }): AgentExecutionResponse => ({
+      tier,
+      providerUsed: this.config.provider,
+      toolCallsExecuted: executed,
+      toolResults,
+      ragRulesConsulted,
+      rawTraceSnippet: rawText.substring(0, 300),
+      ...fields
+    })
+
+    for (let round = 0; round < MAX_TEST_ROUNDS; round++) {
+      rawText = await requestModel(contents)
+      contents.push({ role: 'model', parts: [{ text: rawText }] })
+      const extracted = this.extractValidJsonBlock(rawText)
+      const parsed = extracted?.json && typeof extracted.json === 'object' ? (extracted.json as Record<string, unknown>) : undefined
+      if (!parsed) {
+        const text = rawText.trim()
+        // A plain answer to a question
+        if (!text.startsWith('{') && !text.startsWith('```')) return respond({ replyText: text })
+        problems = ['Your reply was not valid JSON and may have been cut off. Send a shorter, complete JSON object.']
+      } else {
+        const explanation = typeof parsed.explanation === 'string' ? parsed.explanation : ''
+        const calls = (Array.isArray(parsed.toolCalls) ? parsed.toolCalls : []) as AgentToolCall[]
+        const reads = calls.filter((c) => READ_ONLY_TOOLS.has(String(c?.tool)))
+        const changingTools = calls.length - reads.length
+        const hasCircuit =
+          (typeof parsed.dsl === 'string' && parsed.dsl.trim() !== '') || (Array.isArray(parsed.networks) && parsed.networks.length > 0)
+        if (reads.length > 0 && parsed.verification === undefined && !hasCircuit) {
+          const result = await tools.executeToolBatch(reads, mode)
+          executed.push(...reads)
+          toolResults.push(...result.results)
+          contents.push({ role: 'user', parts: [{ text: `TOOL RESULTS:\n${JSON.stringify(result.results)}` }] })
+          continue
+        }
+        if (parsed.verification === undefined && !hasCircuit && changingTools === 0) {
+          const note = isTurkish ? 'Projede değişiklik yapılmadı.' : 'No changes were made to the project.'
+          return respond({ replyText: `${explanation || rawText}\n\n*${note}*` })
+        }
+        const proposal = validateTestProposal(parsed, existingTags, userIo, askedOnce)
+        problems = [
+          ...(hasCircuit
+            ? ['Do not write the circuit yet: send only "explanation", "tagsToUpsert" and "verification". The circuit comes after the user approves the test.']
+            : []),
+          ...(changingTools > 0 ? ['Do not use tools that change the project yet. Only the test is asked for now.'] : []),
+          ...proposal.problems
+        ]
+        if (problems.length === 0 && proposal.test) {
+          this.pendingTest = { prompt, tier, test: proposal.test, tags: proposal.tags, contents }
+          BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', `Test proposed for approval: ${countExpectations(proposal.test)} checks`, {
+            test: proposal.test,
+            tags: proposal.tags
+          })
+          return respond({
+            replyText: formatTestForUser(explanation, proposal.test, proposal.tags, isTurkish),
+            pendingTest: { test: proposal.test, tags: proposal.tags }
+          })
+        }
+      }
+      BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Test proposal rejected, round ${round + 1}`, { problems })
+      contents.push({ role: 'user', parts: [{ text: `The test was not accepted:\n${problems.join('\n')}` }] })
+    }
+
+    // A failed correction keeps the test that was waiting, so the user can still approve it
+    const details = problems.map((p) => `- ${p}`).join('\n')
+    return respond({
+      replyText: isTurkish
+        ? `Model ${MAX_TEST_ROUNDS} denemede onaylanabilir bir test yazamadı. Projede değişiklik yapılmadı.\n\n${details}`
+        : `The model did not write a test that can be approved in ${MAX_TEST_ROUNDS} attempts. The project was not changed.\n\n${details}`,
+      isError: true,
+      errorDetails: details
+    })
+  }
+
+  /**
    * Model, tools, compiler and simulator in a loop. A reply is applied as a whole and kept only if it compiles
    * without new errors and behaves as its test says. Otherwise the project goes back to where it was and the
    * model gets the errors.
@@ -2264,6 +2438,11 @@ If the prompt is purely informational without ladder logic, provide an explanati
     ragRulesConsulted: string[],
     requestModel: (contents: GeminiContent[]) => Promise<string>
   ): Promise<AgentExecutionResponse> {
+    const plan = this.turnPlan
+    this.turnPlan = undefined
+    if (plan?.stage === 'test') return this.runTestStage(prompt, tier, mode, isTurkish, ragRulesConsulted, requestModel, plan)
+    // Test first: the approved test judges the circuit, and the model's own test is ignored
+    const approved = plan?.stage === 'circuit' ? plan : undefined
     const tools = PlcAgentTools.getInstance()
     const turnStart = tools.takeSnapshot()
     // Motion control is not in this IDE. The user must hear it even when the last reply forgets to say so
@@ -2307,8 +2486,9 @@ If the prompt is purely informational without ladder logic, provide an explanati
     const askedOnce = new Set<string>()
     // The most checks any test of this turn had. A retry should fix the circuit, not drop checks
     let strongestTest = 0
+    const approvedPart = approved ? `\n\n${approvedTestRequest(approved.test, approved.tags)}` : ''
     const contents: GeminiContent[] = [
-      { role: 'user', parts: [{ text: `CURRENT PROJECT:\n${tools.describeProjectForModel()}\n\nUSER REQUEST:\n${prompt}` }] }
+      { role: 'user', parts: [{ text: `CURRENT PROJECT:\n${tools.describeProjectForModel()}\n\nUSER REQUEST:\n${prompt}${approvedPart}` }] }
     ]
     const executed: AgentToolCall[] = []
     const toolResults: AgentToolResult[] = []
@@ -2333,8 +2513,9 @@ If the prompt is purely informational without ladder logic, provide an explanati
     for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
       rawText = await requestModel(contents)
       contents.push({ role: 'model', parts: [{ text: rawText }] })
-      const reply = this.interpretModelReply(rawText)
+      const reply = this.interpretModelReply(rawText, !!approved)
       rawJson = reply.rawJson
+      const behaviorTest = approved ? approved.test : reply.behaviorTest
 
       let weakerTestNote = ''
       if (reply.behaviorTest) {
@@ -2417,7 +2598,10 @@ If the prompt is purely informational without ladder logic, provide an explanati
           if (reply.circuit && writes.length === 0) {
             tools.holdDiskWrites()
             this.applyCircuitPayload(reply.circuit, 'auto-apply', { trialRun: true })
-            const behavior = this.checkCircuitBehavior(reply.behaviorTest, askedOnce, isTurkish, reply.circuit)
+            const moved = approved ? approvedTagsMoved(approved.tags, useTagStore.getState().tagTables.flatMap((t) => t.tags)) : []
+            const behavior = moved.length
+              ? { problems: moved, note: '' }
+              : this.checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
             tools.discardDiskWrites()
             tools.restoreSnapshot(turnStart)
             problems.push(...behavior.problems)
@@ -2445,6 +2629,10 @@ If the prompt is purely informational without ladder logic, provide an explanati
             (w) => (w.includes('[S7-IO-009]') || w.includes('[S7-MEM-001]')) && !warningsBefore.has(w)
           )
           problems.push(...newErrors)
+          // The approved test's tags are fixed, so a moved one is an error, not a question
+          if (newErrors.length === 0 && reply.circuit && approved) {
+            problems.push(...approvedTagsMoved(approved.tags, useTagStore.getState().tagTables.flatMap((t) => t.tags)))
+          }
           // The user's I/O list is the plant's wiring. A channel the CPU lacks then needs a signal module, not a new address
           const userAsked = (warning: string): boolean => {
             const used = warning.match(/uses %([IQM]\d+\.\d+)/i)
@@ -2474,7 +2662,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
             : ''
           let behaviorNote = ''
           if (problems.length === 0 && reply.circuit) {
-            const behavior = this.checkCircuitBehavior(reply.behaviorTest, askedOnce, isTurkish, reply.circuit)
+            const behavior = this.checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
             problems.push(...behavior.problems)
             behaviorNote = behavior.note ? `\n\n${behavior.note}` : ''
             // A reply that also writes blocks or tags cannot be offered as one staged circuit

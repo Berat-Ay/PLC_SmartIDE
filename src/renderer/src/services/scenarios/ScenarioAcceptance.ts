@@ -45,6 +45,8 @@ export interface Scenario {
   mustWrite: string[]
   /** What these checks cannot judge */
   notChecked: string[]
+  /** Why the benchmark leaves this scenario out unless it is asked for by name */
+  notInBenchmark?: string
 }
 
 export interface CheckResult {
@@ -93,6 +95,9 @@ function addressesInProgram(project: ProjectLoadPayload): { read: Set<string>; w
       walk(net.nodes, (n) => {
         if (n.kind === 'contact') read.add(addressOf(n.operand, n.address))
         if (n.kind === 'coil') written.add(addressOf(n.operand, n.address))
+        // A counter reads its count-down and reset inputs, and a comparator its operands, without a contact
+        if (n.kind === 'counter') [n.cuOperand, n.cdOperand, n.rLdOperand].forEach((o) => read.add(addressOf(o)))
+        if (n.kind === 'comparator') [n.op1, n.op2].forEach((o) => read.add(addressOf(o)))
       })
     }
   }

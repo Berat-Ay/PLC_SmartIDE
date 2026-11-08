@@ -16,6 +16,7 @@ import {
   testForCheck
 } from '../renderer/src/services/scenarios/ScenarioAcceptance'
 import { PICK_AND_PLACE, ROBOT_CELL, SCENARIOS } from '../renderer/src/services/scenarios/scenarios'
+import { CAR_PARK, MOTOR_START_STOP, STAR_DELTA, TANK_FILL, TRAFFIC_LIGHT } from '../renderer/src/services/scenarios/textbookScenarios'
 import { parseBehaviorTest } from '../renderer/src/services/ai/CircuitBehaviorTest'
 
 console.log('\n=== PHASE 22: SCENARIO ACCEPTANCE TESTS ===\n')
@@ -262,6 +263,66 @@ NW 17 "q": SERIES(NO(T_MoveHome.Q), RESET(Step_At_Drop), RESET(Step_Go_Home))
 NW 18 "r": SERIES(PARALLEL(NC(E_Stop), NO(Fault_Reset)), COIL(Fault_Active))
 NW 19 "s": SERIES(NO(Fault_Active), RESET(Step_Home_Start), RESET(Step_Go_Pick), RESET(Step_At_Pick), RESET(Step_Part_Grip), RESET(Step_Go_Drop), RESET(Step_At_Drop), RESET(Step_Go_Home))`
 
+
+// ---- Correct circuits for the textbook scenarios ----
+const MOTOR_REFERENCE = `TAG Start %I0.0 BOOL "Start"
+TAG Stop %I0.1 BOOL "Stop (NC)"
+TAG Thermal %I0.2 BOOL "Termik (NC)"
+TAG Reset %I0.3 BOOL "Ariza reset"
+TAG Motor %Q0.0 BOOL "Motor"
+TAG Fault %Q0.1 BOOL "Ariza lambasi"
+TAG RunLamp %Q0.2 BOOL "Calisiyor lambasi"
+NW 1 "Termik": SERIES( NC(Thermal), SET(Fault) )
+NW 2 "Reset": SERIES( NO(Reset), NO(Thermal), RESET(Fault) )
+NW 3 "Motor": SERIES( PARALLEL( NO(Start), NO(Motor) ), NO(Stop), NO(Thermal), NC(Fault), COIL(Motor) )
+NW 4 "Lamba": SERIES( NO(Motor), COIL(RunLamp) )`
+
+const TRAFFIC_REFERENCE = `TAG On %I0.0 BOOL "Sistem acik"
+TAG Red %Q0.0 BOOL "Kirmizi"
+TAG Yellow %Q0.1 BOOL "Sari"
+TAG Green %Q0.2 BOOL "Yesil"
+NW 1 "Kirmizi suresi": SERIES( NO(On), NC(T4.Q), TON(T1, PT=T#6S) )
+NW 2 "Kirmizi sari": SERIES( NO(T1.Q), TON(T2, PT=T#2S) )
+NW 3 "Yesil": SERIES( NO(T2.Q), TON(T3, PT=T#6S) )
+NW 4 "Sari": SERIES( NO(T3.Q), TON(T4, PT=T#3S) )
+NW 5 "Kirmizi lamba": SERIES( NO(On), NC(T2.Q), COIL(Red) )
+NW 6 "Sari lamba": SERIES( PARALLEL( SERIES( NO(T1.Q), NC(T2.Q) ), SERIES( NO(T3.Q), NC(T4.Q) ) ), COIL(Yellow) )
+NW 7 "Yesil lamba": SERIES( NO(T2.Q), NC(T3.Q), COIL(Green) )`
+
+const TANK_REFERENCE = `TAG Low %I0.0 BOOL "Alt seviye"
+TAG High %I0.1 BOOL "Ust seviye"
+TAG Auto %I0.2 BOOL "Otomatik"
+TAG Reset %I0.3 BOOL "Alarm reset"
+TAG Pump %Q0.0 BOOL "Pompa"
+TAG Alarm %Q0.1 BOOL "Alarm"
+NW 1 "Pompa": SERIES( NO(Auto), NC(High), NC(Alarm), PARALLEL( NC(Low), NO(Pump) ), COIL(Pump) )
+NW 2 "Kuru calisma": SERIES( NO(Pump), NC(Low), TON(T_Dry, PT=T#10S) )
+NW 3 "Alarm": SERIES( NO(T_Dry.Q), SET(Alarm) )
+NW 4 "Reset": SERIES( NO(Reset), RESET(Alarm) )`
+
+const STAR_DELTA_REFERENCE = `TAG Start %I0.0 BOOL "Start"
+TAG Stop %I0.1 BOOL "Stop (NC)"
+TAG Thermal %I0.2 BOOL "Termik (NC)"
+TAG K1 %Q0.0 BOOL "Ana"
+TAG K2 %Q0.1 BOOL "Yildiz"
+TAG K3 %Q0.2 BOOL "Ucgen"
+NW 1 "K1": SERIES( PARALLEL( NO(Start), NO(K1) ), NO(Stop), NO(Thermal), COIL(K1) )
+NW 2 "Yildiz suresi": SERIES( NO(K1), TON(T_Star, PT=T#5S) )
+NW 3 "K2": SERIES( NO(K1), NC(T_Star.Q), NC(K3), COIL(K2) )
+NW 4 "Gecis": SERIES( NO(K1), NO(T_Star.Q), NC(K2), TON(T_Pause, PT=T#500MS) )
+NW 5 "K3": SERIES( NO(K1), NO(T_Pause.Q), NC(K2), COIL(K3) )`
+
+const CAR_PARK_REFERENCE = `TAG InS %I0.0 BOOL "Giris"
+TAG OutS %I0.1 BOOL "Cikis"
+TAG Rst %I0.2 BOOL "Reset"
+TAG Free %Q0.0 BOOL "Yesil"
+TAG Full %Q0.1 BOOL "Dolu"
+TAG DownOk %M10.0 BOOL "Azaltilabilir"
+NW 1 "Sayac": SERIES( NO(InS), CTUD(C_Park, PV=3, CD=DownOk, R=Rst) )
+NW 2 "Sifirin alti yok": SERIES( NO(OutS), CMP_GT(C_Park.CV, 0), COIL(DownOk) )
+NW 3 "Dolu": SERIES( NO(C_Park.QU), COIL(Full) )
+NW 4 "Yesil": SERIES( NC(C_Park.QU), COIL(Free) )`
+
 function main(): void {
   // ---- Every check has a valid timeline ----
   for (const scenario of SCENARIOS) {
@@ -283,6 +344,42 @@ function main(): void {
     assert.strictEqual(failed.length, 0, formatReport(scenario, results))
   }
   ok('A circuit written from the specification passes every check of both scenarios')
+
+  for (const [scenario, dsl] of [
+    [MOTOR_START_STOP, MOTOR_REFERENCE],
+    [TRAFFIC_LIGHT, TRAFFIC_REFERENCE],
+    [TANK_FILL, TANK_REFERENCE],
+    [STAR_DELTA, STAR_DELTA_REFERENCE],
+    [CAR_PARK, CAR_PARK_REFERENCE]
+  ] as const) {
+    const results = evaluateScenario(scenario, project(dsl))
+    assert.ok(results.every((r) => r.passed), formatReport(scenario, results))
+  }
+  ok('A circuit written from the specification passes every check of the five textbook scenarios')
+
+  // ---- The checks catch a typical mistake each, and an empty program passes none ----
+  const EMPTY = 'TAG X %I0.7 BOOL "x"\nTAG Y %Q0.7 BOOL "y"\nNW 1 "x": SERIES( NO(X), COIL(Y) )'
+  for (const scenario of [MOTOR_START_STOP, TRAFFIC_LIGHT, TANK_FILL, STAR_DELTA, CAR_PARK]) {
+    const passedByEmpty = evaluateScenario(scenario, project(EMPTY)).filter((r) => r.passed)
+    assert.deepStrictEqual(passedByEmpty.map((r) => r.check.id), [], `${scenario.id}: an empty program passes nothing`)
+  }
+  const mutant = (from: string, a: string, b: string): string => {
+    assert.ok(from.includes(a), a)
+    return from.replace(a, b)
+  }
+  assert.deepStrictEqual(failedIds(MOTOR_START_STOP, mutant(MOTOR_REFERENCE, 'NC(Fault), COIL(Motor)', 'COIL(Motor)')), ['blocked', 'reset'])
+  assert.deepStrictEqual(
+    failedIds(TANK_FILL, mutant(TANK_REFERENCE, 'PARALLEL( NC(Low), NO(Pump) )', 'NC(Low)')),
+    ['hysteresis', 'stopHigh', 'stayOff']
+  )
+  assert.deepStrictEqual(failedIds(STAR_DELTA, mutant(STAR_DELTA_REFERENCE, 'TON(T_Pause, PT=T#500MS)', 'TON(T_Pause, PT=T#10MS)')), ['pause'])
+  assert.deepStrictEqual(
+    failedIds(TRAFFIC_LIGHT, mutant(TRAFFIC_REFERENCE, 'SERIES( NO(On), NC(T4.Q), TON(T1', 'SERIES( NC(T4.Q), TON(T1')),
+    ['off', 'restart']
+  )
+  // As on the CPU, CTUD counts below 0, so a count-down straight from the exit sensor goes negative
+  assert.deepStrictEqual(failedIds(CAR_PARK, mutant(CAR_PARK_REFERENCE, 'CD=DownOk', 'CD=OutS')), ['noNegative'])
+  ok('Each textbook check catches a typical mistake, and an empty program passes none of them')
 
   // ---- The robot cell from the log: right sequence, Robot 2 on M bits, fixture released early ----
   assert.deepStrictEqual(failedIds(ROBOT_CELL, ROBOT_CELL_FROM_LOG).sort(), ['estopTrigger', 'hold', 'pulse', 'r2', 'writes'])

@@ -634,7 +634,8 @@ export class S7BinaryMemory {
       c.QD = c.CV <= 0
       c.QU = c.CV >= c.PV
     } else {
-      if (!c.prevCd && cdRlo && c.CV > 0) {
+      // As on the CPU, a count goes down to the low limit of INT, not to 0
+      if (!c.prevCd && cdRlo && c.CV > -32768) {
         c.CV--
       }
       c.QD = c.CV <= 0
@@ -671,7 +672,8 @@ export class S7BinaryMemory {
       if (!c.prevCu && cuRlo && c.CV < 32767) {
         c.CV++
       }
-      if (!c.prevCd && cdRlo && c.CV > 0) {
+      // As on the CPU, a count goes down to the low limit of INT, not to 0
+      if (!c.prevCd && cdRlo && c.CV > -32768) {
         c.CV--
       }
       c.QU = c.CV >= c.PV

@@ -10,8 +10,9 @@ export function getDefaultCpuConfig(): CpuConfig {
       minCycleTimeMs: 1,
       retentiveMemory: { startByte: 0, byteCount: 2048 }
     },
-    systemMemory: { enabled: true, byteAddress: 1 },
-    clockMemory: { enabled: true, byteAddress: 0 },
+    // As in TIA Portal, a new CPU has both off. Enabled, they default to MB1 and MB0
+    systemMemory: { enabled: false, byteAddress: 1 },
+    clockMemory: { enabled: false, byteAddress: 0 },
     digitalIO: {
       diStartByte: 0,
       dqStartByte: 0,

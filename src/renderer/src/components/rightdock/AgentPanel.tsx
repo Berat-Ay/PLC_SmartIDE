@@ -23,7 +23,7 @@ import { useUIStore } from '../../stores/useUIStore'
 import { useProjectStore } from '../../stores/useProjectStore'
 import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
-import { AiModelRouter, sanitizeUserPrompt } from '../../services/ai/AiModelRouter'
+import { AiModelRouter, AgentExecutionResponse, sanitizeUserPrompt } from '../../services/ai/AiModelRouter'
 import { PlcAgentTools, StagedFileChange } from '../../services/ai/PlcAgentTools'
 import { CoilDiagnosticEngine, CoilDiagnosticReport } from '../../services/ai/CoilDiagnosticEngine'
 import { RagKnowledgeEngine } from '../../services/ai/RagKnowledgeEngine'
@@ -217,17 +217,33 @@ export const AgentPanel: React.FC = () => {
     const promptText = sanitizeUserPrompt(inputPrompt)
     if (!promptText) return
     setInputPrompt('')
-    setIsExecuting(true)
+    // Log user message
+    useUIStore.getState().sendAgentMessage(promptText, 'user')
+    await runAgent((signal) => AiModelRouter.getInstance().executePrompt(promptText, agentTier, agentMode, signal))
+  }
 
+  // Test first: the circuit is written only after the user approves the test
+  const [testAwaitingApproval, setTestAwaitingApproval] = useState(false)
+
+  const handleApproveTest = async () => {
+    if (isExecuting) return
+    useUIStore.getState().sendAgentMessage('Testi onaylıyorum, devreyi yaz.', 'user')
+    await runAgent((signal) => AiModelRouter.getInstance().approvePendingTest(agentMode, signal))
+  }
+
+  const handleDiscardTest = () => {
+    AiModelRouter.getInstance().cancelPendingTest()
+    setTestAwaitingApproval(false)
+    useUIStore.getState().sendAgentMessage('Test reddedildi. Yeni bir istek yazabilirsiniz.', 'agent')
+  }
+
+  const runAgent = async (call: (signal: AbortSignal) => Promise<AgentExecutionResponse>) => {
+    setIsExecuting(true)
     const controller = new AbortController()
     abortControllerRef.current = controller
 
-    // Log user message
-    useUIStore.getState().sendAgentMessage(promptText, 'user')
-
     try {
-      const router = AiModelRouter.getInstance()
-      const response = await router.executePrompt(promptText, agentTier, agentMode, controller.signal)
+      const response = await call(controller.signal)
 
       // Diff-view stages every change. In auto-apply a circuit that failed its test is staged for review instead
       if (response.stagedChangeset && response.stagedChangeset.length > 0) {
@@ -252,6 +268,7 @@ export const AgentPanel: React.FC = () => {
     } finally {
       setIsExecuting(false)
       abortControllerRef.current = null
+      setTestAwaitingApproval(AiModelRouter.getInstance().hasPendingTest())
     }
   }
 
@@ -635,6 +652,29 @@ export const AgentPanel: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Test first: approve the test, or write a correction in the input box */}
+      {testAwaitingApproval && !isExecuting && (
+        <div className="px-2.5 pt-2 bg-[#0e0f12] border-t border-[#27272a] shrink-0 flex items-center gap-2 text-[11px]">
+          <button
+            data-testid="btn-approve-test"
+            type="button"
+            onClick={handleApproveTest}
+            className="px-2 py-1 bg-emerald-700 hover:bg-emerald-600 text-white font-semibold rounded-none cursor-pointer"
+          >
+            Testi onayla ve devreyi yaz
+          </button>
+          <button
+            data-testid="btn-discard-test"
+            type="button"
+            onClick={handleDiscardTest}
+            className="px-2 py-1 bg-[#1c1f26] hover:bg-[#27272a] text-gray-300 border border-[#27272a] rounded-none cursor-pointer"
+          >
+            Vazgeç
+          </button>
+          <span className="text-gray-500">ya da düzeltmeyi aşağıya yazın</span>
+        </div>
+      )}
 
       {/* Input Prompt Box */}
       <form onSubmit={handleSubmit} className="p-2.5 bg-[#0e0f12] border-t border-[#27272a] shrink-0">

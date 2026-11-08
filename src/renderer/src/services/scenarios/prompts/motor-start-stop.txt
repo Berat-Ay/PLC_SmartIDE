@@ -1,0 +1,20 @@
+Bir konveyör motoru için ladder programı yaz. CPU: S7-1214C.
+
+Girişler:
+• Start butonu: I0.0 (normalde açık, basınca 1)
+• Stop butonu: I0.1 (normalde kapalı kontak: basılı değilken 1, basınca 0)
+• Termik röle kontağı: I0.2 (normalde kapalı: normalde 1, termik atınca 0)
+• Arıza reset butonu: I0.3 (normalde açık, basınca 1)
+
+Çıkışlar:
+• Motor kontaktörü: Q0.0
+• Arıza lambası: Q0.1
+• Çalışıyor lambası: Q0.2
+
+İstenen davranış:
+1. Start'a basılınca motor çalışır ve Start bırakıldıktan sonra da çalışmaya devam eder (mühürleme).
+2. Stop'a basılınca motor durur. Start ve Stop aynı anda basılıysa motor çalışmaz (stop öncelikli).
+3. Termik atarsa motor hemen durur ve Arıza lambası yanar. Arıza lambası, termik normale dönse bile Arıza reset'e basılana kadar yanık kalır.
+4. Arıza lambası yanarken motor Start ile çalıştırılamaz. Termik hâlâ atıkken Arıza reset arızayı silmez.
+5. Reset'ten sonra motor kendiliğinden çalışmaz, yeniden Start gerekir.
+6. Çalışıyor lambası motor çalıştığı sürece yanar.
