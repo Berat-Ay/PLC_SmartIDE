@@ -41,6 +41,28 @@ export interface ElectronApi {
   pickTiaImportFolder: () => Promise<{ folder: string; files: { path: string; content: string }[] } | null>
   getSecret: (key: string) => Promise<string | null>
   setSecret: (key: string, value: string) => Promise<boolean>
+  /** An AI API request sent by the main process, where a server without CORS headers can still answer */
+  aiHttpRequest: (request: AiHttpRequest) => Promise<AiHttpResponse>
+  /** Aborts a request started with aiHttpRequest */
+  aiHttpCancel: (id: string) => Promise<void>
+}
+
+export interface AiHttpRequest {
+  id: string
+  url: string
+  method: 'GET' | 'POST'
+  headers: Record<string, string>
+  body?: string
+  timeoutMs: number
+}
+
+/** status is 0 when no HTTP answer came: error says why (network, timeout or cancelled) */
+export interface AiHttpResponse {
+  status: number
+  statusText: string
+  body: string
+  error?: 'network' | 'timeout' | 'cancelled'
+  message?: string
 }
 
 declare global {

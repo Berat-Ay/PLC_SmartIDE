@@ -34,6 +34,8 @@ export interface DslCompilationResult {
   networks: LadderNetwork[]
   errors: string[]
   rawDsl: string
+  /** Declared tags that got another address, because theirs was taken or is CPU system/clock memory */
+  addressMoves: Array<{ name: string; from: string; to: string; takenBy: string }>
 }
 
 export interface DslCompilerOptions {
@@ -134,6 +136,8 @@ export class LadderDslCompiler {
     const usedAddresses = new Map<string, string>() // formattedAddr -> tagName
     const addressRewrites = new Map<string, string>() // oldAddr -> newAddr
     const tagNameToTag = new Map<string, TagDefinition>()
+    const addressMoves: DslCompilationResult['addressMoves'] = []
+    const reservedBytes = new Set(options?.reservedMerkerBytes || [])
 
     for (const byte of options?.reservedMerkerBytes || []) {
       for (let bit = 0; bit < 8; bit++) usedBitCoordinates.add(`M:${byte}:${bit}`)
@@ -275,6 +279,15 @@ export class LadderDslCompiler {
           if (isColliding) {
             // Allocate next free sequential bit in same area
             const safeAddr = allocateNextFreeBit(area)
+            addressMoves.push({
+              name,
+              from: finalAddress,
+              to: safeAddr,
+              takenBy:
+                area === 'M' && norm.byteAddress !== undefined && reservedBytes.has(norm.byteAddress)
+                  ? 'CPU system or clock memory'
+                  : existingOccupant || 'another tag'
+            })
             addressRewrites.set(finalAddress, safeAddr)
             finalAddress = safeAddr
             const safeNorm = normalizeS7Address(safeAddr)
@@ -334,14 +347,24 @@ export class LadderDslCompiler {
 
     // Helper to auto-infer tags for undeclared operands
     let inferBitCounter = 0
+    let currentNetwork = 0
     const resolveOrCreateTag = (operand: string, defaultKind?: 'contact' | 'coil'): { name: string; address: string } => {
-      const cleanOp = operand.trim()
+      // TIA writes symbols in quotes. The quotes are not part of the name
+      const cleanOp = operand.trim().replace(/"/g, '')
       const lower = cleanOp.toLowerCase()
 
       // If it's a sub-bit or sub-word like T1.Q, T1.ET, C1.QU, return as-is
       if (/^[A-Za-z0-9_]+\.(Q|IN|ET|PT|QU|QD|CV|PV)$/i.test(cleanOp)) {
         return { name: cleanOp, address: cleanOp }
       }
+
+      // A member of a DB, such as "DB_Cell".Ready, is read from the DB and is not a tag
+      const member = cleanOp.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_.]*)$/)
+      if (member) {
+        const access = `"${member[1]}".${member[2]}`
+        return { name: access, address: access }
+      }
+
 
       // Check declared tags by name
       const existingByName = tagNameToTag.get(lower)
@@ -380,6 +403,14 @@ export class LadderDslCompiler {
         tagNameToTag.set(autoName.toLowerCase(), newTag)
         usedAddresses.set(rewritten, autoName)
         return { name: autoName, address: rewritten }
+      }
+
+      // A new tag needs a name a tag can have. Existing tags were found above, whatever their spelling
+      if (!/^[\p{L}_][\p{L}\p{N}_]*$/u.test(cleanOp)) {
+        errors.push(
+          `Network ${currentNetwork}: '${operand.trim()}' is not a tag name, an address or a DB member ("DB".Variable).`
+        )
+        return { name: cleanOp, address: cleanOp }
       }
 
       // Unresolved symbol name: auto-assign safe sequential address
@@ -430,6 +461,23 @@ export class LadderDslCompiler {
       return { name: cleanOp, address: safeAddr }
     }
 
+    // A value in a box: a literal stays as written, a DB member gets its quotes, a tag loses them
+    const boxOperand = (raw: string | undefined): string => {
+      const value = (raw || '').trim()
+      if (!value || /^[-+]?\d/.test(value) || /^[A-Za-z]+#/.test(value) || /^(TRUE|FALSE)$/i.test(value) || value.startsWith('%')) {
+        return value
+      }
+      const clean = value.replace(/"/g, '')
+      const member = clean.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_.]*)$/)
+      if (member && !/^[A-Za-z0-9_]+\.(Q|IN|ET|PT|QU|QD|CV|PV)$/i.test(clean)) return `"${member[1]}".${member[2]}`
+      return clean
+    }
+    const arity = (name: string, args: string[], expected: number, shape: string): boolean => {
+      if (args.length === expected && args.every((a) => a.trim())) return true
+      errors.push(`Network ${currentNetwork}: ${name} takes ${expected} values, ${shape}, but got ${args.length}: ${name}(${args.join(', ')}).`)
+      return false
+    }
+
     // 2. Second pass: Parse Network Expressions into LadderSeriesNode[]
     let globalNodeCounter = 1
 
@@ -439,18 +487,9 @@ export class LadderDslCompiler {
 
       const call = parseFunctionCall(trimmed)
       if (!call) {
-        // If it's a bare operand, default to NO contact
-        const resolved = resolveOrCreateTag(trimmed, 'contact')
-        return [
-          {
-            id: `node_${globalNodeCounter++}`,
-            kind: 'contact',
-            contactType: 'NO_CONTACT',
-            operand: resolved.name,
-            symbolName: resolved.name,
-            address: resolved.address
-          } as LadderContactNode
-        ]
+        // A bare name could be meant as NO, NC or a coil. Guessing would give a circuit nobody asked for
+        errors.push(`Network ${currentNetwork}: '${trimmed}' is not an instruction. Write NO(${trimmed}), NC(${trimmed}) or COIL(${trimmed}).`)
+        return []
       }
 
       const { name, argsStr } = call
@@ -485,7 +524,7 @@ export class LadderDslCompiler {
 
       // Contacts: NO, NC, P_TRIG, N_TRIG
       if (name === 'NO' || name === 'NC' || name === 'P_TRIG' || name === 'N_TRIG') {
-        const operandRaw = subArgs[0]?.trim() || 'UNDEFINED'
+        const operandRaw = subArgs[0]?.trim() || ''
         const contactType: ContactType =
           name === 'NO'
             ? 'NO_CONTACT'
@@ -493,6 +532,19 @@ export class LadderDslCompiler {
               ? 'NC_CONTACT'
               : (name as ContactType)
 
+        if (!operandRaw) {
+          errors.push(`Network ${currentNetwork}: ${name}() needs an operand.`)
+          return []
+        }
+        // A second value was dropped before, and an edge contact then watched its edge memory instead of the signal
+        if (subArgs.length > 1) {
+          errors.push(
+            name === 'P_TRIG' || name === 'N_TRIG'
+              ? `Network ${currentNetwork}: ${name} takes one value, the signal whose edge it detects: ${name}(Signal). Its edge memory is kept for you, so do not pass one. Got ${name}(${subArgs.join(', ')}).`
+              : `Network ${currentNetwork}: ${name} takes one value: ${name}(Tag). Got ${name}(${subArgs.join(', ')}). Use SERIES or PARALLEL to combine contacts.`
+          )
+          return []
+        }
         const resolved = resolveOrCreateTag(operandRaw, 'contact')
         const contactNode: LadderContactNode = {
           id: `contact_${globalNodeCounter++}`,
@@ -507,7 +559,7 @@ export class LadderDslCompiler {
 
       // Coils: COIL, NEG_COIL, SET, RESET
       if (name === 'COIL' || name === 'NEG_COIL' || name === 'SET' || name === 'RESET') {
-        const operandRaw = subArgs[0]?.trim() || 'UNDEFINED'
+        const operandRaw = subArgs[0]?.trim() || ''
         const coilType: CoilType =
           name === 'COIL'
             ? 'OUTPUT_COIL'
@@ -517,6 +569,16 @@ export class LadderDslCompiler {
                 ? 'SET_COIL'
                 : 'RESET_COIL'
 
+        if (!operandRaw) {
+          errors.push(`Network ${currentNetwork}: ${name}() needs an operand.`)
+          return []
+        }
+        if (subArgs.length > 1) {
+          errors.push(
+            `Network ${currentNetwork}: ${name} takes one value: ${name}(Tag). Got ${name}(${subArgs.join(', ')}). Write one coil per tag at the end of the SERIES.`
+          )
+          return []
+        }
         const resolved = resolveOrCreateTag(operandRaw, 'coil')
         const coilNode: LadderCoilNode = {
           id: `coil_${globalNodeCounter++}`,
@@ -610,8 +672,12 @@ export class LadderDslCompiler {
         name === 'CMP_GE' ||
         name === 'CMP_LE'
       ) {
-        const op1 = subArgs[0]?.trim() || '0'
-        const op2 = subArgs[1]?.trim() || '0'
+        if (subArgs.length < 2 || subArgs.length > 3 || !subArgs[0].trim() || !subArgs[1].trim()) {
+          errors.push(`Network ${currentNetwork}: ${name} compares two values: ${name}(in1, in2) or ${name}(in1, in2, REAL).`)
+          return []
+        }
+        const op1 = boxOperand(subArgs[0])
+        const op2 = boxOperand(subArgs[1])
         let dataType: 'INT' | 'DINT' | 'REAL' | 'TIME' = 'INT'
 
         if (subArgs.length > 2) {
@@ -644,10 +710,8 @@ export class LadderDslCompiler {
       ) {
         const mathType = name as MathBoxType
         if (name === 'NORM_X' || name === 'SCALE_X') {
-          const val = subArgs[0]?.trim() || ''
-          const min = subArgs[1]?.trim() || ''
-          const max = subArgs[2]?.trim() || ''
-          const out = subArgs[3]?.trim() || ''
+          if (!arity(name, subArgs, 4, 'value, min, max, out')) return []
+          const [val, min, max, out] = subArgs.map(boxOperand)
           const mathNode: LadderMathNode = {
             id: `math_${globalNodeCounter++}`,
             kind: 'math',
@@ -658,10 +722,20 @@ export class LadderDslCompiler {
             out
           }
           return [mathNode]
+        } else if (name === 'MOVE') {
+          // MOVE copies one value: MOVE(in, out). Read as ADD it would write nowhere
+          if (!arity(name, subArgs, 2, 'in, out')) return []
+          const mathNode: LadderMathNode = {
+            id: `math_${globalNodeCounter++}`,
+            kind: 'math',
+            boxType: mathType,
+            in1: boxOperand(subArgs[0]),
+            out: boxOperand(subArgs[1])
+          }
+          return [mathNode]
         } else {
-          const in1 = subArgs[0]?.trim() || ''
-          const in2 = subArgs[1]?.trim() || ''
-          const out = subArgs[2]?.trim() || ''
+          if (!arity(name, subArgs, 3, 'in1, in2, out')) return []
+          const [in1, in2, out] = subArgs.map(boxOperand)
           const mathNode: LadderMathNode = {
             id: `math_${globalNodeCounter++}`,
             kind: 'math',
@@ -674,18 +748,17 @@ export class LadderDslCompiler {
         }
       }
 
-      // Fallback: treated as NO contact with function name
-      const resolved = resolveOrCreateTag(name, 'contact')
-      return [
-        {
-          id: `contact_${globalNodeCounter++}`,
-          kind: 'contact',
-          contactType: 'NO_CONTACT',
-          operand: resolved.name,
-          symbolName: resolved.name,
-          address: resolved.address
-        } as LadderContactNode
-      ]
+      // An unknown instruction is an error. Turning it into a contact would hide that it does nothing
+      if (name === 'CALL' || /^(FB|FC)_?/i.test(name)) {
+        errors.push(
+          `Network ${currentNetwork}: ${name}(...) is not supported. Ladder in this IDE cannot call an FB or FC, so a block you create is never executed. Say so in "explanation".`
+        )
+      } else {
+        errors.push(
+          `Network ${currentNetwork}: unknown instruction ${name}(...). The DSL has NO, NC, P_TRIG, N_TRIG, COIL, NEG_COIL, SET, RESET, TON, TOF, TP, CTU, CTD, CTUD, CMP_EQ/NE/GT/LT/GE/LE, ADD, SUB, MUL, DIV, MOVE, NORM_X, SCALE_X, SERIES and PARALLEL.`
+        )
+      }
+      return []
     }
 
     for (let netIndex = 0; netIndex < rawNetworkBlocks.length; netIndex++) {
@@ -699,6 +772,16 @@ export class LadderDslCompiler {
       const fullExpr = block.exprLines.join(' ').trim()
       if (!fullExpr) continue
 
+      currentNetwork = netNumber
+      // "PARALLEL(...), COIL(x)" without SERIES was read as one call with a broken tail, and the error told the
+      // model to wrap its coil in NO(). A network is one expression
+      const parts = splitTopLevel(fullExpr, ',').filter((p) => p.trim())
+      if (parts.length > 1) {
+        errors.push(
+          `Network ${netNumber}: a network is one expression, but this one has ${parts.length} parts separated by commas. Put them in SERIES: SERIES( ${parts.map((p) => p.trim()).join(', ')} ).`
+        )
+        continue
+      }
       const nodes = parseNodeOrBranch(fullExpr)
       networks.push({
         id: `net_${netNumber}`,
@@ -714,7 +797,8 @@ export class LadderDslCompiler {
       tags: declaredTags,
       networks,
       errors,
-      rawDsl: dslText
+      rawDsl: dslText,
+      addressMoves
     }
   }
 

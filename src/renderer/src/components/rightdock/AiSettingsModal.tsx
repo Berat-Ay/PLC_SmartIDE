@@ -308,9 +308,10 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
               <div>
                 <label className="block text-industrial-300 font-semibold mb-1 flex items-center gap-1.5">
                   <Key className="w-3.5 h-3.5 text-amber-400" />
-                  <span>OpenAI API Key</span>
+                  <span>API Key</span>
                 </label>
                 <input
+                  data-testid="openai-api-key-input"
                   type="password"
                   value={config.openaiApiKey}
                   onChange={(e) => setConfig({ ...config, openaiApiKey: e.target.value })}
@@ -319,16 +320,91 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
                 />
               </div>
               <div>
-                <label className="block text-industrial-400 text-[11px] mb-1">API Base URL</label>
+                <label className="block text-industrial-400 text-[11px] mb-1">
+                  API Base URL (OpenAI compatible, ends with /v1)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    data-testid="openai-endpoint-input"
+                    type="text"
+                    value={config.openaiEndpoint}
+                    onChange={(e) => setConfig({ ...config, openaiEndpoint: e.target.value })}
+                    placeholder="https://api.openai.com/v1"
+                    className="flex-1 bg-industrial-950 border border-industrial-700 rounded-none px-2.5 py-1 text-industrial-200 font-mono text-[11px]"
+                  />
+                  <button
+                    data-testid="btn-openai-fetch-models"
+                    type="button"
+                    onClick={async () => {
+                      // The list is read from the URL being edited, not the saved one
+                      router.updateConfig({ openaiEndpoint: config.openaiEndpoint })
+                      await handleVerifyAndFetchModels()
+                    }}
+                    disabled={isVerifying}
+                    className="px-3 py-1 bg-indigo-950 hover:bg-indigo-900 border border-indigo-700 text-indigo-200 text-[11px] font-semibold rounded-none flex items-center gap-1.5 transition-colors disabled:opacity-50 shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isVerifying ? 'animate-spin' : ''}`} />
+                    <span>{isVerifying ? 'Checking...' : 'Check & Fetch Models'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {discoveryStatus && (
+                <div
+                  data-testid={discoveryStatus.success ? 'openai-discovery-success-badge' : 'openai-discovery-error-badge'}
+                  className={`p-2 border rounded-none font-mono text-[11px] flex items-center gap-2 ${
+                    discoveryStatus.success
+                      ? 'bg-emerald-950/70 border-emerald-600 text-emerald-300'
+                      : 'bg-rose-950/70 border-rose-600 text-rose-300'
+                  }`}
+                >
+                  {discoveryStatus.success ? (
+                    <Check className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                  ) : (
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                  )}
+                  <span className="truncate">{discoveryStatus.message}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-industrial-300 font-semibold mb-1 flex items-center gap-1.5">
+                  <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Model</span>
+                </label>
+                {/* A list from the server, but any name can be typed */}
                 <input
+                  data-testid="openai-model-input"
                   type="text"
-                  value={config.openaiEndpoint}
-                  onChange={(e) => setConfig({ ...config, openaiEndpoint: e.target.value })}
-                  className="w-full bg-industrial-950 border border-industrial-700 rounded-none px-2.5 py-1 text-industrial-200 font-mono text-[11px]"
+                  list="openai-model-options"
+                  value={config.openaiModel}
+                  onChange={(e) => setConfig({ ...config, openaiModel: e.target.value })}
+                  placeholder="model name, e.g. gpt-4o"
+                  className="w-full bg-industrial-950 border border-industrial-700 rounded-none px-3 py-1.5 text-industrial-100 placeholder-industrial-600 font-mono text-xs focus:border-indigo-500 focus:outline-hidden"
                 />
+                <datalist id="openai-model-options">
+                  {(config.openaiModels || []).map((m) => (
+                    <option key={m.id} value={m.id} />
+                  ))}
+                </datalist>
               </div>
             </div>
           )}
+
+          {/* How long one model request may take */}
+          <div>
+            <label className="block text-industrial-300 font-semibold mb-1.5">Request timeout (seconds)</label>
+            <input
+              data-testid="ai-timeout-input"
+              type="number"
+              min={10}
+              max={600}
+              value={config.requestTimeoutSec}
+              onChange={(e) => setConfig({ ...config, requestTimeoutSec: Math.min(600, Math.max(10, Number(e.target.value) || 180)) })}
+              className="w-28 bg-industrial-950 border border-industrial-700 rounded-none px-2.5 py-1 text-industrial-200 font-mono text-[11px]"
+            />
+            <span className="ml-2 text-industrial-500 text-[10px]">Long ladder answers can take minutes</span>
+          </div>
 
           {/* Language Preference */}
           <div>

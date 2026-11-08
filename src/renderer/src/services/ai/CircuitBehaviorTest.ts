@@ -32,6 +32,8 @@ export interface BehaviorResult {
   pulses: string[]
   /** What the program really did, for the model to reason about. */
   timeline: string
+  /** Watched values that were on (non-zero) in at least one scan, as named in the test. A one-scan pulse shows here */
+  seenOn: string[]
 }
 
 const MAX_TEST_MS = 300_000
@@ -105,7 +107,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
       if (!isKnown(name)) failures.push(`At ${step.atMs} ms the test expects '${name}', which does not exist.`)
     }
   }
-  if (failures.length > 0) return { checks: 0, failures, pulses, timeline: '' }
+  if (failures.length > 0) return { checks: 0, failures, pulses, timeline: '', seenOn: [] }
 
   const expected = new Set(test.steps.flatMap((s) => Object.keys(s.expect || {})))
   const outputs = project.tagTables
@@ -129,6 +131,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
 
     const last = new Map<string, unknown>()
     const onForScans = new Map<string, number>()
+    const seenOn = new Set<string>()
     const changes: string[] = []
     let changeCount = 0
     let checks = 0
@@ -144,6 +147,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
           if (changes.length < MAX_TIMELINE_ENTRIES) changes.push(`${seconds()}s ${name}=${formatValue(value)}`)
         }
         last.set(name, value)
+        if (value) seenOn.add(name)
         if (outputs.includes(name)) {
           if (value) {
             onForScans.set(name, (onForScans.get(name) || 0) + 1)
@@ -189,7 +193,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
     }
 
     const more = changeCount > changes.length ? `\n... and ${changeCount - changes.length} more changes` : ''
-    return { checks, failures, pulses, timeline: changes.join('\n') + more }
+    return { checks, failures, pulses, timeline: changes.join('\n') + more, seenOn: Array.from(seenOn) }
   } finally {
     engine.stop()
     restoreLadder()

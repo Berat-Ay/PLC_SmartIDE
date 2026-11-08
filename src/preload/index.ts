@@ -15,6 +15,8 @@ const electronApi: ElectronApi = {
   pickTiaImportFolder: () => ipcRenderer.invoke('tia:pickImportFolder'),
   getSecret: (key: string) => ipcRenderer.invoke('secrets:get', key),
   setSecret: (key: string, value: string) => ipcRenderer.invoke('secrets:set', key, value),
+  aiHttpRequest: (request) => ipcRenderer.invoke('ai:http', request),
+  aiHttpCancel: (id: string) => ipcRenderer.invoke('ai:httpCancel', id),
   onFileChanged: (callback: (payload: FileChangeEventPayload) => void) => {
     const handler = (_: unknown, payload: FileChangeEventPayload) => callback(payload)
     ipcRenderer.on('project:fileChanged', handler)

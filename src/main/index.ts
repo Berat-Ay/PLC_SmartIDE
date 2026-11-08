@@ -6,8 +6,9 @@ import { FileEngine } from './fileEngine'
 import { assertProjectRoot, registerProjectRoot } from './pathGuard'
 import { BundleFileToWrite, bundleFolderName, readImportFolder, writeBundleFiles } from './tiaFiles'
 import { getSecret, setSecret } from './secretStore'
+import { cancelAiHttpRequest, sendAiHttpRequest } from './aiHttp'
 import { ProjectWatcher } from './watcher'
-import { ProjectLoadPayload } from '../shared/types/ipc'
+import { AiHttpRequest, ProjectLoadPayload } from '../shared/types/ipc'
 
 let mainWindow: BrowserWindow | null = null
 const projectWatcher = new ProjectWatcher()
@@ -147,3 +148,5 @@ ipcMain.handle('tia:pickImportFolder', async () => {
 
 ipcMain.handle('secrets:get', async (_, key: string) => getSecret(key))
 ipcMain.handle('secrets:set', async (_, key: string, value: string) => setSecret(key, value))
+ipcMain.handle('ai:http', async (_, request: AiHttpRequest) => sendAiHttpRequest(request))
+ipcMain.handle('ai:httpCancel', async (_, id: string) => cancelAiHttpRequest(id))

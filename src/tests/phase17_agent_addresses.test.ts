@@ -307,7 +307,7 @@ async function agentRetriesOnMissingChannel(): Promise<void> {
     dsl: 'TAG Start %I0.0 BOOL "s"\nTAG Valf %Q8.0 BOOL "SM modul"\nNW 1 "A": SERIES( NO(Start), COIL(Valf) )'
   }
   let asked = 0
-  const result = await realRouter.runAgentTurn('Q8.0 kullan', 'fast-flash', 'auto-apply', true, [], async () => {
+  const result = await realRouter.runAgentTurn('valfi aç', 'fast-flash', 'auto-apply', true, [], async () => {
     asked++
     return JSON.stringify(module)
   })

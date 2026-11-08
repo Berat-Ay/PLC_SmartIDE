@@ -199,11 +199,11 @@ function testPromptSanitizerAndModelSorting() {
   ]
 
   const sorted = sortGeminiModels(discovered)
-  assert.strictEqual(sorted[0].id, 'gemini-2.5-flash', 'Top priority is gemini-2.5-flash')
-  assert.strictEqual(sorted[1].id, 'gemini-3-flash-preview', 'Second priority is gemini-3-flash-preview')
-  assert.strictEqual(sorted[2].id, 'gemini-2.5-flash-lite', 'Third priority is gemini-2.5-flash-lite')
-  assert.strictEqual(sorted[3].id, 'gemini-2.5-pro', 'Fourth priority is gemini-2.5-pro')
-  assert.strictEqual(sorted[4].id, 'gemini-2.0-flash', 'Fifth priority is gemini-2.0-flash')
+  // Newest version first; at one version flash, then pro, then flash-lite
+  assert.deepStrictEqual(
+    sorted.map((m) => m.id),
+    ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
+  )
 
   testPass('sortGeminiModels deterministically prioritizes models according to benchmark capability')
 }
