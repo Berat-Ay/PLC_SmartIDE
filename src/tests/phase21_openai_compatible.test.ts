@@ -131,6 +131,22 @@ async function main(): Promise<void> {
   assert.strictEqual(noJsonMode[1].body.response_format, undefined)
   ok('A server that refuses response_format is asked again without it')
 
+  // ---- A reasoning model that accepts only its default temperature is asked without one ----
+  resetProject()
+  const noTemperature = mockServer((call) =>
+    call.body.temperature !== undefined
+      ? new Response(
+          '{"error":{"message":"Unsupported value: \'temperature\' does not support 0.1 with this model. Only the default (1) value is supported.","param":"temperature"}}',
+          { status: 400 }
+        )
+      : chat(lampReply('Lamp'))
+  )
+  const reasoning = await router.executePrompt('Start butonu lambayı yaksın', 'fast-flash', 'auto-apply')
+  assert.ok(!reasoning.isError, reasoning.replyText)
+  assert.strictEqual(noTemperature.length, 2)
+  assert.deepStrictEqual(noTemperature[1].body.response_format, { type: 'json_object' }, 'JSON mode stays on')
+  ok('A model that refuses the temperature is asked again without it, and keeps JSON mode')
+
   // ---- Errors say what happened ----
   resetProject()
   mockServer(() => Promise.reject(new TypeError('Failed to fetch')))

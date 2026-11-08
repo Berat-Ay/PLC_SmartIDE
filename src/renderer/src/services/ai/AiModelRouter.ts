@@ -2848,6 +2848,8 @@ If the prompt is purely informational without ladder logic, provide an explanati
     let jsonMode = true
     // Streamed, the first bytes come at once: a proxy such as Cloudflare cuts a request that is silent for 100 s (HTTP 524)
     let streamMode = true
+    // Reasoning models (OpenAI o-series, GPT-5) accept only their default temperature
+    let sendTemperature = true
     const requestModel = async (contents: GeminiContent[]): Promise<string> => {
       const startMs = Date.now()
       const messages = [
@@ -2861,7 +2863,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
           body: JSON.stringify({
             model,
             messages,
-            temperature: 0.1,
+            ...(sendTemperature ? { temperature: 0.1 } : {}),
             ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
             ...(streamMode ? { stream: true } : {})
           }),
@@ -2870,6 +2872,13 @@ If the prompt is purely informational without ladder logic, provide an explanati
         })
 
       let res = await send()
+      if (res.status === 400 && sendTemperature && /temperature/i.test(res.body)) {
+        BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `${model} refused the temperature (HTTP 400). Asking without it`, {
+          errorBody: res.body.slice(0, 2000)
+        })
+        sendTemperature = false
+        res = await send()
+      }
       if (res.status === 400 && jsonMode) {
         BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `${model} refused response_format (HTTP 400). Asking without it`, {
           errorBody: res.body.slice(0, 2000)
