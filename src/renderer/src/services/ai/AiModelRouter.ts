@@ -138,6 +138,8 @@ type TurnPlan =
 const MAX_TEST_ROUNDS = 3
 /** How often a pinned model is asked again after a busy, rate limited or slow answer */
 const PINNED_MODEL_RETRIES = 6
+/** A longer wait than this is not waited for: the request fails and says why */
+const PINNED_MODEL_MAX_WAIT_MS = 120000
 
 interface AgentModelReply {
   behaviorTest?: BehaviorTest
@@ -1796,10 +1798,13 @@ If the prompt is purely informational without ladder logic, provide an explanati
         if (!this.config.pinModel || pinnedRetries >= PINNED_MODEL_RETRIES) return false
         if (status !== 0 && status !== 429 && status !== 503) return false
         if (status === 429 && /limit:\s*0\b/.test(body)) return false
+        // A daily quota comes back in hours: waiting would only look like a hang
+        if (status === 429 && /PerDay/i.test(body)) return false
         pinnedRetries++
         // Gemini says how long to wait on a 429 ("retryDelay": "23s")
         const suggested = Number(body.match(/"retryDelay":\s*"(\d+(?:\.\d+)?)s"/)?.[1])
         const waitMs = Number.isFinite(suggested) && suggested > 0 ? (suggested + 1) * 1000 : 5000 * 2 ** (pinnedRetries - 1)
+        if (waitMs > PINNED_MODEL_MAX_WAIT_MS) return false
         BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Pinned model: waiting ${Math.round(waitMs / 1000)} s before asking again`, {
           status,
           retry: pinnedRetries

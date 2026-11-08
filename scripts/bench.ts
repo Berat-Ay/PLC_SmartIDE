@@ -11,12 +11,21 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { AiModelRouter } from '../src/renderer/src/services/ai/AiModelRouter'
 import { SCENARIOS } from '../src/renderer/src/services/scenarios/scenarios'
+import { BlackBoxLogger } from '../src/renderer/src/services/diagnostics/BlackBoxLogger'
 import { BenchRun, formatBenchSummary, runBenchCase } from '../src/renderer/src/services/scenarios/Benchmark'
 
 const args = process.argv.slice(2)
 const option = (name: string): string | undefined => {
   const i = args.indexOf(`--${name}`)
   return i >= 0 ? args[i + 1] : undefined
+}
+// A mistyped flag would otherwise be ignored and the run would measure something else than asked
+const withValue = ['--runs', '--model', '--scenario']
+const known = [...withValue, '--test-first']
+const strange = args.filter((a, i) => a.startsWith('--') && !known.includes(a) && !withValue.includes(args[i - 1]))
+if (strange.length) {
+  console.error(`Bilinmeyen seçenek: ${strange.join(', ')}. Seçenekler: ${known.join(', ')}`)
+  process.exit(2)
 }
 const runs = Number(option('runs') || 3)
 const named = option('scenario')?.split(',').map((s) => s.trim())
@@ -47,7 +56,13 @@ const model = option('model')
 router.updateConfig({ provider: 'gemini', geminiApiKey: key, testFirst, pinModel: true, ...(model ? { selectedModelId: model } : {}) })
 const modelName = model || router.getConfig().selectedModelId || router.getConfig().fastModel
 
+// A wait for a busy model is shown, so a long pause does not look like a hang
+BlackBoxLogger.getInstance().subscribe((entry) => {
+  if (/^Pinned model: waiting/.test(entry.summary)) process.stdout.write(`[${entry.summary.replace('Pinned model: waiting', 'model meşgul, bekleniyor:').replace(' before asking again', '')}] `)
+})
+
 async function main(): Promise<void> {
+  let quotaGone = false
   const results: BenchRun[] = []
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const outDir = path.resolve('bench-results')
@@ -71,7 +86,18 @@ async function main(): Promise<void> {
       )
       // Written after every run, so an interrupted benchmark keeps what it measured
       fs.writeFileSync(outFile, JSON.stringify({ model: modelName, testFirst, runsPerScenario: runs, results }, null, 2))
+      // With the daily quota used up every further run would only fail, and the summary would mean nothing
+      if (result.outcome !== 'applied' && result.outcome !== 'offered' && /PerDay|per day/i.test(result.reply)) {
+        quotaGone = true
+        break
+      }
     }
+    if (quotaGone) break
+  }
+  if (quotaGone) {
+    console.log(`
+Günlük istek kotası bitti (${modelName}). Benchmark durduruldu; ölçülen ${results.length} koşu ${outFile} dosyasında.`)
+    console.log('Ücretsiz planda model başına günde yaklaşık 20 istek var; bir tam benchmark bundan fazlasını ister.')
   }
 
   console.log(`\nModel: ${modelName}${testFirst ? ', önce test' : ''}\n`)

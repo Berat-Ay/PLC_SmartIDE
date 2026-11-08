@@ -242,6 +242,19 @@ NW 4 "d": SERIES( NO(Motor), COIL(RunLamp) )`
   assert.ok(asked2.every((u) => u.includes('/gemini-2.5-flash:')), asked2.join('\n'))
   ok('A pinned model that is rate limited is asked again after the delay Gemini gives, not replaced')
 
+  // ---- A used-up daily quota is not waited for ----
+  asked2.length = 0
+  ;(globalThis as { fetch: unknown }).fetch = async (url: string) => {
+    asked2.push(url)
+    return reply(429, { error: { details: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }, { retryDelay: '54345s' }] } })
+  }
+  const startedAt = Date.now()
+  const exhausted = await router.executePrompt('merhaba', 'fast-flash', 'auto-apply')
+  assert.ok(exhausted.isError && /PerDay/.test(exhausted.replyText), exhausted.replyText)
+  assert.ok(Date.now() - startedAt < 5000, 'No wait for a quota that returns in hours')
+  assert.strictEqual(asked2.length, 1)
+  ok('A pinned model whose daily quota is used up fails at once and says so, instead of waiting for hours')
+
   ;(globalThis as { fetch: unknown }).fetch = realFetch
   router.updateConfig({ geminiApiKey: '', testFirst: false, pinModel: false })
   console.log(`\nPhase 23: ${passed} passed, 0 failed\n`)
