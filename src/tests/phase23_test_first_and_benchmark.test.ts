@@ -204,8 +204,46 @@ NW 4 "d": SERIES( NO(Motor), COIL(RunLamp) )`
   assert.deepStrictEqual([clockMemory.byteAddress, systemMemory.byteAddress], [0, 1], 'Turned on, they default to MB0 and MB1')
   ok('A new project starts with clock and system memory off, so M0.x and M1.x belong to the user')
 
+  // ---- Model discovery refreshes the list but keeps the user's model ----
+  const asked2: string[] = []
+  const reply = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status })
+  const answer = { candidates: [{ content: { parts: [{ text: JSON.stringify({ explanation: 'Merhaba' }) }] } }] }
+  router.updateConfig({ testFirst: false, selectedModelId: 'gemini-2.5-flash', availableModels: [] })
+  ;(globalThis as { fetch: unknown }).fetch = async (url: string) => {
+    asked2.push(url)
+    if (url.endsWith('/v1beta/models')) {
+      return reply(200, { models: [{ name: 'models/gemini-9-flash', supportedGenerationMethods: ['generateContent'] }] })
+    }
+    if (url.includes('/gemini-2.5-flash:')) return reply(503, { error: 'busy' })
+    if (url.includes('/gemini-3-flash-preview:')) return reply(404, { error: 'not found' })
+    return reply(200, answer)
+  }
+  const healed = await router.executePrompt('merhaba', 'fast-flash', 'auto-apply')
+  assert.ok(!healed.isError, healed.replyText)
+  assert.ok(asked2.some((u) => u.endsWith('/v1beta/models')), 'The 404 started a discovery')
+  assert.strictEqual(router.getConfig().selectedModelId, 'gemini-2.5-flash', 'A busy model the user chose stays selected')
+  ok('Model discovery after a 404 refreshes the list but does not replace the model the user chose')
+
+  // ---- A pinned model is waited for, never replaced ----
+  asked2.length = 0
+  router.updateConfig({ pinModel: true, availableModels: [] })
+  let first = true
+  ;(globalThis as { fetch: unknown }).fetch = async (url: string) => {
+    asked2.push(url)
+    if (first) {
+      first = false
+      return reply(429, { error: { details: [{ retryDelay: '0.01s' }] } })
+    }
+    return reply(200, answer)
+  }
+  const pinned = await router.executePrompt('merhaba', 'fast-flash', 'auto-apply')
+  assert.ok(!pinned.isError, pinned.replyText)
+  assert.strictEqual(asked2.length, 2)
+  assert.ok(asked2.every((u) => u.includes('/gemini-2.5-flash:')), asked2.join('\n'))
+  ok('A pinned model that is rate limited is asked again after the delay Gemini gives, not replaced')
+
   ;(globalThis as { fetch: unknown }).fetch = realFetch
-  router.updateConfig({ geminiApiKey: '', testFirst: false })
+  router.updateConfig({ geminiApiKey: '', testFirst: false, pinModel: false })
   console.log(`\nPhase 23: ${passed} passed, 0 failed\n`)
 }
 

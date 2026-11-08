@@ -158,13 +158,14 @@ export function formatBenchSummary(runs: BenchRun[]): string {
   const fullAll = runs.filter((r) => r.specPassed === r.specTotal && (r.outcome === 'applied' || r.outcome === 'offered')).length
   const models = Array.from(new Set(runs.flatMap((r) => r.models)))
   const fellBack = runs.filter((r) => r.fallbacks.length > 0).length
+  const mixed = models.length > 1 ? ' Birden fazla model cevap verdi: sonuçlar tek bir modelin değil.' : ''
   return [
     line(header),
     line(widths.map((w) => '-'.repeat(w))),
     ...rows.map(line),
     '',
     `Toplam: ${all} koşu, spesifikasyonun tamamını karşılayan ${fullAll} (${percent(fullAll, all)}).`,
-    `Cevap veren modeller: ${models.join(', ') || '-'}` + (fellBack ? `. ${fellBack} koşuda başka modele geçildi (meşgul / zaman aşımı).` : ''),
+    `Cevap veren modeller: ${models.join(', ') || '-'}` + (fellBack ? `. ${fellBack} koşuda model en az bir kez meşgul, hız sınırında ya da yavaştı.` : '') + mixed,
     'Ort. spec: boş ve hatalı koşular da ortalamaya girer; boş program hiçbir kontrolü geçmez.'
   ].join('\n')
 }

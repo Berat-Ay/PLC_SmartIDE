@@ -95,6 +95,11 @@ export interface AiConfig {
   requestTimeoutSec: number
   /** The model writes the simulation test first; the user approves it before the circuit is written */
   testFirst: boolean
+  /**
+   * Ask only the selected model, and wait and ask it again when it is busy or rate limited, instead of
+   * moving to another model. For measurements, where an answer from another model would be counted as its.
+   */
+  pinModel?: boolean
 }
 
 const MAX_AGENT_ROUNDS = 6
@@ -131,6 +136,8 @@ type TurnPlan =
   | { stage: 'circuit'; test: BehaviorTest; tags: ProposedTag[] }
 
 const MAX_TEST_ROUNDS = 3
+/** How often a pinned model is asked again after a busy, rate limited or slow answer */
+const PINNED_MODEL_RETRIES = 6
 
 interface AgentModelReply {
   behaviorTest?: BehaviorTest
@@ -1742,7 +1749,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
       .trim()
       .replace(/^models\//i, '')
 
-    const candidateModels = [
+    const candidateModels = this.config.pinModel ? [primaryModel] : [
       primaryModel,
       ...sortGeminiModels(this.config.availableModels || [])
         .slice(0, 6)
@@ -1782,6 +1789,29 @@ If the prompt is purely informational without ladder logic, provide an explanati
       if (queue.length === 0) {
         const reasons = Array.from(this.unavailableModels.entries()).map(([m, why]) => `${m}: ${why}`)
         throw new Error(`No Gemini model can answer with this key. ${reasons.join('; ')}`)
+      }
+      // A pinned model that is busy, rate limited or slow is asked again after a pause, a few times
+      let pinnedRetries = 0
+      const waitForPinnedModel = async (status: number, body: string): Promise<boolean> => {
+        if (!this.config.pinModel || pinnedRetries >= PINNED_MODEL_RETRIES) return false
+        if (status !== 0 && status !== 429 && status !== 503) return false
+        if (status === 429 && /limit:\s*0\b/.test(body)) return false
+        pinnedRetries++
+        // Gemini says how long to wait on a 429 ("retryDelay": "23s")
+        const suggested = Number(body.match(/"retryDelay":\s*"(\d+(?:\.\d+)?)s"/)?.[1])
+        const waitMs = Number.isFinite(suggested) && suggested > 0 ? (suggested + 1) * 1000 : 5000 * 2 ** (pinnedRetries - 1)
+        BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Pinned model: waiting ${Math.round(waitMs / 1000)} s before asking again`, {
+          status,
+          retry: pinnedRetries
+        })
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, waitMs)
+          signal?.addEventListener('abort', () => {
+            clearTimeout(timer)
+            resolve()
+          })
+        })
+        return !signal?.aborted
       }
       for (let i = 0; i < queue.length; i++) {
         const modelToTry = queue[i]
@@ -1917,11 +1947,13 @@ If the prompt is purely informational without ladder logic, provide an explanati
 
                   const sorted = sortGeminiModels(filtered)
                   if (sorted.length > 0) {
+                    // Only the list is refreshed. The user's model stays selected: if it is the one that is not
+                    // served, it is replaced below by the model that answers
                     this.config.availableModels = sorted
-                    this.config.selectedModelId = sorted[0].id
                     this.saveConfig()
 
                     for (const dm of sorted) {
+                      if (this.config.pinModel) break
                       if (!candidateModels.includes(dm.id)) {
                         candidateModels.push(dm.id)
                         if (!this.unavailableModels.has(dm.id)) queue.push(dm.id)
@@ -1941,6 +1973,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
             }
 
             lastError = new Error(`Gemini API HTTP Error on ${cleanModelId}: ${errStatus} ${errorBodyText}`)
+            if (await waitForPinnedModel(errStatus, errorBodyText)) i--
             continue
           }
 
@@ -1966,6 +1999,10 @@ If the prompt is purely informational without ladder logic, provide an explanati
                 `Candidate model ${cleanModelId} timed out after ${this.modelTimeoutMs / 1000} s. Trying the next one`,
                 { model: cleanModelId }
               )
+              if (await waitForPinnedModel(0, '')) {
+                failedThisTurn.delete(cleanModelId)
+                i--
+              }
               continue
             }
             throw fetchErr

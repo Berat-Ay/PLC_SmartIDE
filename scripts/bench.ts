@@ -43,7 +43,8 @@ for (const s of SCENARIOS.filter((s) => s.notInBenchmark && !named?.includes(s.i
 const promptsDir = path.resolve('src/renderer/src/services/scenarios/prompts')
 const router = AiModelRouter.getInstance()
 const model = option('model')
-router.updateConfig({ provider: 'gemini', geminiApiKey: key, testFirst, ...(model ? { selectedModelId: model } : {}) })
+// Only the named model answers: a busy model is waited for, not replaced by another one
+router.updateConfig({ provider: 'gemini', geminiApiKey: key, testFirst, pinModel: true, ...(model ? { selectedModelId: model } : {}) })
 const modelName = model || router.getConfig().selectedModelId || router.getConfig().fastModel
 
 async function main(): Promise<void> {
