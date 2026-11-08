@@ -156,9 +156,13 @@ const faultPath: PathStep[] = [
   // The fixture never reaches the front sensor
   { atMs: 4900, expect: { fault: { [RC.Siren]: false } } },
   { atMs: 5300, expect: { fault: { [RC.Siren]: true, [RC.Ready]: false } } },
-  { atMs: 5400, set: { [RC.Reset]: true } },
-  { atMs: 5500, set: { [RC.Reset]: false } },
-  { atMs: 5600, expect: { fault: { [RC.Siren]: false, [RC.Ready]: true } } }
+  // The operator frees the fixture; the siren stays until Hata Reset. Resetting while the fault is still
+  // there is not checked: a circuit may set the siren again at once, as the fault is not fixed.
+  { atMs: 5400, set: { [RC.FixtFwd]: true } },
+  { atMs: 5600, expect: { fault: { [RC.Siren]: true, [RC.Ready]: false } } },
+  { atMs: 5700, set: { [RC.Reset]: true } },
+  { atMs: 5800, set: { [RC.Reset]: false } },
+  { atMs: 5900, expect: { fault: { [RC.Siren]: false } } }
 ]
 
 export const ROBOT_CELL: Scenario = {
@@ -175,7 +179,7 @@ export const ROBOT_CELL: Scenario = {
     { id: 'pulse', kind: 'spec', title: 'NW6: Çevrim_Bitti (M10.1) anlık olarak 1 olur, kalıcı kalmaz', mustTurnOn: [RC.CycleDone] },
     { id: 'again', kind: 'spec', title: 'NW6: Sistem başa döner, ikinci parça yeni çevrim başlatır' },
     { id: 'estop', kind: 'spec', title: 'NW7: E-stop adımları sıfırlar; güvenlik dönünce kendiliğinden devam etmez' },
-    { id: 'fault', kind: 'spec', title: 'NW7: I0.3 5 s içinde gelmezse siren (Q0.4); Hata Reset\'e kadar sistem hazır olmaz' },
+    { id: 'fault', kind: 'spec', title: 'NW7: I0.3 5 s içinde gelmezse siren (Q0.4) ve sistem hazır değil; hata giderilince siren Hata Reset\'e kadar kalır, Reset ile söner' },
     { id: 'estopTrigger', kind: 'interpretation', title: 'E-stop anında Robot 1 start tetiği (Q1.1) hemen düşer; TP darbesi süresini tamamlamaz' },
     { id: 'hold', kind: 'interpretation', title: 'Fikstür robotlar çalışırken kapalı kalır (Q0.0, Adım 2–4 boyunca 1)' }
   ],

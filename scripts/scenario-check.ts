@@ -26,6 +26,14 @@ if (/lines hidden/.test(dump) || !/## 2\. ACTIVE OB1_MAIN LADDER AST/.test(dump)
   process.exit(2)
 }
 const project = projectFromDump(dump, DemoProjectSeeder.createDemoProject())
+const elementCount = project.ladBlocks.reduce((n, b) => n + b.networks.reduce((m, nw) => m + (nw.nodes?.length ?? 0), 0), 0)
+if (elementCount === 0) {
+  console.error(
+    'Bu dump\'ta devre yok: OB1 boş. Ölçülecek bir şey olmadığından puan verilmedi.\n' +
+      'Ajanın son cevabı kendi simülasyon testinden geçemeyip geri alınmış olabilir (bölüm 5\'te "Agent reply undone").'
+  )
+  process.exit(2)
+}
 const results = evaluateScenario(scenario, project)
 console.log(formatReport(scenario, results))
 process.exit(results.some((r) => !r.passed && r.check.kind === 'spec') ? 1 : 0)
