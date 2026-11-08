@@ -1,9 +1,12 @@
 // Runs the agent on the benchmark scenarios with the real Gemini API and scores the results.
 // Usage (PowerShell):
 //   $env:GEMINI_API_KEY = "..."; npm run bench -- --runs 3 --model gemini-3.5-flash
+//   $env:OPENAI_API_KEY = "..."; npm run bench -- --provider openai --endpoint https://host/v1 --model NAME
 // Options:
 //   --runs N             runs per scenario (default 3)
-//   --model ID           Gemini model (default: the app's default fast model)
+//   --provider P         gemini (default) or openai: any OpenAI-compatible API, key in OPENAI_API_KEY
+//   --endpoint URL       base URL of the OpenAI-compatible API, up to /v1 (default https://api.openai.com/v1)
+//   --model ID           model (Gemini default: the app's default fast model; required for openai)
 //   --scenario a,b       only these scenarios; a scenario left out of the benchmark is run only when named
 //   --test-first         let the agent write and freeze the test before the circuit (approved without a person)
 // Results go to bench-results/<time>-<model>.json, a summary to the console.
@@ -20,7 +23,7 @@ const option = (name: string): string | undefined => {
   return i >= 0 ? args[i + 1] : undefined
 }
 // A mistyped flag would otherwise be ignored and the run would measure something else than asked
-const withValue = ['--runs', '--model', '--scenario']
+const withValue = ['--runs', '--model', '--scenario', '--provider', '--endpoint']
 const known = [...withValue, '--test-first']
 const strange = args.filter((a, i) => a.startsWith('--') && !known.includes(a) && !withValue.includes(args[i - 1]))
 if (strange.length) {
@@ -30,9 +33,19 @@ if (strange.length) {
 const runs = Number(option('runs') || 3)
 const named = option('scenario')?.split(',').map((s) => s.trim())
 const testFirst = args.includes('--test-first')
-const key = process.env.GEMINI_API_KEY?.trim()
+const provider = option('provider') || 'gemini'
+if (provider !== 'gemini' && provider !== 'openai') {
+  console.error('--provider gemini ya da openai olmalı.')
+  process.exit(2)
+}
+const keyName = provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY'
+const key = process.env[keyName]?.trim()
 if (!key) {
-  console.error('GEMINI_API_KEY ortam değişkeni yok. PowerShell: $env:GEMINI_API_KEY = "anahtar"; npm run bench')
+  console.error(`${keyName} ortam değişkeni yok. PowerShell: $env:${keyName} = "anahtar"; npm run bench`)
+  process.exit(2)
+}
+if (provider === 'openai' && !option('model')) {
+  console.error('OpenAI uyumlu API için --model gerekli (sunucunun model adı).')
   process.exit(2)
 }
 if (!Number.isInteger(runs) || runs < 1) {
@@ -53,7 +66,18 @@ const promptsDir = path.resolve('src/renderer/src/services/scenarios/prompts')
 const router = AiModelRouter.getInstance()
 const model = option('model')
 // Only the named model answers: a busy model is waited for, not replaced by another one
-router.updateConfig({ provider: 'gemini', geminiApiKey: key, testFirst, pinModel: true, ...(model ? { selectedModelId: model } : {}) })
+if (provider === 'gemini') {
+  router.updateConfig({ provider: 'gemini', geminiApiKey: key, testFirst, pinModel: true, ...(model ? { selectedModelId: model } : {}) })
+} else {
+  // An OpenAI-compatible API is asked with the one model it is given; there is no fallback to pin against
+  router.updateConfig({
+    provider: 'openai',
+    openaiApiKey: key,
+    openaiEndpoint: option('endpoint') || 'https://api.openai.com/v1',
+    openaiModel: model,
+    testFirst
+  })
+}
 const modelName = model || router.getConfig().selectedModelId || router.getConfig().fastModel
 
 // A wait for a busy model is shown, so a long pause does not look like a hang

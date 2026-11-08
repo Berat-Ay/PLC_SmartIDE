@@ -78,7 +78,7 @@ export async function runBenchCase(
   const models: string[] = []
   const fallbacks: string[] = []
   const unsubscribe = BlackBoxLogger.getInstance().subscribe((entry) => {
-    const answered = entry.category === 'AI_RAW_RESPONSE' && entry.summary.match(/received from (\S+)/)
+    const answered = entry.category === 'AI_RAW_RESPONSE' && entry.summary.match(/(?:received|response) from (\S+)/)
     if (answered) models.push(answered[1])
     if (entry.category === 'AI_FALLBACK_OR_RETRY' && /^Candidate model/.test(entry.summary)) fallbacks.push(entry.summary)
   })
