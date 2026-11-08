@@ -2315,6 +2315,9 @@ If the prompt is purely informational without ladder logic, provide an explanati
     let lastProblems: string[] = []
     let rawText = ''
     let rawJson: string | undefined
+    // The last circuit that compiled cleanly and failed only its simulation test. The test may be what is wrong,
+    // so when the rounds run out it is offered for review instead of being lost
+    let candidate: { circuit: AiCircuitSynthesisPayload; problems: string[]; round: number } | undefined
 
     const respond = (fields: Partial<AgentExecutionResponse> & { replyText: string }): AgentExecutionResponse => ({
       tier,
@@ -2418,6 +2421,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
             tools.discardDiskWrites()
             tools.restoreSnapshot(turnStart)
             problems.push(...behavior.problems)
+            if (behavior.problems.length > 0) candidate = { circuit: reply.circuit, problems: behavior.problems, round: round + 1 }
             behaviorNote = behavior.note
           } else if (reply.circuit) {
             behaviorNote = isTurkish
@@ -2473,6 +2477,10 @@ If the prompt is purely informational without ladder logic, provide an explanati
             const behavior = this.checkCircuitBehavior(reply.behaviorTest, askedOnce, isTurkish, reply.circuit)
             problems.push(...behavior.problems)
             behaviorNote = behavior.note ? `\n\n${behavior.note}` : ''
+            // A reply that also writes blocks or tags cannot be offered as one staged circuit
+            if (behavior.problems.length > 0 && writes.length === 0) {
+              candidate = { circuit: reply.circuit, problems: behavior.problems, round: round + 1 }
+            }
           }
           if (problems.length === 0) {
             tools.releaseDiskWrites()
@@ -2523,6 +2531,29 @@ If the prompt is purely informational without ladder logic, provide an explanati
     }
 
     const details = lastProblems.map((p) => `- ${p}`).join('\n')
+    if (candidate) {
+      let staged: AgentExecutionResponse['stagedChangeset']
+      try {
+        staged = this.applyCircuitPayload(candidate.circuit, 'diff-view').stagedChangeset
+      } catch {
+        staged = undefined
+      }
+      if (staged && staged.length > 0) {
+        const failed = candidate.problems.map((p) => `- ${p}`).join('\n')
+        return respond({
+          replyText: isTurkish
+            ? `Model ${MAX_AGENT_ROUNDS} denemede kendi simülasyon testini geçemedi. **Projede değişiklik yapılmadı.**\n\n` +
+              `${candidate.round}. denemenin devresi derleyiciden hatasız geçti, yalnızca testte kaldı. Hata devrede de olabilir, modelin testinde de. ` +
+              `Bu devre onay penceresinde öneri olarak duruyor: aşağıdaki kontrolleri okuyup kendiniz karar verin.\n\n${failed}`
+            : `The model did not pass its own simulation test in ${MAX_AGENT_ROUNDS} attempts. **The project was not changed.**\n\n` +
+              `The circuit of attempt ${candidate.round} compiled without errors and failed only the test. The fault may be in the circuit or in the model's test. ` +
+              `It is offered for review in the approval window: read the checks below and decide yourself.\n\n${failed}`,
+          stagedChangeset: staged,
+          isError: true,
+          errorDetails: details
+        })
+      }
+    }
     return respond({
       replyText: isTurkish
         ? `Model ${MAX_AGENT_ROUNDS} denemede çalışan bir sonuç üretemedi. Projede değişiklik yapılmadı.\n\n${details}`

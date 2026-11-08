@@ -210,6 +210,35 @@ NW 4 "Table": SERIES( NO("I_R1_Home"), NO("I_R2_Home"), COIL("Q_Table_Rot") )`)
   assert.ok(withFb.replyText.includes('FB/FC hiçbir yerden çağrılmıyor'), withFb.replyText)
   ok('A reply that creates an FB says that the FB is never called')
 
+  // ---- A circuit that only failed its test is offered for review when the rounds run out ----
+  // The robot cell of dump9: the circuit met the specification from round 3 on, but every test was too strict,
+  // and the user was left with nothing. Here the lamp follows the permit one scan later, as networks run in order
+  resetProject()
+  const LATE = 'NW 1 "Lamp": SERIES( NO(Q_R1_Permit), COIL(Q_Table_Rot) )\nNW 2 "Permit": SERIES( NO(I_R1_Zone), COIL(Q_R1_Permit) )'
+  const tooEarly = { steps: [{ atMs: 100, set: { I_R1_Zone: true }, expect: { Q_R1_Permit: true, Q_Table_Rot: true } }] }
+  const strict = scripted(reply(LATE, { verification: tooEarly }))
+  const offered = (await router.runAgentTurn('lamp', 'fast-flash', 'auto-apply', true, [], strict.fn)) as {
+    replyText: string
+    isError?: boolean
+    stagedChangeset?: Array<{ afterContent: string }>
+  }
+  assert.match(strict.sent[1], /'Q_Table_Rot' should be TRUE but is FALSE\. It becomes TRUE 1 scan\(s\) later/, 'The model is told the value came one scan late')
+  assert.match(strict.sent[1], /check this value later in the test and keep the circuit/)
+  assert.doesNotMatch(strict.sent[1], /'Q_R1_Permit' should be/, 'A value that was right is not reported')
+  assert.ok(offered.replyText.includes('onay penceresinde öneri olarak duruyor'), offered.replyText)
+  assert.ok(offered.replyText.includes('Projede değişiklik yapılmadı'), offered.replyText)
+  assert.ok(offered.stagedChangeset?.some((c) => c.afterContent.includes('Q_Table_Rot')), 'The circuit is staged for review')
+  const ob1 = useBlockStore.getState().ladBlocks.find((b) => b.blockType === 'OB' && b.blockNumber === 1)!
+  assert.strictEqual(ob1.networks.length, 0, 'Nothing was applied')
+  assert.ok(!allTags().some((t) => t.address === '%Q0.2' && t.name !== 'Q_Table_Rot'), 'The tag tables are as before')
+
+  // A circuit that never compiled is not offered
+  resetProject()
+  const neverRan = scripted(reply('NW 1 "x": SERIES( NO(I_R1_Zone), FOO(Q_R1_Permit) )'))
+  const none = (await router.runAgentTurn('x', 'fast-flash', 'auto-apply', true, [], neverRan.fn)) as { replyText: string; isError?: boolean; stagedChangeset?: unknown[] }
+  assert.ok(none.isError && !none.stagedChangeset, 'Only a circuit that ran is offered')
+  ok('A value that comes a scan late is named, and a circuit that only failed its test is offered, not applied')
+
   // ---- MOVE has two values. Read as ADD it wrote nowhere and a state machine never left its first state ----
   resetProject()
   assert.match(problemsOf('NW 1 "x": SERIES( NO(I_R1_Zone), MOVE(20) )'), /MOVE takes 2 values, in, out/, 'MOVE needs a target')

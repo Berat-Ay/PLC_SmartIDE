@@ -229,7 +229,8 @@ export const AgentPanel: React.FC = () => {
       const router = AiModelRouter.getInstance()
       const response = await router.executePrompt(promptText, agentTier, agentMode, controller.signal)
 
-      if (agentMode === 'diff-view' && response.stagedChangeset && response.stagedChangeset.length > 0) {
+      // Diff-view stages every change. In auto-apply a circuit that failed its test is staged for review instead
+      if (response.stagedChangeset && response.stagedChangeset.length > 0) {
         setPendingChangeset(response.stagedChangeset as StagedFileChange[])
         setDiffModalOpen(true)
       }
