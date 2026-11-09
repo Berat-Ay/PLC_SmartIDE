@@ -28,6 +28,7 @@ import { PlcAgentTools, StagedFileChange } from '../../services/ai/PlcAgentTools
 import { CoilDiagnosticEngine, CoilDiagnosticReport } from '../../services/ai/CoilDiagnosticEngine'
 import { RagKnowledgeEngine } from '../../services/ai/RagKnowledgeEngine'
 import { AiSettingsModal } from './AiSettingsModal'
+import { formatAcceptanceLine } from '../../services/scenarios/ScenarioAcceptance'
 import { DiffViewerModal } from './DiffViewerModal'
 import { PlcBookTrainerModal } from './PlcBookTrainerModal'
 
@@ -255,7 +256,8 @@ export const AgentPanel: React.FC = () => {
         snippet: response.rawTraceSnippet,
         rawJson: response.rawJson,
         isError: response.isError,
-        errorDetails: response.errorDetails
+        errorDetails: response.errorDetails,
+        acceptanceReport: response.acceptanceReport
       })
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err)
@@ -561,6 +563,25 @@ export const AgentPanel: React.FC = () => {
               }`}
             >
               <MarkdownMessageRenderer text={msg.text} />
+              {msg.acceptanceReport && (
+                <div
+                  data-testid="agent-acceptance-badge"
+                  title={`${msg.acceptanceReport.scenarioTitle}. ${
+                    msg.acceptanceReport.gate === 'enforce'
+                      ? 'Spec failures were sent to the model (enforce): an upper bound, not the model\'s own result.'
+                      : 'Shown only to you; not sent to the model.'
+                  }`}
+                  className={`mt-2 inline-flex flex-wrap items-center gap-1.5 px-1.5 py-0.5 border font-mono text-[10px] ${
+                    msg.acceptanceReport.specPassed === msg.acceptanceReport.specTotal
+                      ? 'bg-emerald-950/50 border-emerald-800 text-emerald-300'
+                      : 'bg-amber-950/50 border-amber-800 text-amber-300'
+                  }`}
+                >
+                  <span className="font-bold">Kabul · {msg.acceptanceReport.scenarioId}</span>
+                  <span>{formatAcceptanceLine(msg.acceptanceReport)}</span>
+                  {msg.acceptanceReport.gate === 'enforce' && <span className="text-industrial-400">[enforce]</span>}
+                </div>
+              )}
               {msg.isError && (
                 <div
                   data-testid="agent-error-card"

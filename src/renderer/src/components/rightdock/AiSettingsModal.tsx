@@ -422,6 +422,24 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({ isOpen, onClos
             </p>
           </div>
 
+          {/* Built-in scenario acceptance tests: shown to the user, or also used as a gate for the model */}
+          <div>
+            <label className="block text-industrial-300 font-semibold mb-1.5">Scenario acceptance test</label>
+            <select
+              data-testid="ai-acceptance-gate-select"
+              value={config.acceptanceGate || 'report'}
+              onChange={(e) => setConfig({ ...config, acceptanceGate: e.target.value as AiConfig['acceptanceGate'] })}
+              className="bg-industrial-950 border border-industrial-700 rounded-none px-2.5 py-1 text-industrial-200 font-mono text-[11px]"
+            >
+              <option value="report">Report (show to me only)</option>
+              <option value="enforce">Enforce (send spec failures to the model)</option>
+              <option value="off">Off</option>
+            </select>
+            <p className="mt-1 text-industrial-500 text-[10px]">
+              Used only when your request is one of the built-in scenarios (robot cell, pick &amp; place, textbook exercises). Report shows how the circuit meets the scenario's specification and never tells the model. Enforce undoes a circuit that fails a spec check and sends the failures to the model, so a pass is no longer an impartial result. Not used with Ollama.
+            </p>
+          </div>
+
           {/* Language Preference */}
           <div>
             <label className="block text-industrial-300 font-semibold mb-1.5 flex items-center gap-1.5">

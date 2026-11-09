@@ -18,6 +18,17 @@ import { LadderDslCompiler, DslCompilerOptions } from '../compiler/LadderDslComp
 import { RagKnowledgeEngine } from './RagKnowledgeEngine'
 import { aiHttp } from './aiHttp'
 import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
+import {
+  AcceptanceGate,
+  AcceptanceSummary,
+  evaluateScenario,
+  formatAcceptanceLine,
+  matchScenario,
+  Scenario,
+  specViolationsForModel,
+  summarizeAcceptance
+} from '../scenarios/ScenarioAcceptance'
+import { SCENARIOS } from '../scenarios/scenarios'
 import { approvedTagsMoved, approvedTestRequest, formatTestForUser, ProposedTag, TEST_FIRST_REQUEST, validateTestProposal } from './TestFirst'
 import {
   LadderNode,
@@ -95,6 +106,11 @@ export interface AiConfig {
   requestTimeoutSec: number
   /** The model writes the simulation test first; the user approves it before the circuit is written */
   testFirst: boolean
+  /**
+   * When the request is one of the built-in scenarios: show its acceptance result (report), also send failed
+   * spec checks back to the model and undo the circuit (enforce), or do nothing (off). See AcceptanceGate.
+   */
+  acceptanceGate: AcceptanceGate
   /**
    * Ask only the selected model, and wait and ask it again when it is busy or rate limited, instead of
    * moving to another model. For measurements, where an answer from another model would be counted as its.
@@ -278,6 +294,8 @@ export interface AgentExecutionResponse {
   errorDetails?: string
   /** Test first: a test that waits for the user's approval before the circuit is written */
   pendingTest?: { test: BehaviorTest; tags: ProposedTag[] }
+  /** The acceptance result of the circuit this reply is about, when the request is a built-in scenario */
+  acceptanceReport?: AcceptanceSummary
 }
 
 const STORAGE_KEY = 'antigravity_ai_config_v1'
@@ -329,7 +347,8 @@ export const defaultAiConfig: AiConfig = {
   openaiModel: '',
   openaiModels: [],
   requestTimeoutSec: 180,
-  testFirst: false
+  testFirst: false,
+  acceptanceGate: 'report'
 }
 
 // Newer versions first. At one version: flash, then pro (slow), then flash-lite (weakest); a release before its preview
@@ -2185,18 +2204,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
       )
     }
 
-    const blocks = useBlockStore.getState()
-    const metadata = useProjectStore.getState().metadata
-    const result = runBehaviorTest(test, {
-      projectPath: metadata?.projectPath || '',
-      metadata,
-      hardware: useHardwareStore.getState().config,
-      tagTables: useTagStore.getState().tagTables,
-      udts: blocks.udts,
-      dataBlocks: blocks.dataBlocks,
-      ladBlocks: blocks.ladBlocks,
-      sclBlocks: blocks.sclBlocks
-    } as ProjectLoadPayload)
+    const result = runBehaviorTest(test, this.projectInStores())
     BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', `Simulation test: ${result.checks} checks, ${result.failures.length} failed`, {
       failures: result.failures,
       pulses: result.pulses,
@@ -2294,6 +2302,51 @@ If the prompt is purely informational without ladder logic, provide an explanati
       return asked
     }
     return { problems: [], note: passed }
+  }
+
+  /** The project as it stands in the stores */
+  private projectInStores(): ProjectLoadPayload {
+    const blocks = useBlockStore.getState()
+    const metadata = useProjectStore.getState().metadata
+    return {
+      projectPath: metadata?.projectPath || '',
+      metadata,
+      hardware: useHardwareStore.getState().config,
+      tagTables: useTagStore.getState().tagTables,
+      udts: blocks.udts,
+      dataBlocks: blocks.dataBlocks,
+      ladBlocks: blocks.ladBlocks,
+      sclBlocks: blocks.sclBlocks
+    } as ProjectLoadPayload
+  }
+
+  /**
+   * The scenario's acceptance tests on the project as it stands. Under enforce, failed spec checks are problems
+   * for the model; interpretation checks never are. The note is for the user only.
+   */
+  private judgeAcceptance(
+    scenario: Scenario,
+    gate: AcceptanceGate,
+    isTurkish: boolean
+  ): { problems: string[]; summary: AcceptanceSummary; note: string } {
+    const results = evaluateScenario(scenario, this.projectInStores())
+    const summary = summarizeAcceptance(scenario, results, gate)
+    BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', `Acceptance (${scenario.id}, ${gate}): ${formatAcceptanceLine(summary)}`, {
+      failures: results.filter((r) => !r.passed).map((r) => ({ id: r.check.id, kind: r.check.kind, failures: r.failures }))
+    })
+    const failedTitles = results.filter((r) => !r.passed).map((r) => `- ${r.check.title}${r.check.kind === 'interpretation' ? (isTurkish ? ' [yorum]' : ' [interpretation]') : ''}`)
+    const heading = isTurkish
+      ? `**Kabul testi (${scenario.title}):** ${formatAcceptanceLine(summary)}`
+      : `**Acceptance test (${scenario.title}):** ${formatAcceptanceLine(summary)}`
+    const how = isTurkish
+      ? gate === 'enforce'
+        ? 'Kabul testi kapı olarak çalıştı: spesifikasyon hataları modele gönderildi. Bu sonuç modelin kendi başarısı değil, üst sınırdır.'
+        : 'Kabul testi sonucu yalnızca size gösterilir, modele gönderilmedi.'
+      : gate === 'enforce'
+        ? "The acceptance test ran as a gate: specification failures were sent to the model. This result is an upper bound, not the model's own."
+        : 'The acceptance result is shown only to you; it was not sent to the model.'
+    const note = [heading, ...failedTitles, `*${how}*`].join('\n')
+    return { problems: gate === 'enforce' ? specViolationsForModel(results) : [], summary, note }
   }
 
   /**
@@ -2511,6 +2564,16 @@ If the prompt is purely informational without ladder logic, provide an explanati
         ? `**Adres değişikliği:** Bazı etiketler modelin verdiği adreste tutulamadı:\n${list}`
         : `**Address change:** Some tags could not keep the address the model gave:\n${list}`
     }
+    // A built-in scenario's acceptance tests, when the request is that scenario
+    const gate: AcceptanceGate = this.config.acceptanceGate || 'report'
+    const scenarioMatch = gate === 'off' ? { ambiguous: [] as Scenario[] } : matchScenario(prompt, SCENARIOS)
+    const scenario = scenarioMatch.scenario
+    const ambiguousNote = scenarioMatch.ambiguous.length
+      ? isTurkish
+        ? `**Kabul testi uygulanmadı:** İstek birden çok hazır senaryoya benziyor (${scenarioMatch.ambiguous.map((s) => s.id).join(', ')}).`
+        : `**Acceptance test not run:** The request looks like more than one built-in scenario (${scenarioMatch.ambiguous.map((s) => s.id).join(', ')}).`
+      : ''
+    let acceptance: AcceptanceSummary | undefined
     const userIo = ioAddressesInPrompt(prompt)
     const userIoNotUsed = (): string[] => {
       const used = new Set(
@@ -2539,7 +2602,9 @@ If the prompt is purely informational without ladder logic, provide an explanati
     let rawJson: string | undefined
     // The last circuit that compiled cleanly and failed only its simulation test. The test may be what is wrong,
     // so when the rounds run out it is offered for review instead of being lost
-    let candidate: { circuit: AiCircuitSynthesisPayload; problems: string[]; round: number } | undefined
+    let candidate:
+      | { circuit: AiCircuitSynthesisPayload; problems: string[]; round: number; acceptance?: AcceptanceSummary }
+      | undefined
 
     const respond = (fields: Partial<AgentExecutionResponse> & { replyText: string }): AgentExecutionResponse => ({
       tier,
@@ -2644,11 +2709,15 @@ If the prompt is purely informational without ladder logic, provide an explanati
             const behavior = moved.length
               ? { problems: moved, note: '' }
               : this.checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
+            // The acceptance test runs only on a circuit that passed its own test, as in auto-apply
+            const judged = behavior.problems.length === 0 && scenario ? this.judgeAcceptance(scenario, gate, isTurkish) : undefined
             tools.discardDiskWrites()
             tools.restoreSnapshot(turnStart)
-            problems.push(...behavior.problems)
-            if (behavior.problems.length > 0) candidate = { circuit: reply.circuit, problems: behavior.problems, round: round + 1 }
-            behaviorNote = behavior.note
+            const failed = [...behavior.problems, ...(judged?.problems || [])]
+            problems.push(...failed)
+            if (failed.length > 0) candidate = { circuit: reply.circuit, problems: failed, round: round + 1, acceptance: judged?.summary }
+            if (judged) acceptance = judged.summary
+            behaviorNote = [behavior.note, judged?.note].filter(Boolean).join('\n\n')
           } else if (reply.circuit) {
             behaviorNote = isTurkish
               ? '**Simülasyon testi:** Bu yanıt yeni blok veya etiket de oluşturduğu için onaydan önce çalıştırılamadı, devrenin davranışı doğrulanmadı.'
@@ -2658,8 +2727,8 @@ If the prompt is purely informational without ladder logic, provide an explanati
             const note = isTurkish
               ? 'Derleyici kontrolü onaydan sonra çalışır.'
               : 'The compiler check runs after you approve the changes.'
-            const parts = [lines.join('\n'), behaviorNote, weakerTestNote, neverCalledNote, motionNote, addressMovesNote(reply.addressMoves), `*${note}*`].filter(Boolean)
-            return respond({ replyText: parts.join('\n\n'), stagedChangeset: staged })
+            const parts = [lines.join('\n'), behaviorNote, ambiguousNote, weakerTestNote, neverCalledNote, motionNote, addressMovesNote(reply.addressMoves), `*${note}*`].filter(Boolean)
+            return respond({ replyText: parts.join('\n\n'), stagedChangeset: staged, acceptanceReport: acceptance })
           }
         }
 
@@ -2705,11 +2774,18 @@ If the prompt is purely informational without ladder logic, provide an explanati
           let behaviorNote = ''
           if (problems.length === 0 && reply.circuit) {
             const behavior = this.checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
-            problems.push(...behavior.problems)
-            behaviorNote = behavior.note ? `\n\n${behavior.note}` : ''
+            // The circuit passed its own test: now the specification's. Under report the model never hears of it
+            const judged = behavior.problems.length === 0 && scenario ? this.judgeAcceptance(scenario, gate, isTurkish) : undefined
+            if (judged) acceptance = judged.summary
+            const failed = [...behavior.problems, ...(judged?.problems || [])]
+            problems.push(...failed)
+            behaviorNote = [behavior.note, judged?.note]
+              .filter(Boolean)
+              .map((n) => `\n\n${n}`)
+              .join('')
             // A reply that also writes blocks or tags cannot be offered as one staged circuit
-            if (behavior.problems.length > 0 && writes.length === 0) {
-              candidate = { circuit: reply.circuit, problems: behavior.problems, round: round + 1 }
+            if (failed.length > 0 && writes.length === 0) {
+              candidate = { circuit: reply.circuit, problems: failed, round: round + 1, acceptance: judged?.summary }
             }
           }
           if (problems.length === 0) {
@@ -2729,6 +2805,7 @@ If the prompt is purely informational without ladder logic, provide an explanati
             return respond({
               replyText: [
                 `${lines.join('\n')}\n\n**Compiler:** no new errors, ${report.warnings.length} warning(s).${older}${addressNote}${behaviorNote}`,
+                ambiguousNote,
                 weakerTestNote,
                 neverCalledNote,
                 motionNote,
@@ -2737,7 +2814,8 @@ If the prompt is purely informational without ladder logic, provide an explanati
               ]
                 .filter(Boolean)
                 .join('\n\n'),
-              compilerVerification: { success: report.success, message: report.message }
+              compilerVerification: { success: report.success, message: report.message },
+              acceptanceReport: acceptance
             })
           }
         }
@@ -2770,14 +2848,24 @@ If the prompt is purely informational without ladder logic, provide an explanati
       }
       if (staged && staged.length > 0) {
         const failed = candidate.problems.map((p) => `- ${p}`).join('\n')
+        // Under enforce a circuit can pass its own test and fail the specification's
+        const failedSpec = !!candidate.acceptance && candidate.acceptance.failedSpec.length > 0 && gate === 'enforce'
+        const intro = isTurkish
+          ? failedSpec
+            ? `Model ${MAX_AGENT_ROUNDS} denemede spesifikasyonun kabul testini geçemedi (${formatAcceptanceLine(candidate.acceptance as AcceptanceSummary)}). **Projede değişiklik yapılmadı.**\n\n` +
+              `${candidate.round}. denemenin devresi derleyiciden ve modelin kendi testinden geçti, kabul testinde kaldı. `
+            : `Model ${MAX_AGENT_ROUNDS} denemede kendi simülasyon testini geçemedi. **Projede değişiklik yapılmadı.**\n\n` +
+              `${candidate.round}. denemenin devresi derleyiciden hatasız geçti, yalnızca testte kaldı. Hata devrede de olabilir, modelin testinde de. `
+          : failedSpec
+            ? `The model did not pass the specification's acceptance test in ${MAX_AGENT_ROUNDS} attempts (${formatAcceptanceLine(candidate.acceptance as AcceptanceSummary)}). **The project was not changed.**\n\n` +
+              `The circuit of attempt ${candidate.round} compiled and passed the model's own test, but failed the acceptance test. `
+            : `The model did not pass its own simulation test in ${MAX_AGENT_ROUNDS} attempts. **The project was not changed.**\n\n` +
+              `The circuit of attempt ${candidate.round} compiled without errors and failed only the test. The fault may be in the circuit or in the model's test. `
         return respond({
           replyText: isTurkish
-            ? `Model ${MAX_AGENT_ROUNDS} denemede kendi simülasyon testini geçemedi. **Projede değişiklik yapılmadı.**\n\n` +
-              `${candidate.round}. denemenin devresi derleyiciden hatasız geçti, yalnızca testte kaldı. Hata devrede de olabilir, modelin testinde de. ` +
-              `Bu devre onay penceresinde öneri olarak duruyor: aşağıdaki kontrolleri okuyup kendiniz karar verin.\n\n${failed}`
-            : `The model did not pass its own simulation test in ${MAX_AGENT_ROUNDS} attempts. **The project was not changed.**\n\n` +
-              `The circuit of attempt ${candidate.round} compiled without errors and failed only the test. The fault may be in the circuit or in the model's test. ` +
-              `It is offered for review in the approval window: read the checks below and decide yourself.\n\n${failed}`,
+            ? `${intro}Bu devre onay penceresinde öneri olarak duruyor: aşağıdaki kontrolleri okuyup kendiniz karar verin.\n\n${failed}`
+            : `${intro}It is offered for review in the approval window: read the checks below and decide yourself.\n\n${failed}`,
+          acceptanceReport: candidate.acceptance,
           stagedChangeset: staged,
           isError: true,
           errorDetails: details

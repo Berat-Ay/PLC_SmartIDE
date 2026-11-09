@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { AcceptanceSummary } from '../services/scenarios/ScenarioAcceptance'
 
 export type TabType = 'hardware' | 'tagTable' | 'allTags' | 'db' | 'udt' | 'lad' | 'scl' | 'simulation' | 'trace'
 
@@ -21,6 +22,8 @@ export interface AgentChatMessage {
   rawJson?: string
   isError?: boolean
   errorDetails?: string
+  /** The acceptance result of a built-in scenario, when the request was one */
+  acceptanceReport?: AcceptanceSummary
 }
 
 interface UIStoreState {
@@ -89,7 +92,7 @@ interface UIStoreState {
     text: string,
     sender?: 'user' | 'agent',
     ragRulesConsulted?: string[],
-    rawTrace?: { snippet?: string; rawJson?: string; isError?: boolean; errorDetails?: string }
+    rawTrace?: { snippet?: string; rawJson?: string; isError?: boolean; errorDetails?: string; acceptanceReport?: AcceptanceSummary }
   ) => void
   clearAgentMessages: () => void
 }
@@ -218,7 +221,7 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
     text,
     sender = 'user',
     ragRulesConsulted,
-    rawTrace?: { snippet?: string; rawJson?: string; isError?: boolean; errorDetails?: string }
+    rawTrace?: { snippet?: string; rawJson?: string; isError?: boolean; errorDetails?: string; acceptanceReport?: AcceptanceSummary }
   ) => {
     if (!text || !text.trim()) return
     const msg: AgentChatMessage = {
@@ -231,7 +234,8 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
       rawTraceSnippet: rawTrace?.snippet,
       rawJson: rawTrace?.rawJson,
       isError: rawTrace?.isError,
-      errorDetails: rawTrace?.errorDetails
+      errorDetails: rawTrace?.errorDetails,
+      acceptanceReport: rawTrace?.acceptanceReport
     }
 
     set((state) => ({

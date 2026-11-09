@@ -47,6 +47,114 @@ export interface Scenario {
   notChecked: string[]
   /** Why the benchmark leaves this scenario out unless it is asked for by name */
   notInBenchmark?: string
+  /** Never used to tune the agent: see heldOutScenarios.ts. The benchmark reports these apart */
+  heldOut?: boolean
+  /** Words the request must contain (case ignored) to be taken for this scenario, besides its addresses */
+  matchWords: string[]
+}
+
+/**
+ * What the agent does with a scenario's acceptance tests when the request is that scenario.
+ * off: nothing. report: the result is shown to the user, never to the model, so the tests stay impartial.
+ * enforce: a circuit that fails a spec check is undone and the failures go to the model. The model then
+ * works with the answer key in hand: a pass under enforce is an upper bound, not a measure of the model.
+ * Interpretation checks are never sent to the model, since they may be wrong.
+ */
+export type AcceptanceGate = 'off' | 'report' | 'enforce'
+
+/** The result of the acceptance tests in short, for the user and the benchmark */
+export interface AcceptanceSummary {
+  scenarioId: string
+  scenarioTitle: string
+  gate: AcceptanceGate
+  specPassed: number
+  specTotal: number
+  interpretationPassed: number
+  interpretationTotal: number
+  /** Ids of the checks that failed */
+  failedSpec: string[]
+  failedInterpretation: string[]
+}
+
+const addressPattern = /(^|[^A-Za-z0-9_.%])%?([IQM])(\d{1,3})\.([0-7])(?![0-9])/gi
+
+/** Bit addresses written in a text, as %I0.0 / %Q1.2 / %M20.0 */
+export function bitAddressesInText(text: string): Set<string> {
+  const found = new Set<string>()
+  for (const m of text.matchAll(addressPattern)) found.add(`%${m[2].toUpperCase()}${Number(m[3])}.${m[4]}`)
+  return found
+}
+
+/** How much of the request's own I and Q addresses a scenario must account for */
+const MIN_IO_COVERAGE = 0.8
+
+export interface ScenarioMatch {
+  scenario?: Scenario
+  /** More than one scenario fits: none is used */
+  ambiguous: Scenario[]
+}
+
+/**
+ * The scenario a request is, if any: every address of the scenario is in the request, the scenario accounts
+ * for most of the request's I/O, and the request has the scenario's words. A user's own request with a
+ * few of the same addresses is not a textbook scenario, so the match is strict.
+ */
+export function matchScenario(prompt: string, scenarios: Scenario[]): ScenarioMatch {
+  const inPrompt = bitAddressesInText(prompt)
+  const promptIo = Array.from(inPrompt).filter((a) => !a.startsWith('%M'))
+  const text = prompt.toLocaleLowerCase('tr')
+  const fits = scenarios.filter((s) => {
+    const own = new Set([...s.mustRead, ...s.mustWrite].map(normalize))
+    if (own.size === 0 || Array.from(own).some((a) => !inPrompt.has(a))) return false
+    const covered = promptIo.filter((a) => own.has(a)).length
+    if (promptIo.length === 0 || covered / promptIo.length < MIN_IO_COVERAGE) return false
+    return s.matchWords.every((w) => text.includes(w.toLocaleLowerCase('tr')))
+  })
+  return fits.length === 1 ? { scenario: fits[0], ambiguous: [] } : { ambiguous: fits.length > 1 ? fits : [] }
+}
+
+export function summarizeAcceptance(scenario: Scenario, results: CheckResult[], gate: AcceptanceGate): AcceptanceSummary {
+  const spec = results.filter((r) => r.check.kind === 'spec')
+  const interpretation = results.filter((r) => r.check.kind === 'interpretation')
+  return {
+    scenarioId: scenario.id,
+    scenarioTitle: scenario.title,
+    gate,
+    specPassed: spec.filter((r) => r.passed).length,
+    specTotal: spec.length,
+    interpretationPassed: interpretation.filter((r) => r.passed).length,
+    interpretationTotal: interpretation.length,
+    failedSpec: spec.filter((r) => !r.passed).map((r) => r.check.id),
+    failedInterpretation: interpretation.filter((r) => !r.passed).map((r) => r.check.id)
+  }
+}
+
+/** One line: spec 9/11 · kalan: reset, idle · yorum 1/3 */
+export function formatAcceptanceLine(s: AcceptanceSummary): string {
+  const left = s.failedSpec.length ? ` · kalan: ${s.failedSpec.join(', ')}` : ''
+  const interp = s.interpretationTotal
+    ? ` · yorum ${s.interpretationPassed}/${s.interpretationTotal}` +
+      (s.failedInterpretation.length ? ` (kalan: ${s.failedInterpretation.join(', ')})` : '')
+    : ''
+  return `spec ${s.specPassed}/${s.specTotal}${left}${interp}`
+}
+
+/**
+ * The failed spec checks, written for the model as violations of the specification: the item, then what
+ * the plant saw against what the item asks. Interpretation checks are left out.
+ */
+export function specViolationsForModel(results: CheckResult[], maxPerCheck = 4): string[] {
+  const failed = results.filter((r) => r.check.kind === 'spec' && !r.passed)
+  if (failed.length === 0) return []
+  const lines = [
+    `The circuit does not meet the user's specification. ${failed.length} item(s) of the specification failed when the plant was driven through it. Fix the circuit so it meets these items; passing your own test is not enough.`
+  ]
+  for (const r of failed) {
+    lines.push(`Specification item not met: ${r.check.title}`)
+    for (const f of r.failures.slice(0, maxPerCheck)) lines.push(`  - ${f}`)
+    if (r.failures.length > maxPerCheck) lines.push(`  - ... and ${r.failures.length - maxPerCheck} more`)
+  }
+  return lines
 }
 
 export interface CheckResult {

@@ -13,7 +13,7 @@ import { useProjectStore } from '../../stores/useProjectStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useTagStore } from '../../stores/useTagStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
-import { evaluateScenario, Scenario } from './ScenarioAcceptance'
+import { AcceptanceGate, evaluateScenario, Scenario } from './ScenarioAcceptance'
 
 /**
  * applied: the agent changed the project. offered: nothing was applied, but a circuit that failed only the
@@ -25,6 +25,13 @@ export type BenchOutcome = 'applied' | 'offered' | 'nothing' | 'error'
 export interface BenchRun {
   scenario: string
   run: number
+  /**
+   * How the agent used the acceptance tests during the run. Under enforce the model saw the failures of the
+   * same tests that score it, so its runs are an upper bound and are never counted with the others
+   */
+  gate: AcceptanceGate
+  /** A held-out scenario: never used to tune the agent, so it shows whether a change carries over */
+  heldOut: boolean
   outcome: BenchOutcome
   specPassed: number
   specTotal: number
@@ -72,7 +79,8 @@ const hasLogic = (project: ProjectLoadPayload): boolean => (ob1Of(project)?.netw
 export async function runBenchCase(
   scenario: Scenario,
   run: number,
-  execute: () => Promise<AgentExecutionResponse>
+  execute: () => Promise<AgentExecutionResponse>,
+  gate: AcceptanceGate = 'off'
 ): Promise<BenchRun> {
   newBenchProject()
   const models: string[] = []
@@ -112,6 +120,8 @@ export async function runBenchCase(
   return {
     scenario: scenario.id,
     run,
+    gate,
+    heldOut: !!scenario.heldOut,
     outcome,
     specPassed: spec.filter((r) => r.passed).length,
     specTotal: spec.length,
@@ -131,10 +141,13 @@ const percent = (part: number, whole: number): string => (whole ? `${Math.round(
 
 /** One line per scenario: what the user was left with, and how much of the specification it met */
 export function formatBenchSummary(runs: BenchRun[]): string {
-  const scenarios = Array.from(new Set(runs.map((r) => r.scenario)))
+  // The model never hears of the acceptance tests under off or report; under enforce it does
+  const oracle = (r: BenchRun): boolean => r.gate === 'enforce'
+  const groupOf = (r: BenchRun): string => `${r.scenario}${r.heldOut ? ' (held-out)' : ''}${oracle(r) ? ' [enforce]' : ''}`
+  const groups = Array.from(new Set(runs.map(groupOf)))
   const header = ['Senaryo', 'Koşu', 'Uygulandı', 'Öneri', 'Boş', 'Hata', 'Tam geçen', 'Ort. spec', 'Ort. tur']
-  const rows = scenarios.map((id) => {
-    const mine = runs.filter((r) => r.scenario === id)
+  const rows = groups.map((id) => {
+    const mine = runs.filter((r) => groupOf(r) === id)
     const count = (o: BenchOutcome): number => mine.filter((r) => r.outcome === o).length
     const full = mine.filter((r) => r.specPassed === r.specTotal && r.outcome !== 'nothing' && r.outcome !== 'error')
     const fullApplied = full.filter((r) => r.outcome === 'applied').length
@@ -154,8 +167,31 @@ export function formatBenchSummary(runs: BenchRun[]): string {
   })
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)))
   const line = (cells: string[]): string => cells.map((c, i) => c.padEnd(widths[i])).join('  ')
-  const all = runs.length
-  const fullAll = runs.filter((r) => r.specPassed === r.specTotal && (r.outcome === 'applied' || r.outcome === 'offered')).length
+  const fullOf = (set: BenchRun[]): number =>
+    set.filter((r) => r.specPassed === r.specTotal && (r.outcome === 'applied' || r.outcome === 'offered')).length
+  const impartial = runs.filter((r) => !oracle(r))
+  const gated = runs.filter(oracle)
+  const totals = [
+    ...(impartial.length
+      ? [`Toplam: ${impartial.length} koşu, spesifikasyonun tamamını karşılayan ${fullOf(impartial)} (${percent(fullOf(impartial), impartial.length)}).`]
+      : []),
+    // Held-out apart: the others were seen while the agent was tuned, so only these show whether a change carries over
+    ...(() => {
+      const tuned = impartial.filter((r) => !r.heldOut)
+      const held = impartial.filter((r) => r.heldOut)
+      if (!tuned.length || !held.length) return []
+      return [
+        `  Ayarlamada görülenler: ${tuned.length} koşu, tam ${fullOf(tuned)} (${percent(fullOf(tuned), tuned.length)}). ` +
+          `Held-out: ${held.length} koşu, tam ${fullOf(held)} (${percent(fullOf(held), held.length)}).`
+      ]
+    })(),
+    ...(gated.length
+      ? [
+          `Enforce: ${gated.length} koşu, tam karşılayan ${fullOf(gated)} (${percent(fullOf(gated), gated.length)}). ` +
+            'Model kabul testinin hatalarını gördü: bu bir üst sınırdır, modelin ölçümü değildir ve yukarıdakiyle toplanmaz.'
+        ]
+      : [])
+  ]
   const models = Array.from(new Set(runs.flatMap((r) => r.models)))
   const fellBack = runs.filter((r) => r.fallbacks.length > 0).length
   const mixed = models.length > 1 ? ' Birden fazla model cevap verdi: sonuçlar tek bir modelin değil.' : ''
@@ -164,7 +200,7 @@ export function formatBenchSummary(runs: BenchRun[]): string {
     line(widths.map((w) => '-'.repeat(w))),
     ...rows.map(line),
     '',
-    `Toplam: ${all} koşu, spesifikasyonun tamamını karşılayan ${fullAll} (${percent(fullAll, all)}).`,
+    ...totals,
     `Cevap veren modeller: ${models.join(', ') || '-'}` + (fellBack ? `. ${fellBack} koşuda model en az bir kez meşgul, hız sınırında ya da yavaştı.` : '') + mixed,
     'Ort. spec: boş ve hatalı koşular da ortalamaya girer; boş program hiçbir kontrolü geçmez.'
   ].join('\n')

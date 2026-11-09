@@ -115,8 +115,9 @@ TAG Gripped %M20.4 BOOL "Parca yakalandi"
 TAG GoDrop %M20.5 BOOL "Birakmaya git"
 TAG AtDrop %M20.6 BOOL "Birakma konumunda"
 TAG GoHome %M20.7 BOOL "Eve don"
+TAG EStopFault %M10.1 BOOL "E-stop hatasi"
 NW 1 "Enerji": SERIES( NO(EStop), NO(DriveReady), COIL(Powered) )
-NW 2 "Home baslat": SERIES( NO(Powered), P_TRIG(Start), NC(HomeDone), SET(StepHome) )
+NW 2 "Home baslat": SERIES( NO(Powered), P_TRIG(Start), NC(HomeDone), NC(EStopFault), SET(StepHome) )
 NW 3 "Home hareketi (MC_Home yerine)": SERIES( NO(StepHome), TON(T_Home, PT=T#2S) )
 NW 4 "Home tamam": SERIES( NO(T_Home.Q), SET(HomeDone), RESET(StepHome) )
 NW 5 "Almaya git": SERIES( NO(HomeDone), NO(RobotDone), NC(GoPick), NC(AtPick), NC(Gripped), NC(GoDrop), NC(AtDrop), NC(GoHome), SET(GoPick) )
@@ -134,7 +135,8 @@ NW 16 "Eve donus hareketi": SERIES( NO(GoHome), TON(T_MoveHome, PT=T#2S) )
 NW 17 "Cevrim sonu": SERIES( NO(T_MoveHome.Q), RESET(AtDrop), RESET(GoHome) )
 NW 18 "Lamba": SERIES( PARALLEL( NO(StepHome), NO(GoPick), NO(AtPick), NO(Gripped), NO(GoDrop), NO(AtDrop), NO(GoHome) ), COIL(Lamp) )
 NW 19 "E-stop": SERIES( NC(EStop), RESET(StepHome), RESET(HomeDone), RESET(GoPick), RESET(AtPick), RESET(Gripped), RESET(GoDrop), RESET(AtDrop), RESET(GoHome) )
-NW 20 "Hata reset (MC_Reset yerine)": SERIES( NO(Powered), P_TRIG(FaultReset), NC(HomeDone), SET(StepHome) )`
+NW 20 "E-stop hatasi": SERIES( NC(EStop), SET(EStopFault) )
+NW 21 "Hata reset: yalniz hatayi siler, hareket baslatmaz": SERIES( NO(FaultReset), NO(EStop), RESET(EStopFault) )`
 
 // ---- What gemini-3.5-flash wrote for the robot cell (fifth log, accepted with 21 checks) ----
 const ROBOT_CELL_FROM_LOG = `TAG Sens_PartIn %I0.0 BOOL "x"
@@ -345,6 +347,15 @@ function main(): void {
   }
   ok('A circuit written from the specification passes every check of both scenarios')
 
+  // A reset that sets the first step moves the axis without Start, which the reset check no longer accepts
+  const resetMoves = PICK_PLACE_REFERENCE.replace(
+    'NW 21 "Hata reset: yalniz hatayi siler, hareket baslatmaz": SERIES( NO(FaultReset), NO(EStop), RESET(EStopFault) )',
+    'NW 21 "Hata reset": SERIES( NO(FaultReset), NO(EStop), RESET(EStopFault), SET(StepHome) )'
+  )
+  assert.notStrictEqual(resetMoves, PICK_PLACE_REFERENCE)
+  assert.deepStrictEqual(failedIds(PICK_AND_PLACE, resetMoves), ['reset'])
+  ok('A pick & place whose reset starts homing by itself fails the reset check')
+
   for (const [scenario, dsl] of [
     [MOTOR_START_STOP, MOTOR_REFERENCE],
     [TRAFFIC_LIGHT, TRAFFIC_REFERENCE],
@@ -394,7 +405,7 @@ function main(): void {
 
   // ---- The seventh log: moves take time now. E-stop keeps "homed", reset only stops, a held done signal restarts the pick ----
   assert.deepStrictEqual(failedIds(PICK_AND_PLACE, PICK_PLACE_SEVENTH_LOG).sort(), ['carry', 'estop', 'lamp', 'oneStep', 'reset'])
-  ok('The seventh pick & place fails where it differs: E-stop keeps M20.1, reset does not home, held done restarts the pick')
+  ok('The seventh pick & place fails where it differs: E-stop keeps M20.1 so Start cannot home again, held done restarts the pick')
 
   // ---- A network written without SERIES gets an error that says so ----
   const unwrapped = LadderDslCompiler.compileLadderDslToAst('NW 1 "x": PARALLEL(NC(A), NO(B)), COIL(C)')

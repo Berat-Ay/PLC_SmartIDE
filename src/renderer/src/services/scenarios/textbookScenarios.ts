@@ -73,6 +73,7 @@ const motorResetWhileTripped: PathStep[] = [
 
 export const MOTOR_START_STOP: Scenario = {
   id: 'motor-start-stop',
+  matchWords: ['motor', 'termik', 'arıza'],
   title: 'Motor yol verme, termik ve arıza lambası',
   checks: [
     { id: 'seal', kind: 'spec', title: '1: Start ile motor çalışır, Start bırakılınca çalışmaya devam eder' },
@@ -126,6 +127,7 @@ const trafficCycle: PathStep[] = [
 
 export const TRAFFIC_LIGHT: Scenario = {
   id: 'traffic-light',
+  matchWords: ['trafik'],
   title: 'Trafik lambası',
   checks: [
     { id: 'red', kind: 'spec', title: 'Sistem açılınca 6 s yalnız kırmızı' },
@@ -186,6 +188,7 @@ const tankHighSensorFault: PathStep[] = [
 
 export const TANK_FILL: Scenario = {
   id: 'tank-fill',
+  matchWords: ['depo', 'seviye'],
   title: 'Depo dolum kontrolü',
   checks: [
     { id: 'start', kind: 'spec', title: '1: Otomatikte su alt seviyenin altındaysa pompa çalışır' },
@@ -249,6 +252,7 @@ const starDeltaOverload: PathStep[] = [
 
 export const STAR_DELTA: Scenario = {
   id: 'star-delta',
+  matchWords: ['yıldız', 'üçgen'],
   title: 'Yıldız-üçgen yol verme',
   checks: [
     { id: 'star', kind: 'spec', title: '1: Start ile K1 ve K2 (yıldız) çeker, 5 s yıldızda kalır' },
@@ -308,6 +312,7 @@ const parkReset: PathStep[] = [
 
 export const CAR_PARK: Scenario = {
   id: 'car-park',
+  matchWords: ['otopark'],
   title: 'Otopark sayacı',
   checks: [
     { id: 'free', kind: 'spec', title: 'Boş otoparkta yeşil yanar, DOLU söner' },

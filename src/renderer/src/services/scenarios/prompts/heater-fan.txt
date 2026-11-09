@@ -1,0 +1,21 @@
+Fanlı bir hava ısıtıcısı için ladder programı yaz. CPU: S7-1214C.
+
+Girişler:
+• Start butonu: I0.0 (normalde açık, basınca 1)
+• Stop butonu: I0.1 (normalde kapalı kontak: basılı değilken 1, basınca 0)
+• Oda termostatı: I0.2 (ısı isterken 1)
+• Aşırı sıcaklık termostatı: I0.3 (normalde kapalı: normalde 1, aşırı sıcakta 0)
+• Reset butonu: I0.4 (normalde açık, basınca 1)
+
+Çıkışlar:
+• Fan: Q0.0
+• Isıtıcı: Q0.1
+• Arıza lambası: Q0.2
+
+İstenen davranış:
+1. Start'a basılınca sistem çalışır, Stop'a basılınca durur. Start ve Stop aynı anda basılıysa sistem çalışmaz.
+2. Sistem çalışırken fan sürekli döner.
+3. Isıtıcı yalnızca fan en az 3 saniye döndükten sonra ve oda termostatı ısı istediği sürece açık olur.
+4. Sistem durunca ısıtıcı hemen kapanır, fan ısıyı atmak için 5 saniye daha döner ve sonra durur.
+5. Aşırı sıcaklık termostatı açarsa ısıtıcı hemen kapanır, sistem durur (fan yine 5 saniye döner) ve Arıza lambası yanar.
+6. Arıza lambası aşırı sıcaklık geçse de Reset'e basılana kadar yanar. Aşırı sıcaklık sürerken Reset arızayı silmez. Arıza varken Start sistemi çalıştırmaz. Reset'e basılınca arıza silinir ve sistem başlangıç durumuna döner.

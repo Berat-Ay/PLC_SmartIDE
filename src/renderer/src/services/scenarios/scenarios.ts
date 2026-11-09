@@ -5,6 +5,7 @@
  */
 import { PathStep, Scenario } from './ScenarioAcceptance'
 import { TEXTBOOK_SCENARIOS } from './textbookScenarios'
+import { HELD_OUT_SCENARIOS } from './heldOutScenarios'
 
 // ---------------- Robot welding cell with two robots ----------------
 const RC = {
@@ -168,6 +169,7 @@ const faultPath: PathStep[] = [
 
 export const ROBOT_CELL: Scenario = {
   id: 'robot-cell',
+  matchWords: ['robot', 'fikstür'],
   title: 'İki robotlu kaynak hücresi (sıralayıcı)',
   checks: [
     { id: 'ready', kind: 'spec', title: 'NW1: Sistem_Hazır (M10.0) otomatik, güvenlik, robotlar evde ve fikstür geride iken 1, biri eksikse 0' },
@@ -267,7 +269,12 @@ const axisStopPath: PathStep[] = [
   { atMs: 10600, expect: { estop: { [PP.Powered]: true }, reset: { [PP.StepHome]: false } } },
   { atMs: 10700, set: { [PP.Reset]: true } },
   { atMs: 10800, set: { [PP.Reset]: false } },
-  { atMs: 10900, expect: { reset: { [PP.StepHome]: true } } }
+  // "Return to the start" is read as the start state: a reset alone must not move the axis (IEC 60204-1,
+  // a reset only allows a restart). Start then begins again at homing, since E-stop cleared HomeDone
+  { atMs: 10900, expect: { reset: { [PP.StepHome]: false } } },
+  { atMs: 11000, set: { [PP.Start]: true } },
+  { atMs: 11100, set: { [PP.Start]: false } },
+  { atMs: 11200, expect: { reset: { [PP.StepHome]: true } } }
 ]
 
 // The robot's done signal stays on while the axis works: the axis must not go back for a part mid-cycle
@@ -285,6 +292,7 @@ const robotDoneStaysOnPath: PathStep[] = [
 
 export const PICK_AND_PLACE: Scenario = {
   id: 'pick-place',
+  matchWords: ['pick', 'eksen'],
   title: 'Hücre içi kartezyen taşıma ekseni (pick & place)',
   notInBenchmark: "MC_ hareket blokları bu IDE'de yok: ölçülen, modelin TON ile yaptığı taklit olur",
   checks: [
@@ -296,7 +304,7 @@ export const PICK_AND_PLACE: Scenario = {
     { id: 'release', kind: 'spec', title: 'NW6: M20.6\'da Q0.1 kesilir, Q0.0 verilir; I0.3 ile M20.7; dönüş bitince M20.6 ve M20.7 sıfır' },
     { id: 'idle', kind: 'spec', title: 'NW6: Çevrim sonunda yeniden home yapılmaz; yeni çevrim Robot iş bitti ile başlar' },
     { id: 'estop', kind: 'spec', title: 'NW7: E-stop bütün adım bitlerini sıfırlar' },
-    { id: 'reset', kind: 'spec', title: 'NW7: E-stop sonrası kendiliğinden başlamaz; Hata Reset ile en başa (M20.0) döner' },
+    { id: 'reset', kind: 'spec', title: 'NW7: E-stop sonrası kendiliğinden başlamaz; Hata Reset ekseni hareket ettirmez, ardından Start ile en baştan (M20.0) başlar' },
     { id: 'carry', kind: 'interpretation', title: 'Tutucu parça taşınırken kapalı kalır (Q0.1, M20.4–M20.5 boyunca 1)' },
     { id: 'oneStep', kind: 'interpretation', title: 'Robot iş bitti sinyali açık kalsa da çevrim ortasında yeniden almaya gidilmez (M20.2)' },
     { id: 'lamp', kind: 'interpretation', title: 'Hücre Çalışıyor lambası (Q0.2) çevrim boyunca yanar, beklerken söner' }
@@ -312,4 +320,4 @@ export const PICK_AND_PLACE: Scenario = {
   ]
 }
 
-export const SCENARIOS: Scenario[] = [ROBOT_CELL, PICK_AND_PLACE, ...TEXTBOOK_SCENARIOS]
+export const SCENARIOS: Scenario[] = [ROBOT_CELL, PICK_AND_PLACE, ...TEXTBOOK_SCENARIOS, ...HELD_OUT_SCENARIOS]
