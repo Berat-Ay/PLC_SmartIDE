@@ -674,6 +674,9 @@ export class AiModelRouter {
   private turnPlan?: TurnPlan
   // Models that answer HTTP 400 to thinkingConfig
   private noThinkingConfig = new Set<string>()
+  // OpenAI-compatible endpoint + model that accept JSON mode but never answer in it (a reasoning model that only
+  // thinks until the timeout, or ends with no text). Each costs one timeout, so it is remembered until the app restarts
+  private noJsonMode = new Set<string>()
   private config: AiConfig
 
   private constructor() {
@@ -2936,7 +2939,17 @@ If the prompt is purely informational without ladder logic, provide an explanati
     BlackBoxLogger.getInstance().log('AI_REQUEST', `OpenAI-compatible API request (${model})`, { prompt, model, endpoint: base, tier, mode })
 
     // Not every server knows response_format. One that refuses it is asked without it from then on
-    let jsonMode = true
+    const jsonModeKey = `${base}|${model}`
+    let jsonMode = !this.noJsonMode.has(jsonModeKey)
+    // JSON mode accepted but no answer in it: the same request is asked once more without it, and the next ones too
+    const dropJsonMode = (why: string): void => {
+      BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `${model} ${why} in JSON mode. Asking without response_format`, {
+        model,
+        endpoint: base
+      })
+      jsonMode = false
+      this.noJsonMode.add(jsonModeKey)
+    }
     // Streamed, the first bytes come at once: a proxy such as Cloudflare cuts a request that is silent for 100 s (HTTP 524)
     let streamMode = true
     // Reasoning models (OpenAI o-series, GPT-5) accept only their default temperature
@@ -2993,6 +3006,10 @@ If the prompt is purely informational without ladder logic, provide an explanati
         if (!signal?.aborted) res = await send()
       }
       if (res.error === 'cancelled' || signal?.aborted) throw new Error('Synthesis cancelled by user.')
+      if (res.error === 'timeout' && jsonMode) {
+        dropJsonMode(`did not answer in ${this.modelTimeoutMs / 1000} s`)
+        return requestModel(contents)
+      }
       if (res.error === 'timeout') throw new Error(`${model} at ${base} did not answer in ${this.modelTimeoutMs / 1000} s.`)
       if (res.error) throw new Error(`Could not reach ${base}: ${res.message}`)
       if (res.status < 200 || res.status >= 300) {
@@ -3026,6 +3043,18 @@ If the prompt is purely informational without ladder logic, provide an explanati
         : typeof content === 'string'
           ? content
           : ''
+      if (!rawText.trim() && jsonMode) {
+        dropJsonMode('answered without any text')
+        return requestModel(contents)
+      }
+      // JSON mode promises a JSON object. Plain text instead means it does not work on this server: a gateway that
+      // puts its own note ("the provider returned nothing") where the answer should be, or one that drops the
+      // option. Without JSON mode a plain text answer is the model's own, and is read as such
+      const trimmed = rawText.trim()
+      if (jsonMode && trimmed && !trimmed.startsWith('{') && !trimmed.startsWith('```')) {
+        dropJsonMode('answered with text that is not JSON')
+        return requestModel(contents)
+      }
       if (!rawText.trim()) throw new Error(`${model} answered without any text.`)
       BlackBoxLogger.getInstance().log(
         'AI_RAW_RESPONSE',

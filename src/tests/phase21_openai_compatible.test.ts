@@ -147,6 +147,83 @@ async function main(): Promise<void> {
   assert.deepStrictEqual(noTemperature[1].body.response_format, { type: 'json_object' }, 'JSON mode stays on')
   ok('A model that refuses the temperature is asked again without it, and keeps JSON mode')
 
+  // ---- A server that accepts JSON mode but never answers in it is asked without it, from then on ----
+  // (a reasoning model behind such a server only thinks until the timeout, or ends with no text)
+  const routerInternals = router as unknown as { modelTimeoutMs: number }
+  const timeoutBefore = routerInternals.modelTimeoutMs
+  routerInternals.modelTimeoutMs = 200
+  const hangCalls: Call[] = []
+  ;(globalThis as any).fetch = (url: string, init: { headers?: Record<string, string>; body?: string; signal?: AbortSignal }) => {
+    const call = { url: String(url), headers: init?.headers || {}, body: JSON.parse(init!.body!) }
+    hangCalls.push(call)
+    if (!call.body.response_format) return Promise.resolve(chat(lampReply('Lamp')))
+    // JSON mode: no answer until the client gives up
+    return new Promise((_resolve, reject) =>
+      init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')))
+    )
+  }
+  router.updateConfig({ openaiModel: 'slow-thinker' })
+  resetProject()
+  const afterHang = await router.executePrompt('Start butonu lambayı yaksın', 'fast-flash', 'auto-apply')
+  assert.ok(!afterHang.isError, afterHang.replyText)
+  assert.strictEqual(hangCalls.length, 2)
+  assert.deepStrictEqual(hangCalls[0].body.response_format, { type: 'json_object' })
+  assert.strictEqual(hangCalls[1].body.response_format, undefined, 'The timed-out request is asked again without JSON mode')
+  resetProject()
+  const nextPrompt = await router.executePrompt('Start butonu lambayı yaksın', 'fast-flash', 'auto-apply')
+  assert.ok(!nextPrompt.isError, nextPrompt.replyText)
+  assert.strictEqual(hangCalls.length, 3, 'The next prompt does not wait for the timeout again')
+  assert.strictEqual(hangCalls[2].body.response_format, undefined)
+  routerInternals.modelTimeoutMs = timeoutBefore
+
+  // Only reasoning, no text: the stream ends without an answer
+  const thinkingOnly =
+    `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', reasoning_content: 'Let me think about the latch...' } }] })}\n\n` +
+    `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: ' and the stop button.' }, finish_reason: 'length' }] })}\n\n` +
+    'data: [DONE]\n\n'
+  router.updateConfig({ openaiModel: 'empty-thinker' })
+  resetProject()
+  const emptyCalls = mockServer((call) =>
+    call.body.response_format
+      ? new Response(thinkingOnly, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      : chat(lampReply('Lamp'))
+  )
+  const afterEmpty = await router.executePrompt('Start butonu lambayı yaksın', 'fast-flash', 'auto-apply')
+  assert.ok(!afterEmpty.isError, afterEmpty.replyText)
+  assert.strictEqual(emptyCalls.length, 2)
+  assert.strictEqual(emptyCalls[1].body.response_format, undefined, 'An answer with no text is asked again without JSON mode')
+
+  // A gateway that puts its own note where the JSON answer should be
+  router.updateConfig({ openaiModel: 'gateway-note' })
+  resetProject()
+  const noteCalls = mockServer((call) =>
+    call.body.response_format
+      ? chat('Saglayicilar bu turda bos yanit dondurdu (gecici durum). Mesaji tekrar gonderirsen yeni bir deneme yapilir.')
+      : chat(lampReply('Lamp'))
+  )
+  const afterNote = await router.executePrompt('Start butonu lambayı yaksın', 'fast-flash', 'auto-apply')
+  assert.ok(!afterNote.isError && afterNote.replyText.includes('kontrolün hepsi geçti'), afterNote.replyText)
+  assert.strictEqual(noteCalls.length, 2)
+  assert.strictEqual(noteCalls[1].body.response_format, undefined, 'Plain text in JSON mode is asked again without JSON mode')
+
+  // Without JSON mode, plain text is the model's own answer (a question back) and is shown as it is
+  router.updateConfig({ openaiModel: 'asks-back' })
+  resetProject()
+  const askCalls = mockServer((call) =>
+    call.body.response_format ? new Response('{"error":{"message":"response_format is not supported"}}', { status: 400 }) : chat('Lamba hangi çıkışta?')
+  )
+  const question = await router.executePrompt('Lambayı yak', 'fast-flash', 'auto-apply')
+  assert.strictEqual(question.replyText.trim().split('\n')[0], 'Lamba hangi çıkışta?', question.replyText)
+  assert.strictEqual(askCalls.length, 2, 'A plain answer without JSON mode is not asked again')
+
+  // Another model on the same server keeps JSON mode
+  router.updateConfig({ openaiModel: 'tedx-coder' })
+  resetProject()
+  const otherModel = mockServer(() => chat(lampReply('Lamp')))
+  await router.executePrompt('Start butonu lambayı yaksın', 'fast-flash', 'auto-apply')
+  assert.deepStrictEqual(otherModel[0].body.response_format, { type: 'json_object' }, 'Only the model that hung loses JSON mode')
+  ok('A model that hangs, answers nothing or answers plain text in JSON mode is asked without it, and the next prompts skip the wait')
+
   // ---- Errors say what happened ----
   resetProject()
   mockServer(() => Promise.reject(new TypeError('Failed to fetch')))
