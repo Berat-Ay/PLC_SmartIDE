@@ -1565,7 +1565,7 @@ export class AiModelRouter {
     // Check if Ollama provider is selected
     if (this.config.provider === 'ollama') {
       try {
-        response = await this.callOllamaApi(trimmed, tier, mode, isTurkish, signal)
+        response = await this.callOllamaApi(trimmed, tier, mode, signal)
       } catch (err) {
         if (signal?.aborted || (err as { name?: string })?.name === 'AbortError' || String(err).includes('cancelled')) {
           throw err
@@ -3059,7 +3059,6 @@ If the prompt is purely informational without ladder logic, provide an explanati
     prompt: string,
     tier: AiTier,
     mode: 'auto-apply' | 'diff-view',
-    isTurkish: boolean,
     signal?: AbortSignal
   ): Promise<AgentExecutionResponse> {
     const endpoint = (this.config.ollamaEndpoint || 'http://localhost:11434').replace(/\/$/, '')
