@@ -3,7 +3,6 @@ import {
   Play,
   Square,
   Save,
-  CheckCircle2,
   FolderOpen,
   FilePlus,
   Columns,
@@ -20,12 +19,8 @@ import {
   Share2,
   Bug,
   Hammer,
-  Settings,
   X,
-  Plus,
-  Trash2,
   Zap,
-  Terminal,
   FileText
 } from 'lucide-react'
 import { useProjectStore } from '../../stores/useProjectStore'
@@ -76,9 +71,7 @@ export const TopAppBar: React.FC = () => {
     toggleBottomDock,
     toggleSplitView,
     setBottomActiveTab,
-    setPortalViewOpen,
-    tabs,
-    activeTabId
+    setPortalViewOpen
   } = useUIStore()
 
   const { ladBlocks, updateLadBlock } = useBlockStore()

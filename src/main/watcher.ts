@@ -6,11 +6,9 @@ import { FileChangeEventPayload } from '../shared/types/ipc'
 
 export class ProjectWatcher {
   private watcher: FSWatcher | null = null
-  private projectPath: string | null = null
 
   public startWatching(projectDir: string, getWindow: () => BrowserWindow | null): void {
     this.stopWatching()
-    this.projectPath = projectDir
 
     this.watcher = chokidar.watch(projectDir, {
       // Tested relative to the project, so a parent folder named 'out' does not hide every file
@@ -57,7 +55,6 @@ export class ProjectWatcher {
     if (this.watcher) {
       this.watcher.close().catch(() => {})
       this.watcher = null
-      this.projectPath = null
     }
   }
 }

@@ -1,5 +1,5 @@
 import React from 'react'
-import { Plus, Trash2, Database, Shield, Lock, Layers } from 'lucide-react'
+import { Plus, Trash2, Database, Layers } from 'lucide-react'
 import { useBlockStore } from '../../../stores/useBlockStore'
 import { useProjectStore } from '../../../stores/useProjectStore'
 import { useRuntimeStore } from '../../../stores/useRuntimeStore'

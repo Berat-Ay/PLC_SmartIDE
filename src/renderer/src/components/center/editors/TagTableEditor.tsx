@@ -5,8 +5,7 @@ import {
   Plus,
   Trash2,
   CheckCircle2,
-  Zap,
-  Info
+  Zap
 } from 'lucide-react'
 import { useTagStore } from '../../../stores/useTagStore'
 import { useProjectStore } from '../../../stores/useProjectStore'
@@ -31,7 +30,7 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
     resolveAllOverlaps
   } = useTagStore()
   const { markDirty } = useProjectStore()
-  const { isMonitoring, state: runtimeState, engine, forceValue, metrics } = useRuntimeStore()
+  const { isMonitoring, state: runtimeState, engine, forceValue } = useRuntimeStore()
   const showMonitoring = isMonitoring && runtimeState === 'RUN'
 
   const isAllTags = !tableId

@@ -47,7 +47,6 @@ export interface DslCompilerOptions {
    * on top of one, because moving it would change the wiring unasked: the project compile reports the overlap.
    */
   keptTags?: TagDefinition[]
-  defaultBlockName?: string
   /** Merker bytes the CPU writes itself, such as clock and system memory. Nothing is placed there. */
   reservedMerkerBytes?: number[]
 }
@@ -261,7 +260,6 @@ export class LadderDslCompiler {
           const norm = normalizeS7Address(rawAddress)
           let finalAddress = norm.isValid ? norm.formatted.toUpperCase() : rawAddress.toUpperCase()
           const area = (finalAddress.startsWith('%I') ? 'I' : finalAddress.startsWith('%Q') ? 'Q' : 'M') as 'I' | 'Q' | 'M'
-          const isBit = rawDataType === 'BOOL' || !finalAddress.includes('W')
 
           let coordKey: string | null = null
           if (norm.isValid && norm.area && norm.byteAddress !== undefined) {
@@ -346,7 +344,6 @@ export class LadderDslCompiler {
     }
 
     // Helper to auto-infer tags for undeclared operands
-    let inferBitCounter = 0
     let currentNetwork = 0
     const resolveOrCreateTag = (operand: string, defaultKind?: 'contact' | 'coil'): { name: string; address: string } => {
       // TIA writes symbols in quotes. The quotes are not part of the name

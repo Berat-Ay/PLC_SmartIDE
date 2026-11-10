@@ -147,160 +147,10 @@ function getNodeWidth(n: LadderNode): number {
   return 175
 }
 
-function getMaxHorizontalNodes(nodeList: LadderNode[]): number {
-  let count = 0
-  for (const n of nodeList) {
-    if (n.kind === 'parallel') {
-      const p = n as LadderParallelBranchNode
-      let maxBranchNodes = 0
-      for (const branch of p.branches) {
-        maxBranchNodes = Math.max(maxBranchNodes, getMaxHorizontalNodes(branch || []))
-      }
-      count += Math.max(1, maxBranchNodes)
-    } else {
-      count += 1
-    }
-  }
-  return count
-}
-
-interface DropCandidate {
-  x: number
-  y: number
-  target: DropZoneTarget
-}
-
 const WIRE_Y = LadderGridLayoutEngine.TOP_PADDING
 // A selection toolbar starts right of the left power rail instead of covering it
 const TOOLBAR_MIN_X = 38
 const POWER_RAIL_X = 30
-
-function getNetworkDropCandidates(net: LadNetwork, netIdx: number): DropCandidate[] {
-  const candidates: DropCandidate[] = []
-  const nodes = net.nodes || []
-
-  if (nodes.length === 0) {
-    candidates.push({ x: LADDER_MIN_WIDTH / 2, y: WIRE_Y, target: { netIdx, insertIndex: 0 } })
-    return candidates
-  }
-
-  const maxH = getMaxHorizontalNodes(net.nodes || [])
-  const contentW = 48 + Math.max(1, maxH) * 175 + 220 + 60
-  const svgW = Math.max(LADDER_MIN_WIDTH, contentW)
-  const targetCoilX = svgW - 60 - 70
-  const rightRailX = svgW - 60
-
-  const collectCandidates = (
-    nodeList: LadderNode[],
-    startX: number,
-    y: number,
-    branchCtx?: { branchId: string; branchIndex: number }
-  ) => {
-    let curX = startX
-    candidates.push({
-      x: curX + 10,
-      y,
-      target: {
-        netIdx,
-        branchId: branchCtx?.branchId,
-        branchIndex: branchCtx?.branchIndex,
-        insertIndex: 0
-      }
-    })
-
-    nodeList.forEach((node, idx) => {
-      const isLastNode = idx === nodeList.length - 1
-      if (node.kind === 'contact') {
-        curX += 175
-        candidates.push({
-          x: curX - 10,
-          y,
-          target: {
-            netIdx,
-            branchId: branchCtx?.branchId,
-            branchIndex: branchCtx?.branchIndex,
-            insertIndex: idx + 1
-          }
-        })
-      } else if (node.kind === 'coil') {
-        if (!branchCtx && isLastNode) {
-          const coilX = Math.max(curX + 40, targetCoilX)
-          candidates.push({
-            x: coilX - 18,
-            y,
-            target: { netIdx, insertIndex: idx }
-          })
-          curX = rightRailX
-        } else {
-          curX += 175
-          candidates.push({
-            x: curX - 10,
-            y,
-            target: {
-              netIdx,
-              branchId: branchCtx?.branchId,
-              branchIndex: branchCtx?.branchIndex,
-              insertIndex: idx + 1
-            }
-          })
-        }
-      } else if (node.kind === 'parallel') {
-        const p = node as LadderParallelBranchNode
-        const dropY = 120
-        const branchWidth = getNodeWidth(p)
-
-        p.branches.forEach((bNodes, bIdx) => {
-          const branchY = y + bIdx * dropY
-          if (!bNodes || bNodes.length === 0) {
-            candidates.push({
-              x: curX + 80,
-              y: branchY,
-              target: {
-                netIdx,
-                branchId: p.id,
-                branchIndex: bIdx,
-                insertIndex: 0
-              }
-            })
-          } else {
-            collectCandidates(bNodes, curX + 20, branchY, {
-              branchId: p.id,
-              branchIndex: bIdx
-            })
-          }
-        })
-
-        curX += branchWidth
-        candidates.push({
-          x: curX - 10,
-          y,
-          target: {
-            netIdx,
-            branchId: branchCtx?.branchId,
-            branchIndex: branchCtx?.branchIndex,
-            insertIndex: idx + 1
-          }
-        })
-      } else {
-        const width = node.kind === 'emptyBox' ? 130 : 150
-        curX += width
-        candidates.push({
-          x: curX - 10,
-          y,
-          target: {
-            netIdx,
-            branchId: branchCtx?.branchId,
-            branchIndex: branchCtx?.branchIndex,
-            insertIndex: idx + 1
-          }
-        })
-      }
-    })
-  }
-
-  collectCandidates(nodes, 30, WIRE_Y)
-  return candidates
-}
 
 export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
   block,
@@ -311,7 +161,7 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
 }) => {
   const { isMonitoring, currentSnapshot, scrubbedSnapshot, timeTravelActive, state: cpuStatus } = useRuntimeStore()
   const isMonitoringActive = isMonitoring && cpuStatus === 'RUN'
-  const { tagTables, updateTag, addTag } = useTagStore()
+  const { tagTables } = useTagStore()
   const { canvasZoom, setCanvasZoom } = useUIStore()
   const allTags = tagTables.flatMap((t) => t.tags)
 

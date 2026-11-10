@@ -6,7 +6,6 @@ import {
   ChevronRight,
   ChevronDown,
   Pin,
-  HelpCircle,
   Binary,
   Clock,
   Calculator,
@@ -236,7 +235,6 @@ export const InstructionsTreePanel: React.FC = () => {
           }
 
           const itemsToRender = filterQuery ? matchingInstructions : cat.instructions
-          const CatIcon = cat.icon
 
           return (
             <div key={cat.id} className="border border-[#1e2025] bg-[#13151a]">

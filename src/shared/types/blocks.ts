@@ -2,7 +2,6 @@ import { LadderSeriesNode } from './ladder'
 
 export type BlockType = 'OB' | 'FB' | 'FC' | 'DB'
 export type BlockLanguage = 'LAD' | 'SCL' | 'DB'
-export type BlockSection = 'Input' | 'Output' | 'InOut' | 'Static' | 'Temp' | 'Constant'
 
 export interface BlockVariable {
   id: string
@@ -92,11 +91,8 @@ export interface DataBlockDefinition {
   name: string
   fileName: string // e.g. DB1_PlantData.db.json
   dbType: DbType
-  parentFbId?: string
   parentFbName?: string
   optimizedAccess: boolean
   variables: BlockVariable[]
   comment?: string
 }
-
-export type ProgramBlock = LadBlockDefinition | SclBlockDefinition | DataBlockDefinition

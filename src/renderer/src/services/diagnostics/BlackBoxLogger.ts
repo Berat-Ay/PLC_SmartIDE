@@ -110,13 +110,6 @@ export class BlackBoxLogger {
   }
 
   /**
-   * Retrieves the most recent AI prompt -> response -> compile trace
-   */
-  public getLastAiTrace() {
-    return { ...this.lastAiTrace }
-  }
-
-  /**
    * Clears the ring buffer
    */
   public clearLogs(): void {

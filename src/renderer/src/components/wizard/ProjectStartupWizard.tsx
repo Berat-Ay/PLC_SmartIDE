@@ -8,9 +8,7 @@ import {
   Layers,
   ArrowRight,
   HardDrive,
-  Info,
   CheckCircle2,
-  Sliders,
   Shield
 } from 'lucide-react'
 import { ALL_CPU_PROFILES, CpuProfile, CPU_1214C_PROFILE } from '@shared/constants/cpuProfiles'

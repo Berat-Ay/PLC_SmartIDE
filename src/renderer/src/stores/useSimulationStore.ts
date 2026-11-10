@@ -10,10 +10,8 @@ interface SimulationStoreState {
   activeSubTab: SimulationSubTab
   tankLevelRaw: number
   reactorTempRaw: number
-  conveyorPosition: number
   outflowValvePct: number
   closedLoopActive: boolean
-  noiseEnabled: boolean
   faults: Record<string, ChannelFaultState>
   metrics: PlantEngineeringMetrics
   scenarioCode: string
@@ -22,7 +20,6 @@ interface SimulationStoreState {
   setActiveSubTab: (tab: SimulationSubTab) => void
   setOutflowValvePct: (val: number) => void
   setClosedLoopActive: (active: boolean) => void
-  setNoiseEnabled: (enabled: boolean) => void
   injectFault: (channel: string, faultType: 'wireBreak' | 'overflow' | 'noise') => void
   clearFaults: (channel: string) => void
   setDigitalInput: (byte: number, bit: number, value: boolean) => void
@@ -68,7 +65,7 @@ export default function definePlantSimulation(physics, runtime, dt) {
 
 const physicsInstance = new PlantPhysicsEngine()
 
-export const useSimulationStore = create<SimulationStoreState>((set, get) => {
+export const useSimulationStore = create<SimulationStoreState>((set) => {
   // Wire physics engine to virtual PLC runtime cyclic hook
   const runtimeEngine = useRuntimeStore.getState().engine
   runtimeEngine.setPhysicsHook((dtSeconds, runtime) => {
@@ -78,10 +75,8 @@ export const useSimulationStore = create<SimulationStoreState>((set, get) => {
     set({
       tankLevelRaw: physicsInstance.tankLevelRaw,
       reactorTempRaw: physicsInstance.reactorTempRaw,
-      conveyorPosition: physicsInstance.conveyorPosition,
       outflowValvePct: physicsInstance.outflowValvePct,
       closedLoopActive: physicsInstance.closedLoopActive,
-      noiseEnabled: physicsInstance.noiseEnabled,
       faults: { ...physicsInstance.faults },
       metrics: physicsInstance.getEngineeringValues(runtime)
     })
@@ -92,10 +87,8 @@ export const useSimulationStore = create<SimulationStoreState>((set, get) => {
     activeSubTab: 'rack',
     tankLevelRaw: physicsInstance.tankLevelRaw,
     reactorTempRaw: physicsInstance.reactorTempRaw,
-    conveyorPosition: 0,
     outflowValvePct: 15,
     closedLoopActive: true,
-    noiseEnabled: false,
     faults: { ...physicsInstance.faults },
     metrics: physicsInstance.getEngineeringValues(),
     scenarioCode: defaultScenarioCode,
@@ -110,11 +103,6 @@ export const useSimulationStore = create<SimulationStoreState>((set, get) => {
     setClosedLoopActive: (closedLoopActive) => {
       physicsInstance.setClosedLoopActive(closedLoopActive)
       set({ closedLoopActive })
-    },
-
-    setNoiseEnabled: (noiseEnabled) => {
-      physicsInstance.setNoiseEnabled(noiseEnabled)
-      set({ noiseEnabled })
     },
 
     injectFault: (channel, faultType) => {

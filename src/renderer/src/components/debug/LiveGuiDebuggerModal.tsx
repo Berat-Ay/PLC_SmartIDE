@@ -5,17 +5,11 @@ import {
   Play,
   CheckCircle2,
   AlertTriangle,
-  RotateCcw,
   Copy,
   Check,
-  ShieldCheck,
-  Target,
-  Sparkles,
-  Zap,
-  Activity,
-  Layers
+  Target
 } from 'lucide-react'
-import { DomVisualInspector, VisualAuditReport, VisualCollisionResult } from '../../services/debug/DomVisualInspector'
+import { DomVisualInspector, VisualAuditReport } from '../../services/debug/DomVisualInspector'
 import { useUIStore } from '../../stores/useUIStore'
 import { useRuntimeStore } from '../../stores/useRuntimeStore'
 import { useProjectStore } from '../../stores/useProjectStore'
@@ -40,7 +34,6 @@ interface LiveGuiDebuggerModalProps {
 
 export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOpen, onClose }) => {
   const [isRunning, setIsRunning] = useState(false)
-  const [activeStepIndex, setActiveStepIndex] = useState(-1)
   const [steps, setSteps] = useState<AuditStep[]>([])
   const [auditReport, setAuditReport] = useState<VisualAuditReport | null>(null)
   const [copiedReport, setCopiedReport] = useState(false)
@@ -157,7 +150,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       // -------------------------------------------------------------
       // SCENARIO 1: Chaos `Load Demo` Stress Test
       // -------------------------------------------------------------
-      setActiveStepIndex(0)
       updateStep(0, { status: 'RUNNING' })
       const startS1 = performance.now()
 
@@ -190,7 +182,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       }
 
       // Step 2: Auto-Resolve Overlaps
-      setActiveStepIndex(1)
       updateStep(1, { status: 'RUNNING' })
       const startS2 = performance.now()
 
@@ -215,7 +206,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       // -------------------------------------------------------------
       // SCENARIO 2: Ladder Visual Clearance & Double-Coil Idempotency
       // -------------------------------------------------------------
-      setActiveStepIndex(2)
       updateStep(2, { status: 'RUNNING' })
       const startS3 = performance.now()
 
@@ -259,7 +249,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       }
 
       // Step 4: Double-Coil auto-merge idempotency
-      setActiveStepIndex(3)
       updateStep(3, { status: 'RUNNING' })
       const startS4 = performance.now()
 
@@ -289,7 +278,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       // -------------------------------------------------------------
       // SCENARIO 3: Live SoftPLC RUN & Cycle Counter Increment
       // -------------------------------------------------------------
-      setActiveStepIndex(4)
       updateStep(4, { status: 'RUNNING' })
       const startS5 = performance.now()
 
@@ -332,7 +320,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       // -------------------------------------------------------------
       // SCENARIO 4: Closed-Loop Plant Physics & Trace Verification
       // -------------------------------------------------------------
-      setActiveStepIndex(5)
       updateStep(5, { status: 'RUNNING' })
       const startS6 = performance.now()
 
@@ -354,7 +341,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       // -------------------------------------------------------------
       // SCENARIO 5: Phase 4 AI & TIA Export Smoke Audit
       // -------------------------------------------------------------
-      setActiveStepIndex(6)
       updateStep(6, { status: 'RUNNING' })
       const startS7 = performance.now()
 
@@ -386,7 +372,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
       console.error('Error during GUI audit:', err)
     } finally {
       setIsRunning(false)
-      setActiveStepIndex(-1)
       setVirtualCursor((c) => ({ ...c, visible: false }))
     }
   }
@@ -491,7 +476,7 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
 
         {/* Audit Steps List */}
         <div className="max-h-72 overflow-y-auto p-3 space-y-2 font-sans bg-industrial-950/60">
-          {steps.map((step, idx) => (
+          {steps.map((step) => (
             <div
               key={step.id}
               className={`p-2.5 rounded-lg border text-xs transition-all ${
@@ -560,7 +545,6 @@ export const LiveGuiDebuggerModal: React.FC<LiveGuiDebuggerModalProps> = ({ isOp
           <div className="flex items-center gap-2">
             <button
               onClick={() => {
-                DomVisualInspector.clearHighlights()
                 setSteps(initialSteps)
                 setAuditReport(null)
               }}

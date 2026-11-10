@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { X, Sparkles, Key, Cpu, Globe, Check, RefreshCw, AlertTriangle } from 'lucide-react'
-import { AiModelRouter, AiConfig, AiProvider } from '../../services/ai/AiModelRouter'
+import { AiModelRouter, AiConfig } from '../../services/ai/AiModelRouter'
 
 interface AiSettingsModalProps {
   isOpen: boolean

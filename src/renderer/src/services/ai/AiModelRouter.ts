@@ -67,20 +67,6 @@ export interface AiCircuitSynthesisPayload {
     comment?: string
   }>
   networks: LadderNetwork[]
-  sclBlocksToCreate?: Array<{
-    name: string
-    blockType: 'FB' | 'FC'
-    sourceCode: string
-  }>
-  udtsToCreate?: Array<{
-    name: string
-    fields: Array<{ name: string; dataType: string; comment?: string }>
-  }>
-  dbsToCreate?: Array<{
-    name: string
-    isOptimized: boolean
-    variables: Array<{ name: string; dataType: string; initialValue?: string; comment?: string }>
-  }>
 }
 
 export interface AiConfig {
@@ -1358,7 +1344,6 @@ export class AiModelRouter {
     try {
       const tagStore = useTagStore.getState()
       const tableId = tagStore.tagTables[0]?.id || 'tbl_default'
-      const existingTags = tagStore.tagTables.flatMap((t) => t.tags)
 
       // Prune orphaned tags if completely replacing OB1 networks to prevent collision duplicates (%Q0.0, %I0.0)
       if (effectivePayload.operationMode === 'replace_ob1_networks') {
@@ -1769,7 +1754,6 @@ If the prompt is purely informational without ladder logic, provide an explanati
     isTurkish: boolean,
     signal?: AbortSignal
   ): Promise<AgentExecutionResponse> {
-    const startMs = Date.now()
     const primaryModel = (
       this.config.selectedModelId || (tier === 'fast-flash' ? this.config.fastModel : this.config.deepModel)
     )

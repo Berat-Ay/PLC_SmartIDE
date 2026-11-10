@@ -62,8 +62,6 @@ export interface VisualAuditReport {
 }
 
 export class DomVisualInspector {
-  private static highlightedElements: HTMLElement[] = []
-
   /**
    * Scan SVG Ladder Canvas for operand label badge overlaps and minimum clearance.
    * Mandates >= 16px horizontal clearance between adjacent contact badges.
@@ -385,51 +383,6 @@ export class DomVisualInspector {
       },
       overallPassed
     }
-  }
-
-  /**
-   * Highlight colliding elements on screen with a pulsing magenta outline
-   */
-  public static highlightCollisions(collisions: VisualCollisionResult[]): void {
-    this.clearHighlights()
-    if (typeof document === 'undefined') return
-
-    // Inject pulsing animation style if not already present
-    if (!document.getElementById('debug-visual-inspector-style')) {
-      const style = document.createElement('style')
-      style.id = 'debug-visual-inspector-style'
-      style.innerHTML = `
-        @keyframes pulseMagenta {
-          0% { outline-color: #ec4899; box-shadow: 0 0 4px #ec4899; }
-          50% { outline-color: #d946ef; box-shadow: 0 0 16px #d946ef; }
-          100% { outline-color: #ec4899; box-shadow: 0 0 4px #ec4899; }
-        }
-        .debugger-collision-highlight {
-          outline: 2px dashed #ec4899 !important;
-          animation: pulseMagenta 1s infinite !important;
-          stroke: #ec4899 !important;
-        }
-      `
-      document.head.appendChild(style)
-    }
-
-    for (const c of collisions) {
-      const els = document.querySelectorAll(c.elementA.selector)
-      els.forEach((el) => {
-        el.classList.add('debugger-collision-highlight')
-        if (el instanceof HTMLElement) this.highlightedElements.push(el)
-      })
-    }
-  }
-
-  /**
-   * Clear all visual highlights
-   */
-  public static clearHighlights(): void {
-    if (typeof document === 'undefined') return
-    const highlighted = document.querySelectorAll('.debugger-collision-highlight')
-    highlighted.forEach((el) => el.classList.remove('debugger-collision-highlight'))
-    this.highlightedElements = []
   }
 }
 

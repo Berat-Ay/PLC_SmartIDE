@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { AlertTriangle, Check, Layers, Info } from 'lucide-react'
+import { AlertTriangle } from 'lucide-react'
 import { MemoryOverlapEngine, ByteOccupancy } from '../../services/MemoryOverlapEngine'
 import { useTagStore } from '../../stores/useTagStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'

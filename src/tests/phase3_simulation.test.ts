@@ -4,7 +4,7 @@ import { DoubleCoilDetector } from '../renderer/src/services/DoubleCoilDetector'
 import { MemoryOverlapEngine } from '../renderer/src/services/MemoryOverlapEngine'
 import { DemoProjectSeeder } from '../renderer/src/services/DemoProjectSeeder'
 import { LadBlockDefinition } from '../shared/types/blocks'
-import { LadderNetwork, LadderContactNode, LadderCoilNode } from '../shared/types/ladder'
+import { LadderContactNode, LadderCoilNode } from '../shared/types/ladder'
 
 console.log('=== RUNNING PHASE 3 INDUSTRIAL SIMULATION & HOTFIX TESTS ===\n')
 

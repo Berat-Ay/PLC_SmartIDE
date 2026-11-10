@@ -1,12 +1,7 @@
 import React from 'react'
 import {
   Search,
-  ExternalLink,
-  BookOpen,
-  Eye,
-  Edit3,
-  Layers,
-  CheckCircle2
+  ExternalLink
 } from 'lucide-react'
 import { useCrossRefStore } from '../../stores/useCrossRefStore'
 import { useUIStore } from '../../stores/useUIStore'

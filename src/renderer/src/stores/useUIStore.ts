@@ -61,7 +61,6 @@ interface UIStoreState {
   agentMode: 'auto-apply' | 'diff-view'
   agentTier: 'fast-flash' | 'deep-pro'
   agentMessages: AgentChatMessage[]
-  activePrompt: string
 
   // Actions
   setCanvasZoom: (zoom: number) => void
@@ -71,16 +70,13 @@ interface UIStoreState {
   closeTab: (tabId: string) => void
   setTabs: (tabs: EditorTab[]) => void
   setActiveTab: (tabId: string | null) => void
-  setSplitTab: (tabId: string | null) => void
   toggleSplitView: () => void
   setPortalViewOpen: (open: boolean) => void
   setBottomActiveTab: (tab: 'compile' | 'crossref' | 'memoryMap' | 'trace') => void
   toggleLeftDock: () => void
   toggleRightDock: () => void
   toggleBottomDock: () => void
-  setLeftDockCollapsed: (c: boolean) => void
   setRightDockCollapsed: (c: boolean) => void
-  setBottomDockCollapsed: (c: boolean) => void
   setLeftDockWidth: (w: number) => void
   setRightDockWidth: (w: number) => void
   setRightActiveTab: (tab: 'instructions' | 'agent') => void
@@ -94,7 +90,6 @@ interface UIStoreState {
     ragRulesConsulted?: string[],
     rawTrace?: { snippet?: string; rawJson?: string; isError?: boolean; errorDetails?: string; acceptanceReport?: AcceptanceSummary }
   ) => void
-  clearAgentMessages: () => void
 }
 
 export const useUIStore = create<UIStoreState>((set, get) => ({
@@ -134,7 +129,6 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
       tier: 'fast-flash'
     }
   ],
-  activePrompt: '',
 
   openTab: (tab) => {
     const { tabs } = get()
@@ -174,13 +168,6 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
 
   setActiveTab: (activeTabId) => set({ activeTabId }),
 
-  setSplitTab: (splitTabId) => {
-    set({
-      splitTabId,
-      isSplitView: splitTabId !== null
-    })
-  },
-
   toggleSplitView: () => {
     const { isSplitView, tabs, activeTabId } = get()
     if (!isSplitView) {
@@ -204,9 +191,7 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
   toggleLeftDock: () => set((s) => ({ leftDockCollapsed: !s.leftDockCollapsed })),
   toggleRightDock: () => set((s) => ({ rightDockCollapsed: !s.rightDockCollapsed })),
   toggleBottomDock: () => set((s) => ({ bottomDockCollapsed: !s.bottomDockCollapsed })),
-  setLeftDockCollapsed: (leftDockCollapsed) => set({ leftDockCollapsed }),
   setRightDockCollapsed: (rightDockCollapsed) => set({ rightDockCollapsed }),
-  setBottomDockCollapsed: (bottomDockCollapsed) => set({ bottomDockCollapsed }),
   setLeftDockWidth: (leftDockWidth) => set({ leftDockWidth }),
   setRightDockWidth: (rightDockWidth) => set({ rightDockWidth }),
   setRightActiveTab: (rightActiveTab) => set({ rightActiveTab }),
@@ -241,9 +226,5 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
     set((state) => ({
       agentMessages: [...state.agentMessages, msg]
     }))
-  },
-
-  clearAgentMessages: () => {
-    set({ agentMessages: [] })
   }
 }))

@@ -1,4 +1,4 @@
-import { parseS7Address, getOccupiedCoordinates, getCategoryForType } from '../shared/constants/s7rules'
+import { parseS7Address, getOccupiedCoordinates } from '../shared/constants/s7rules'
 import { MemoryOverlapEngine } from '../renderer/src/services/MemoryOverlapEngine'
 import { S7OffsetCalculator } from '../renderer/src/services/S7OffsetCalculator'
 import { CrossReferenceEngine } from '../renderer/src/services/CrossReferenceEngine'

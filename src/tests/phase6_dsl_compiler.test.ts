@@ -4,8 +4,6 @@ import {
   splitTopLevel,
   parseFunctionCall
 } from '../renderer/src/services/compiler/LadderDslCompiler'
-import { TagDefinition } from '@shared/types/tags'
-import { LadderNetwork } from '@shared/types/ladder'
 
 let passCount = 0
 function testPass(name: string) {

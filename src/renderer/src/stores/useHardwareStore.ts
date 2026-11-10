@@ -25,11 +25,9 @@ interface HardwareStoreState {
   updateAiChannel: (index: number, updates: Partial<AnalogInputChannel>) => void
   updateAqChannel: (index: number, updates: Partial<AnalogOutputChannel>) => void
   updateOb: (blockNumber: number, updates: Partial<OrganizationBlockConfig>) => void
-  addOb: (ob: OrganizationBlockConfig) => void
-  removeOb: (blockNumber: number) => void
 }
 
-export const useHardwareStore = create<HardwareStoreState>((set, get) => ({
+export const useHardwareStore = create<HardwareStoreState>((set) => ({
   config: getDefaultCpuConfig(),
 
   setConfig: (config: CpuConfig) => set({ config }),
@@ -167,24 +165,6 @@ export const useHardwareStore = create<HardwareStoreState>((set, get) => ({
         organizationBlocks: state.config.organizationBlocks.map((ob) =>
           ob.blockNumber === blockNumber ? { ...ob, ...updates } : ob
         )
-      }
-    }))
-  },
-
-  addOb: (ob) => {
-    set((state) => ({
-      config: {
-        ...state.config,
-        organizationBlocks: [...state.config.organizationBlocks, ob]
-      }
-    }))
-  },
-
-  removeOb: (blockNumber) => {
-    set((state) => ({
-      config: {
-        ...state.config,
-        organizationBlocks: state.config.organizationBlocks.filter((ob) => ob.blockNumber !== blockNumber)
       }
     }))
   }

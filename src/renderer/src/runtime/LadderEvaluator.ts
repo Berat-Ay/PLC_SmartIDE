@@ -13,15 +13,6 @@ import { SclExecutionContext, SclInterpreter } from './SclInterpreter'
 import { S7BinaryMemory, S7TimerState } from './S7BinaryMemory'
 import { parseS7Time } from '@shared/s7/time'
 
-export interface TimerInternalState {
-  startTime: number
-  lastTickTime: number
-  running: boolean
-  elapsed: number
-  q: boolean
-  ptVal: number
-}
-
 /**
  * Reads a timer preset: a number of ms, a TIME literal or a symbol holding a TIME.
  * An empty or unresolvable preset falls back to 10 s; the compiler reports invalid literals.
@@ -58,12 +49,6 @@ export function parseTimePresetMs(val: unknown, context?: SclExecutionContext): 
 export function normalizeTimerKey(inst: unknown): string {
   if (!inst) return 'T1'
   return String(inst).replace(/^["']|["']$/g, '').trim().toUpperCase()
-}
-
-export interface CounterInternalState {
-  prevCu: boolean
-  cv: number
-  q: boolean
 }
 
 export interface EdgeInternalState {

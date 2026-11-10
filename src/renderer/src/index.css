@@ -92,11 +92,6 @@
     display: none !important;
   }
 }
-@container (min-width: 601px) {
-  .over-600\:hidden {
-    display: none !important;
-  }
-}
 @container (min-width: 721px) {
   .over-720\:hidden {
     display: none !important;

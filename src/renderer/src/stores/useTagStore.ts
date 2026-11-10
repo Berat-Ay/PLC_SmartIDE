@@ -7,14 +7,12 @@ import { useCrossRefStore } from './useCrossRefStore'
 
 interface TagStoreState {
   tagTables: TagTable[]
-  activeTableId: string | null
   selectedTagId: string | null
   collisions: Map<string, TagMemoryCollision>
   diagnostics: DiagnosticMessage[]
   totalCollisions: number
 
   setTagTables: (tables: TagTable[]) => void
-  setActiveTableId: (id: string | null) => void
   selectTag: (tagId: string | null) => void
   addTag: (tableId: string, initial?: Partial<TagDefinition>) => TagDefinition
   updateTag: (tableId: string, tagId: string, updates: Partial<TagDefinition>) => void
@@ -25,26 +23,19 @@ interface TagStoreState {
   autoAssignSafeAddress: (tagId: string) => void
   resolveAllOverlaps: () => void
   recalculateCollisions: () => void
-  getNextSafeAddressForNewTag: (area?: 'I' | 'Q' | 'M', dataType?: string) => string
 }
 
 export const useTagStore = create<TagStoreState>((set, get) => ({
   tagTables: [],
-  activeTableId: null,
   selectedTagId: null,
   collisions: new Map(),
   diagnostics: [],
   totalCollisions: 0,
 
   setTagTables: (tagTables) => {
-    set({
-      tagTables,
-      activeTableId: tagTables.length > 0 ? tagTables[0].id : null
-    })
+    set({ tagTables })
     get().recalculateCollisions()
   },
-
-  setActiveTableId: (activeTableId) => set({ activeTableId }),
 
   selectTag: (selectedTagId) => {
     set({ selectedTagId })
@@ -59,12 +50,6 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
         }
       }
     }
-  },
-
-  getNextSafeAddressForNewTag: (area = 'M', dataType = 'BOOL') => {
-    const { tagTables } = get()
-    const cpuConfig = useHardwareStore.getState().config
-    return MemoryOverlapEngine.findNextSafeAddress(area, dataType, tagTables, cpuConfig)
   },
 
   addTag: (tableId, initial) => {
@@ -154,10 +139,7 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
       tags: []
     }
 
-    set((state) => ({
-      tagTables: [...state.tagTables, newTable],
-      activeTableId: newTable.id
-    }))
+    set((state) => ({ tagTables: [...state.tagTables, newTable] }))
 
     return newTable
   },
@@ -173,13 +155,7 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
   },
 
   deleteTagTable: (tableId) => {
-    set((state) => {
-      const remaining = state.tagTables.filter((t) => t.id !== tableId)
-      return {
-        tagTables: remaining,
-        activeTableId: remaining.length > 0 ? remaining[0].id : null
-      }
-    })
+    set((state) => ({ tagTables: state.tagTables.filter((t) => t.id !== tableId) }))
     get().recalculateCollisions()
     useCrossRefStore.getState().reindex()
   },

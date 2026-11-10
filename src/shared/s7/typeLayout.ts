@@ -115,10 +115,6 @@ export function isElementaryTypeName(name: string): boolean {
   return name.toUpperCase() in ELEMENTARY_SIZES
 }
 
-export function isBuiltinInstanceTypeName(name: string): boolean {
-  return name.toUpperCase() in BUILTIN_INSTANCES
-}
-
 export function builtinInstanceKind(name: string): BuiltinInstanceKind | undefined {
   return BUILTIN_INSTANCES[name.toUpperCase()]
 }
