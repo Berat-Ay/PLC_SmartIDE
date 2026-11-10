@@ -143,7 +143,7 @@ export class LadderEvaluator {
 
     if (network.nodes && Array.isArray(network.nodes)) {
       for (const node of network.nodes) {
-        currentPower = this.evaluateNode(node, currentPower, context, currentTimeMs, nodePowerStates, memory)
+        currentPower = this.evaluateNode(node, currentPower, context, currentTimeMs, nodePowerStates, network.networkNumber, memory)
       }
     }
 
@@ -168,6 +168,7 @@ export class LadderEvaluator {
         liveValues?: Record<string, string | number>
       }
     >,
+    networkNumber: number,
     memory?: S7BinaryMemory
   ): boolean {
     switch (node.kind) {
@@ -187,8 +188,11 @@ export class LadderEvaluator {
         } else if (c.contactType === 'NC_CONTACT') {
           isConducting = !isTrue
         } else if (c.contactType === 'P_TRIG' || c.contactType === 'N_TRIG') {
-          // The edge bit lives in its declared operand when there is one, as on a real CPU
-          const edgeKey = (context.instancePrefix?.() || '') + (c.edgeTag || c.address || cleanOp)
+          // The edge bit lives in its declared operand when there is one, as on a real CPU. Without one, each
+          // contact has its own memory: two edge contacts on one signal must both see its edge. The network number
+          // is part of the key because node ids repeat when networks are added to a block in separate steps
+          const ownEdge = c.id ? `N${networkNumber}:${c.id}` : c.address || cleanOp
+          const edgeKey = (context.instancePrefix?.() || '') + (c.edgeTag || ownEdge)
           const usesEdgeBit = !!c.edgeTag && !!context.hasSymbol?.(c.edgeTag)
           const edgeState = this.edgeStates.get(edgeKey) || { prevVal: false }
           const previous = usesEdgeBit ? !!context.getVar(c.edgeTag as string) : edgeState.prevVal
@@ -254,7 +258,7 @@ export class LadderEvaluator {
         for (const branch of p.branches) {
           let branchPower = incomingPower
           for (const subNode of branch) {
-            branchPower = this.evaluateNode(subNode, branchPower, context, currentTimeMs, results, memory)
+            branchPower = this.evaluateNode(subNode, branchPower, context, currentTimeMs, results, networkNumber, memory)
           }
           if (branchPower) {
             anyBranchPassed = true
