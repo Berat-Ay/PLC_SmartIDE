@@ -14,6 +14,7 @@ import { ProjectLoadPayload } from '@shared/types/ipc'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useUIStore } from '../../stores/useUIStore'
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
+import { withUniqueLadderIds } from '@shared/utils/ladderNodeIds'
 import { LadderDslCompiler, DslCompilerOptions } from '../compiler/LadderDslCompiler'
 import { RagKnowledgeEngine } from './RagKnowledgeEngine'
 import { aiHttp } from './aiHttp'
@@ -1421,7 +1422,7 @@ export class AiModelRouter {
     if (ob1) {
       const updatedNetworks =
         effectivePayload.operationMode === 'append_ob1_networks'
-          ? [...(ob1.networks || []), ...(effectivePayload.networks || [])]
+          ? [...(ob1.networks || []), ...withUniqueLadderIds(ob1.networks || [], effectivePayload.networks || [])]
           : effectivePayload.networks || []
 
       // Normalize network numbers

@@ -120,6 +120,8 @@ const LIVE_MOTOR_NETWORKS = [
 
 const MOTOR_DSL = 'TAG Start_A %I4.0 BOOL "Start"\nTAG Motor_A %Q4.0 BOOL "Motor"\nNW 1 "Motor A": SERIES( NO(Start_A), COIL(Motor_A) )'
 
+const LAMP_DSL = 'TAG Start_B %I4.1 BOOL "Start"\nTAG Lamp_B %Q4.1 BOOL "Lamp"\nNW 1 "Lamp B": SERIES( NO(Start_B), COIL(Lamp_B) )'
+
 const VALVE_TOOLS = [
   { tool: 'create_or_update_udt', params: { name: 'UDT_Valve', fields: [{ name: 'Open', dataType: 'BOOL' }] } },
   { tool: 'create_or_update_scl_block', params: { name: 'FB_Valve', sourceCode: VALVE_FB } }
@@ -218,6 +220,35 @@ async function run(): Promise<void> {
   assert.strictEqual(ob1Networks().length, originalNetworks, 'Undo Turn covers ladder circuits')
   assert.ok(!tagNames().includes('Motor_A'), 'Undo Turn covers their tags')
   ok('A ladder circuit is added to OB1 and Undo Turn takes it back')
+
+  // Two circuits added one after the other: each numbers its nodes from 1, and the editor finds a node by its id
+  const ladSaved = structuredClone(useBlockStore.getState().ladBlocks)
+  const tagsSaved = structuredClone(useTagStore.getState().tagTables)
+  script({ explanation: 'Motor', dsl: MOTOR_DSL })
+  res = await router.executePrompt('Motor A ekle', 'fast-flash', 'auto-apply')
+  assert.ok(!res.isError, res.replyText)
+  script({ explanation: 'Lamba', dsl: LAMP_DSL })
+  res = await router.executePrompt('Lamba B ekle', 'fast-flash', 'auto-apply')
+  assert.ok(!res.isError, res.replyText)
+  assert.strictEqual(ob1Networks().length, originalNetworks + 2)
+  const nodeIds: string[] = []
+  const collect = (nodes: Array<{ id: string; branches?: unknown[][] }>): void => {
+    for (const node of nodes) {
+      nodeIds.push(node.id)
+      for (const branch of node.branches || []) collect(branch as Array<{ id: string }>)
+    }
+  }
+  const added = ob1Networks() as Array<{ id?: string; nodes?: Array<{ id: string }> }>
+  added.forEach((net) => collect(net.nodes || []))
+  assert.strictEqual(new Set(nodeIds).size, nodeIds.length, `Node ids repeat in OB1: ${nodeIds.join(', ')}`)
+  const networkIds = added.map((net) => net.id).filter(Boolean)
+  assert.strictEqual(new Set(networkIds).size, networkIds.length, `Network ids repeat in OB1: ${networkIds.join(', ')}`)
+  // Undo Turn takes back one turn only, so the project of before is put back by hand
+  useBlockStore.getState().setBlocks({ ...useBlockStore.getState(), ladBlocks: ladSaved })
+  useTagStore.getState().setTagTables(tagsSaved)
+  assert.strictEqual(ob1Networks().length, originalNetworks)
+  assert.ok(!tagNames().includes('Motor_A') && !tagNames().includes('Lamp_B'))
+  ok('Circuits added in separate turns do not repeat node or network ids')
 
   // Text alone
   script({ explanation: 'FB_Valve oluşturuldu.' })
