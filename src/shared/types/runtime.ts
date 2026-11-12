@@ -41,27 +41,3 @@ export interface RuntimeWorkerMetrics {
   activeObs: string
 }
 
-export interface ForceOverride {
-  addressOrSymbol: string
-  forcedValue: boolean | number | string
-  active: boolean
-}
-
-// Commands from Main/Renderer to Worker
-export type RuntimeWorkerCommand =
-  | { type: 'START' }
-  | { type: 'STOP' }
-  | { type: 'RESET' }
-  | { type: 'INJECT_FAULT'; faultCode: number; channel: string }
-  | { type: 'FORCE_VALUE'; addressOrSymbol: string; value: boolean | number | string; force: boolean }
-  | { type: 'UPDATE_PROJECT_STATE'; payload: unknown }
-  | { type: 'SCRUB_CYCLE'; cycleNumber: number }
-  | { type: 'RESUME_LIVE' }
-
-// Messages from Worker to Main/Renderer
-export type RuntimeWorkerMessage =
-  | { type: 'STATE_CHANGED'; state: RuntimeOperatingState }
-  | { type: 'CYCLE_SNAPSHOT'; snapshot: RuntimeMemorySnapshot; metrics: RuntimeWorkerMetrics }
-  | { type: 'SCRUB_SNAPSHOT'; snapshot: RuntimeMemorySnapshot }
-  | { type: 'DIAGNOSTIC_ERROR'; message: string; ob: number }
-

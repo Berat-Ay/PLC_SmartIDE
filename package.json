@@ -10,11 +10,13 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "tsx src/tests/s7engine.test.ts && tsx src/tests/phase2_engine.test.ts && tsx src/tests/phase3_simulation.test.ts && tsx src/tests/phase4_ai_and_export.test.ts && tsx src/tests/phase5_compiler_and_collision.test.ts && tsx src/tests/phase6_dsl_compiler.test.ts && tsx src/tests/phase7_grid_layout.test.ts && tsx src/tests/phase8_s7_binary_memory.test.ts && tsx src/tests/phase9_bytecode_compiler.test.ts && tsx src/tests/phase10_hybrid_ai_and_rag.test.ts && tsx src/tests/phase11_parking_garage_and_cards.test.ts && tsx src/tests/phase12_blackbox_and_telemetry.test.ts && tsx src/tests/phase13_runtime_fidelity.test.ts && tsx src/tests/phase14_project_files.test.ts && tsx src/tests/phase15_tia_bridge.test.ts && tsx src/tests/phase16_agent_loop.test.ts && tsx src/tests/phase17_agent_addresses.test.ts && tsx src/tests/phase18_behavior_test.test.ts && tsx src/tests/phase19_pattern_library.test.ts",
+    "test": "tsx src/tests/s7engine.test.ts && tsx src/tests/phase2_engine.test.ts && tsx src/tests/phase3_simulation.test.ts && tsx src/tests/phase4_ai_and_export.test.ts && tsx src/tests/phase5_compiler_and_collision.test.ts && tsx src/tests/phase6_dsl_compiler.test.ts && tsx src/tests/phase7_grid_layout.test.ts && tsx src/tests/phase8_s7_binary_memory.test.ts && tsx src/tests/phase9_bytecode_compiler.test.ts && tsx src/tests/phase10_hybrid_ai_and_rag.test.ts && tsx src/tests/phase11_parking_garage_and_cards.test.ts && tsx src/tests/phase12_blackbox_and_telemetry.test.ts && tsx src/tests/phase13_runtime_fidelity.test.ts && tsx src/tests/phase14_project_files.test.ts && tsx src/tests/phase15_tia_bridge.test.ts && tsx src/tests/phase16_agent_loop.test.ts && tsx src/tests/phase17_agent_addresses.test.ts && tsx src/tests/phase18_behavior_test.test.ts && tsx src/tests/phase19_pattern_library.test.ts && tsx src/tests/phase20_agent_honesty.test.ts && tsx src/tests/phase21_openai_compatible.test.ts && tsx src/tests/phase22_scenario_acceptance.test.ts && tsx src/tests/phase23_test_first_and_benchmark.test.ts && tsx src/tests/phase24_acceptance_gate.test.ts && tsx src/tests/phase25_held_out_scenarios.test.ts",
     "test:gui": "electron-vite build && node scripts/run-gui-audit.mjs",
     "test:layout": "node scripts/run-layout-audit.mjs",
     "preview": "electron-vite preview",
-    "tia:package": "tsx scripts/tia-package.ts"
+    "tia:package": "tsx scripts/tia-package.ts",
+    "bench": "tsx scripts/bench.ts",
+    "scenario": "tsx scripts/scenario-check.ts"
   },
   "dependencies": {
     "chokidar": "^3.6.0",

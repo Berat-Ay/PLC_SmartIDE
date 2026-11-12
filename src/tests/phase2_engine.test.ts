@@ -8,7 +8,6 @@ import {
   LadderContactNode,
   LadderCoilNode,
   LadderParallelBranchNode,
-  LadderTimerNode,
   LadderMathNode
 } from '../shared/types/ladder'
 import { LadBlockDefinition } from '../shared/types/blocks'

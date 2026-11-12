@@ -1,6 +1,6 @@
 import { S7MemoryArea } from '@shared/types/s7types'
 import { parseS7Address, getOccupiedCoordinates, getCategoryForType, formatS7Address } from '@shared/constants/s7rules'
-import { TagDefinition, TagTable, TagMemoryCollision } from '@shared/types/tags'
+import { TagTable, TagMemoryCollision } from '@shared/types/tags'
 import { CpuConfig } from '@shared/types/hardware'
 import { DiagnosticMessage } from '@shared/types/diagnostics'
 

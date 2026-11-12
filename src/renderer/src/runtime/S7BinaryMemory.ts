@@ -417,7 +417,6 @@ export class S7BinaryMemory {
     if (!symbolOrAddress) return
     const raw = symbolOrAddress.trim()
     const cleanSym = raw.replace(/^"|"$/g, '').trim()
-    const upper = cleanSym.toUpperCase()
 
     // 1. Timer field write
     const timerMatch = cleanSym.match(/^([A-Za-z0-9_]+)\.(Q|ET|IN|PT)$/i)
@@ -634,7 +633,8 @@ export class S7BinaryMemory {
       c.QD = c.CV <= 0
       c.QU = c.CV >= c.PV
     } else {
-      if (!c.prevCd && cdRlo && c.CV > 0) {
+      // As on the CPU, a count goes down to the low limit of INT, not to 0
+      if (!c.prevCd && cdRlo && c.CV > -32768) {
         c.CV--
       }
       c.QD = c.CV <= 0
@@ -671,7 +671,8 @@ export class S7BinaryMemory {
       if (!c.prevCu && cuRlo && c.CV < 32767) {
         c.CV++
       }
-      if (!c.prevCd && cdRlo && c.CV > 0) {
+      // As on the CPU, a count goes down to the low limit of INT, not to 0
+      if (!c.prevCd && cdRlo && c.CV > -32768) {
         c.CV--
       }
       c.QU = c.CV >= c.PV
@@ -701,7 +702,7 @@ export class S7BinaryMemory {
   }
 
   // =========================================================================
-  // 8. SNAPSHOT EXPORT & IMPORT
+  // 8. SNAPSHOT EXPORT
   // =========================================================================
 
   public getSnapshot(): { pii: number[]; piq: number[]; merker: number[] } {
@@ -710,12 +711,6 @@ export class S7BinaryMemory {
       piq: Array.from(this.piq),
       merker: Array.from(this.merker)
     }
-  }
-
-  public loadSnapshot(pii: number[], piq: number[], merker: number[]): void {
-    if (pii && pii.length > 0) this.pii.set(pii.slice(0, this.pii.length))
-    if (piq && piq.length > 0) this.piq.set(piq.slice(0, this.piq.length))
-    if (merker && merker.length > 0) this.merker.set(merker.slice(0, this.merker.length))
   }
 }
 

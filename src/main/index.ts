@@ -1,13 +1,13 @@
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import * as path from 'path'
-import * as os from 'os'
 import { FileEngine } from './fileEngine'
 import { assertProjectRoot, registerProjectRoot } from './pathGuard'
 import { BundleFileToWrite, bundleFolderName, readImportFolder, writeBundleFiles } from './tiaFiles'
 import { getSecret, setSecret } from './secretStore'
+import { cancelAiHttpRequest, sendAiHttpRequest } from './aiHttp'
 import { ProjectWatcher } from './watcher'
-import { ProjectLoadPayload } from '../shared/types/ipc'
+import { AiHttpRequest, ProjectLoadPayload } from '../shared/types/ipc'
 
 let mainWindow: BrowserWindow | null = null
 const projectWatcher = new ProjectWatcher()
@@ -81,17 +81,6 @@ ipcMain.handle('dialog:selectProjectDirectory', async () => {
   return result.filePaths[0]
 })
 
-ipcMain.handle('project:create', async (_, targetDir: string, name: string) => {
-  const fullPath = path.join(targetDir, path.basename(name))
-  registerProjectRoot(fullPath)
-  await FileEngine.ensureProjectDirectories(fullPath)
-  const payload = await FileEngine.loadProject(fullPath)
-  payload.metadata.name = name
-  await FileEngine.saveProject(payload)
-  projectWatcher.startWatching(fullPath, () => mainWindow)
-  return payload
-})
-
 ipcMain.handle('project:open', async (_, projectDir: string) => {
   registerProjectRoot(projectDir)
   const payload = await FileEngine.loadProject(projectDir)
@@ -112,15 +101,6 @@ ipcMain.handle('project:saveFile', async (_, projectDir: string, relPath: string
 ipcMain.handle('project:trashFile', async (_, projectDir: string, relPath: string) => {
   assertProjectRoot(projectDir)
   return await FileEngine.moveToTrash(projectDir, relPath)
-})
-
-ipcMain.handle('project:loadDemo', async (_, customDir?: string) => {
-  const targetDir = customDir || path.join(os.tmpdir(), 'Virtual_S7_Plant_Demo')
-  registerProjectRoot(targetDir)
-  await FileEngine.ensureProjectDirectories(targetDir)
-  const payload = await FileEngine.loadProject(targetDir)
-  projectWatcher.startWatching(targetDir, () => mainWindow)
-  return payload
 })
 
 ipcMain.handle('tia:exportBundle', async (_, projectName: string, files: BundleFileToWrite[]) => {
@@ -147,3 +127,5 @@ ipcMain.handle('tia:pickImportFolder', async () => {
 
 ipcMain.handle('secrets:get', async (_, key: string) => getSecret(key))
 ipcMain.handle('secrets:set', async (_, key: string, value: string) => setSecret(key, value))
+ipcMain.handle('ai:http', async (_, request: AiHttpRequest) => sendAiHttpRequest(request))
+ipcMain.handle('ai:httpCancel', async (_, id: string) => cancelAiHttpRequest(id))

@@ -31,3 +31,10 @@ tools/tia-bridge/TiaBridge.exe
 
 # Screenshots shared while reviewing the GUI
 ScreenShots/
+
+# Screenshots and the report written by npm run test:gui
+artifacts/
+
+# Benchmark results and diagnostic dumps: raw model output, kept local
+bench-results/
+dumps/

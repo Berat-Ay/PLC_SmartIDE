@@ -5,13 +5,11 @@ import {
   Binary,
   Gauge,
   Layers,
-  Check,
-  AlertTriangle,
   Info
 } from 'lucide-react'
 import { useHardwareStore } from '../../../stores/useHardwareStore'
 import { useProjectStore } from '../../../stores/useProjectStore'
-import { ALL_CPU_PROFILES, CpuProfile } from '@shared/constants/cpuProfiles'
+import { ALL_CPU_PROFILES } from '@shared/constants/cpuProfiles'
 import {
   InputFilterDelay,
   AnalogMeasurementType,

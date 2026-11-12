@@ -1,6 +1,5 @@
 import { S7BinaryMemory } from '../renderer/src/runtime/S7BinaryMemory'
 import { PlcRuntimeEngine } from '../renderer/src/runtime/PlcRuntimeEngine'
-import { LadderEvaluator } from '../renderer/src/runtime/LadderEvaluator'
 
 console.log('\n=== RUNNING PHASE 8 S7 BINARY MEMORY & SOFTPCL RUNTIME TESTS ===\n')
 

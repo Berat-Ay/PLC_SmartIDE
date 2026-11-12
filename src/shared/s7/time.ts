@@ -30,9 +30,3 @@ export function parseS7Time(raw: string): number | null {
   }
   return matched ? Math.round(sign * total) : null
 }
-
-/** True when the text is written as a time literal and should therefore parse. */
-export function looksLikeTimeLiteral(raw: string): boolean {
-  const s = raw.trim().replace(/^["']|["']$/g, '').trim()
-  return /^(LTIME|TIME|LT|T)#/i.test(s) || /^\d+(\.\d+)?_?(ms|d|h|m|s)\b/i.test(s)
-}

@@ -1,0 +1,17 @@
+Küçük bir otopark için araç sayacı programı yaz. CPU: S7-1214C. Kapasite 3 araç.
+
+Girişler:
+• Giriş sensörü: I0.0 (araç girişten geçerken 1)
+• Çıkış sensörü: I0.1 (araç çıkıştan geçerken 1)
+• Sayaç reset butonu: I0.2 (normalde açık, basınca 1)
+
+Çıkışlar:
+• Yeşil lamba (yer var): Q0.0
+• DOLU lambası: Q0.1
+
+İstenen davranış:
+1. Giren her araç içerideki araç sayısını 1 artırır, çıkan her araç 1 azaltır. Sayı 0'ın altına inmez.
+2. Sayı kapasiteye (3) ulaşınca DOLU lambası yanar ve yeşil lamba söner.
+3. Bir araç çıkıp yer açılınca DOLU söner, yeşil yanar.
+4. Reset butonu sayıyı 0 yapar.
+5. Bir araç sensörün önünde uzun süre beklese de tek araç olarak sayılır.

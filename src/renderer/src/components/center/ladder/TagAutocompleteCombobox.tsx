@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Search, Tag, Database, HardDrive, Check, X } from 'lucide-react'
+import { Search, Tag, Database, HardDrive, X } from 'lucide-react'
 import { useTagStore } from '../../../stores/useTagStore'
 import { useBlockStore } from '../../../stores/useBlockStore'
 import { BlockInterface } from '@shared/types/blocks'

@@ -2,11 +2,9 @@ import React from 'react'
 import {
   Cpu,
   Tag,
-  Boxes,
   Database,
   FileCode2,
   Sparkles,
-  Layers,
   ArrowRight,
   Flame
 } from 'lucide-react'
@@ -28,10 +26,9 @@ export const EditorWorkspace: React.FC = () => {
     splitTabId,
     isSplitView,
     setActiveTab,
-    setSplitTab,
     openTab
   } = useUIStore()
-  const { metadata, loadDemoProject } = useProjectStore()
+  const { loadDemoProject } = useProjectStore()
 
   const activeTab = tabs.find((t) => t.id === activeTabId)
   const splitTab = isSplitView ? tabs.find((t) => t.id === splitTabId) : undefined

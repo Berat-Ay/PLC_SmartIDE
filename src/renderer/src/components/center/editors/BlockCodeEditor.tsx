@@ -3,7 +3,6 @@ import {
   FileCode2,
   Code,
   Brackets,
-  Sparkles,
   CheckCircle2,
   AlertCircle,
   Eye,

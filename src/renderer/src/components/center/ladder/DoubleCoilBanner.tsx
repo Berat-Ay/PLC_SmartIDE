@@ -1,5 +1,5 @@
 import React from 'react'
-import { AlertTriangle, Zap, CheckCircle2 } from 'lucide-react'
+import { AlertTriangle, Zap } from 'lucide-react'
 import { DoubleCoilConflict, DoubleCoilDetector } from '../../../services/DoubleCoilDetector'
 import { useBlockStore } from '../../../stores/useBlockStore'
 import { useProjectStore } from '../../../stores/useProjectStore'

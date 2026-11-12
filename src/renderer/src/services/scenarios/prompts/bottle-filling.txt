@@ -1,0 +1,22 @@
+Bir şişe dolum hattı için ladder programı yaz. CPU: S7-1214C.
+
+Girişler:
+• Start butonu: I0.0 (normalde açık, basınca 1)
+• Stop butonu: I0.1 (normalde kapalı kontak: basılı değilken 1, basınca 0)
+• Acil stop: I0.2 (normalde kapalı: normalde 1, basılınca 0)
+• Reset butonu: I0.3 (normalde açık, basınca 1)
+• Şişe sensörü: I0.4 (dolum memesinin altında şişe varken 1)
+
+Çıkışlar:
+• Konveyör motoru: Q0.0
+• Dolum valfi: Q0.1
+• Kutu dolu lambası: Q0.2
+• Arıza lambası: Q0.3
+
+İstenen davranış:
+1. Start'a basılınca hat çalışır ve konveyör döner. Stop'a basılınca hat durur.
+2. Bir şişe dolum memesinin altına gelince konveyör durur ve dolum valfi 3 saniye açılır.
+3. Dolum bitince valf kapanır ve konveyör yeniden döner. Dolan şişe sensörün önünden çıkmadan aynı şişe yeniden doldurulmaz.
+4. Bir kutu 4 şişe alır. 4. şişe dolunca Kutu dolu lambası yanar ve hat durur; lamba yanarken Start hattı çalıştırmaz. Operatör kutuyu değiştirip Reset'e basınca sayı sıfırlanır ve lamba söner. Reset hattı çalıştırmaz, hat yeniden Start ile çalışır.
+5. Stop dolumu da durdurur: valf hemen kapanır. Yarıda kalan dolum tekrarlanmaz; yeniden Start'ta konveyör döner.
+6. Acil stop'a basılınca konveyör ve valf hemen durur ve Arıza lambası yanar. Arıza lambası acil stop bırakıldıktan sonra da Reset'e basılana kadar yanar; acil stop basılıyken Reset arızayı silmez. Arıza varken Start hattı çalıştırmaz. Reset hattı çalıştırmaz, yeniden Start gerekir.

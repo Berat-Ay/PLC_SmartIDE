@@ -5,7 +5,6 @@ import {
   Grid,
   ChevronDown,
   ChevronUp,
-  X,
   Activity
 } from 'lucide-react'
 import { useUIStore } from '../../stores/useUIStore'

@@ -98,7 +98,6 @@ export class LadderGridLayoutEngine {
   public static readonly CELL_WIDTH = 180 // standard contact/coil cell
   public static readonly BOX_CELL_WIDTH = 220 // function blocks (TON, CTU, MATH, NORM_X, etc.)
   public static readonly ROW_HEIGHT = 110 // standard contact row
-  public static readonly BOX_ROW_HEIGHT = 140 // function block row
   public static readonly LEFT_RAIL_X = 48
   // The selection toolbar of a contact or coil sits 84 above its wire and must stay inside the SVG
   public static readonly TOP_PADDING = 90
@@ -484,7 +483,6 @@ export class LadderGridLayoutEngine {
 
     // Connect wire from end of series logic to output coil (or terminal lead)
     const rightRailX = colToX(coilCol) + LadderGridLayoutEngine.CELL_WIDTH + 20
-    const finalContentX = coilLayout ? coilLayout.entryWireX : colToX(placeResult.endCol)
     const lastPrecedingX =
       mainNodesToPlace.length > 0
         ? (forkJoins.length > 0 && forkJoins[forkJoins.length - 1].joinX > colToX(placeResult.endCol - 1)

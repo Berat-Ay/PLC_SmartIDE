@@ -5,10 +5,7 @@ import {
   Pause,
   ChevronLeft,
   ChevronRight,
-  Search,
-  RotateCcw,
-  Sparkles,
-  Zap
+  Search
 } from 'lucide-react'
 import { useRuntimeStore } from '../../../stores/useRuntimeStore'
 import { useTagStore } from '../../../stores/useTagStore'

@@ -100,12 +100,13 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
           byteCount: 2048
         }
       },
+      // As in TIA Portal, a new CPU has system and clock memory off; the user turns them on in the CPU settings
       systemMemory: {
-        enabled: true,
+        enabled: false,
         byteAddress: 1
       },
       clockMemory: {
-        enabled: true,
+        enabled: false,
         byteAddress: 0
       },
       digitalIO: {

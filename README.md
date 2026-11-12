@@ -57,7 +57,8 @@ Behaviour that differs from a real CPU or has not been verified:
 - Interrupt OBs do not interrupt the scan, they run between scans. Phase shift is ignored
 - Only OB1 runs as a program cycle OB, OB123 and above do not run
 - INT overflow wraps only when written to memory, not in intermediate results
-- LAD power flow state is shared between instances of the same FB
+- For an FB written in LAD with several instances, the editor shows the power flow of the instance called last. Each instance still has its own memory, timers and edges
+- An edge contact works without an edge memory bit and an SCL `R_TRIG` or `F_TRIG` without an instance: each then keeps its own memory. TIA accepts neither, so give them one before exporting
 - DATE and TOD constants are not supported
 - Symbols that TIA adds by itself when system memory is on, such as `FirstScan`, do not exist. Use the address: `%M1.0`
 - Rounding in an implicit assignment from REAL to an integer is an assumption

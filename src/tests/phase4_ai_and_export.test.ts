@@ -9,12 +9,10 @@
  * 6. Module 5: Siemens TIA Portal Openness & SimaticML Export Bridge
  */
 
-import { describe, it } from 'node:test'
 import assert from 'node:assert'
 import { MemoryOverlapEngine } from '../renderer/src/services/MemoryOverlapEngine'
 import { DemoProjectSeeder } from '../renderer/src/services/DemoProjectSeeder'
 import { PlcRuntimeEngine } from '../renderer/src/runtime/PlcRuntimeEngine'
-import { LadderEvaluator } from '../renderer/src/runtime/LadderEvaluator'
 import { AiModelRouter, isStrictGeminiTextModel } from '../renderer/src/services/ai/AiModelRouter'
 import { parseTimePresetMs } from '../renderer/src/runtime/LadderEvaluator'
 import { PlcAgentTools } from '../renderer/src/services/ai/PlcAgentTools'
@@ -27,7 +25,6 @@ import { useBlockStore } from '../renderer/src/stores/useBlockStore'
 import { useProjectStore } from '../renderer/src/stores/useProjectStore'
 import { useHardwareStore } from '../renderer/src/stores/useHardwareStore'
 import { useRuntimeStore } from '../renderer/src/stores/useRuntimeStore'
-import { LadBlockDefinition } from '@shared/types/blocks'
 
 console.log('\n=== RUNNING PHASE 4 AI AGENT, RAG & TIA EXPORT TEST SUITE ===\n')
 

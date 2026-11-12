@@ -4,8 +4,7 @@ import {
   DataBlockDefinition,
   LadBlockDefinition,
   SclBlockDefinition,
-  BlockVariable,
-  LadNetwork
+  BlockVariable
 } from '@shared/types/blocks'
 import { UdtDefinition, UdtMember } from '@shared/types/types'
 import { S7OffsetCalculator } from '../services/S7OffsetCalculator'

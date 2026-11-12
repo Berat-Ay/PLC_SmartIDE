@@ -3,16 +3,9 @@ import {
   Play,
   Pause,
   RotateCcw,
-  Download,
-  Crosshair,
-  Sliders,
-  Flame,
-  Activity,
-  Layers,
-  ChevronDown
+  Download
 } from 'lucide-react'
 import { useRuntimeStore } from '../../stores/useRuntimeStore'
-import { RuntimeMemorySnapshot } from '@shared/types/runtime'
 
 export interface TraceChannel {
   id: string
@@ -48,7 +41,7 @@ export const TraceOscilloscope: React.FC = () => {
   // Trace channels state
   const [channels, setChannels] = useState<TraceChannel[]>(DEFAULT_CHANNELS)
   const [timebaseMs, setTimebaseMs] = useState<number>(10000) // 10s default
-  const [sampleRateMs, setSampleRateMs] = useState<number>(10) // 10ms (1x scan)
+  const sampleRateMs = 10 // 10ms (1x scan)
   const [triggerMode, setTriggerMode] = useState<TriggerMode>('FREE_RUN')
   const [triggerChannelId, setTriggerChannelId] = useState<string>('ch1')
   const [triggerState, setTriggerState] = useState<TriggerState>('RUNNING')

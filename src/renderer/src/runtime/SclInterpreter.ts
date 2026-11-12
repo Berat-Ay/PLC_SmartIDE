@@ -452,9 +452,9 @@ export class SclInterpreter {
     const upper = name.toUpperCase()
 
     if (upper === 'R_TRIG' || upper === 'F_TRIG') {
-      // Without an instance the state belongs to this call site
+      // Without an instance the state belongs to this call site: this line of this block, or of this FB instance
       const clk = !!this.evaluateNode(this.argExpr(args, 'CLK', 0) as SclExpression, context)
-      const key = `${upper}@${line}`
+      const key = `${context.instancePrefix?.() || ''}${upper}@${line}`
       const state = this.edgeTriggerStates.get(key) || { prevClk: false }
       const q = upper === 'R_TRIG' ? clk && !state.prevClk : !clk && state.prevClk
       state.prevClk = clk

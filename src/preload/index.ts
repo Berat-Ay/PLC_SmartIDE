@@ -3,18 +3,18 @@ import { ElectronApi, FileChangeEventPayload, ProjectLoadPayload } from '../shar
 
 const electronApi: ElectronApi = {
   selectProjectDirectory: () => ipcRenderer.invoke('dialog:selectProjectDirectory'),
-  createProject: (targetDir: string, name: string) => ipcRenderer.invoke('project:create', targetDir, name),
   openProject: (projectDir: string) => ipcRenderer.invoke('project:open', projectDir),
   saveProjectFile: (projectDir: string, relativePath: string, content: string) =>
     ipcRenderer.invoke('project:saveFile', projectDir, relativePath, content),
   trashProjectFile: (projectDir: string, relativePath: string) =>
     ipcRenderer.invoke('project:trashFile', projectDir, relativePath),
   saveAll: (payload: ProjectLoadPayload) => ipcRenderer.invoke('project:save', payload),
-  loadDemoProject: (customDir?: string) => ipcRenderer.invoke('project:loadDemo', customDir),
   exportTiaBundle: (projectName, files) => ipcRenderer.invoke('tia:exportBundle', projectName, files),
   pickTiaImportFolder: () => ipcRenderer.invoke('tia:pickImportFolder'),
   getSecret: (key: string) => ipcRenderer.invoke('secrets:get', key),
   setSecret: (key: string, value: string) => ipcRenderer.invoke('secrets:set', key, value),
+  aiHttpRequest: (request) => ipcRenderer.invoke('ai:http', request),
+  aiHttpCancel: (id: string) => ipcRenderer.invoke('ai:httpCancel', id),
   onFileChanged: (callback: (payload: FileChangeEventPayload) => void) => {
     const handler = (_: unknown, payload: FileChangeEventPayload) => callback(payload)
     ipcRenderer.on('project:fileChanged', handler)

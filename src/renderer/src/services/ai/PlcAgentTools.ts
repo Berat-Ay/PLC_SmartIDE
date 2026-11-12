@@ -15,7 +15,6 @@ import { ProjectCompilerEngine } from '../compiler/ProjectCompilerEngine'
 import { MemoryOverlapEngine } from '../MemoryOverlapEngine'
 import {
   DataBlockDefinition,
-  LadBlockDefinition,
   SclBlockDefinition,
   BlockVariable
 } from '@shared/types/blocks'

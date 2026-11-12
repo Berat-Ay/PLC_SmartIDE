@@ -1,44 +1,35 @@
 import React, { useState } from 'react'
 import {
   Cpu,
-  Layers,
   Flame,
   Activity,
-  Sliders,
   Zap,
   RotateCcw,
-  Play,
-  Pause,
-  AlertTriangle,
   Code,
   Gauge,
-  Thermometer,
   Waves,
   Save,
   CheckCircle2
 } from 'lucide-react'
 import { useRuntimeStore } from '../../stores/useRuntimeStore'
-import { useSimulationStore, SimulationSubTab } from '../../stores/useSimulationStore'
+import { useSimulationStore } from '../../stores/useSimulationStore'
 import { useTagStore } from '../../stores/useTagStore'
 import { TraceOscilloscope } from './TraceOscilloscope'
 
 export const VirtualIORackPanel: React.FC = () => {
-  const { currentSnapshot, engine, forceValue, forceOverrides } = useRuntimeStore()
+  const { currentSnapshot, forceOverrides } = useRuntimeStore()
   const {
     activeSubTab,
     setActiveSubTab,
     tankLevelRaw,
     reactorTempRaw,
-    conveyorPosition,
     outflowValvePct,
     closedLoopActive,
-    noiseEnabled,
     faults,
     metrics,
     scenarioCode,
     setOutflowValvePct,
     setClosedLoopActive,
-    setNoiseEnabled,
     injectFault,
     clearFaults,
     setDigitalInput,

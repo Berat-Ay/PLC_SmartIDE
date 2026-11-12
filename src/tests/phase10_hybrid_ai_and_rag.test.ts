@@ -7,7 +7,6 @@ import {
 import { AiModelRouter } from '../renderer/src/services/ai/AiModelRouter'
 import { CoilDiagnosticEngine } from '../renderer/src/services/ai/CoilDiagnosticEngine'
 import { LadBlockDefinition } from '@shared/types/blocks'
-import { LadderNetwork } from '@shared/types/ladder'
 import { useRuntimeStore } from '../renderer/src/stores/useRuntimeStore'
 import { useTagStore } from '../renderer/src/stores/useTagStore'
 

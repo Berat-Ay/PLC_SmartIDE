@@ -1,4 +1,4 @@
-import { ParsedS7Address, S7MemoryArea, S7PrimitiveType, S7_PRIMITIVE_SPECS, MemoryCoordinate } from '../types/s7types'
+import { ParsedS7Address, S7MemoryArea, MemoryCoordinate } from '../types/s7types'
 
 /**
  * Parses a Siemens S7 address (e.g., %I0.0, %MW10, %QD4, MB1, etc.)

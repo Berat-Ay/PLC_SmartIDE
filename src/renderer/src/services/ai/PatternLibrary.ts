@@ -546,6 +546,87 @@ NW 13 "Drain valve": SERIES( NO(Step_3), COIL(Drain_Valve) )`,
     ]
   },
   {
+    id: 'cycle_sequence',
+    category: 'sequencing',
+    summary:
+      'A machine cycle that repeats for every new part in automatic, with E-stop, fault reset and restart: clamp, work, release.',
+    keywords:
+      'cevrim cycle otomatik auto tekrar repeat parca part istasyon station adim step sekans acil stop e-stop estop hata reset fault restart yeniden baslatma tutucu gripper clamp sikma pres',
+    dsl: `TAG Start %I0.0 BOOL "Start button, NO"
+TAG EStop_OK %I0.1 BOOL "E-stop, wired NC, 1 when healthy"
+TAG Fault_Reset %I0.2 BOOL "Fault reset button, NO"
+TAG Part_Ready %I0.3 BOOL "Part in place"
+TAG Clamped %I0.4 BOOL "Clamp closed sensor"
+TAG Auto %M10.0 BOOL "Machine in automatic"
+TAG Fault %M10.1 BOOL "E-stop fault, latched"
+TAG Step_Clamp %M10.2 BOOL "Step: clamp the part"
+TAG Step_Work %M10.3 BOOL "Step: work on the part"
+TAG Step_Release %M10.4 BOOL "Step: release the part"
+TAG Clamp_Valve %Q0.0 BOOL "Clamp valve, spring return"
+TAG Work_Motor %Q0.1 BOOL "Work motor"
+TAG Auto_Lamp %Q0.2 BOOL "Automatic lamp"
+NW 1 "E-stop latches a fault": SERIES( NC(EStop_OK), SET(Fault) )
+NW 2 "Fault ends automatic and every step": SERIES( NO(Fault), RESET(Auto), RESET(Step_Clamp), RESET(Step_Work), RESET(Step_Release) )
+NW 3 "Reset clears the fault only": SERIES( NO(Fault_Reset), NO(EStop_OK), RESET(Fault) )
+NW 4 "Start enters automatic": SERIES( NO(Start), NC(Fault), SET(Auto) )
+NW 5 "New part starts a cycle": SERIES( NO(Auto), P_TRIG(Part_Ready), NC(Step_Clamp), NC(Step_Work), NC(Step_Release), SET(Step_Clamp) )
+NW 6 "Clamped to work": SERIES( NO(Step_Clamp), NO(Clamped), SET(Step_Work), RESET(Step_Clamp) )
+NW 7 "Work time": SERIES( NO(Step_Work), TON(T_Work, PT=T#2s) )
+NW 8 "Work to release": SERIES( NO(T_Work.Q), SET(Step_Release), RESET(Step_Work) )
+NW 9 "Released ends the cycle": SERIES( NO(Step_Release), NC(Clamped), RESET(Step_Release) )
+NW 10 "Clamp held while the part is worked": SERIES( PARALLEL( NO(Step_Clamp), NO(Step_Work) ), COIL(Clamp_Valve) )
+NW 11 "Work motor": SERIES( NO(Step_Work), COIL(Work_Motor) )
+NW 12 "Automatic lamp": SERIES( NO(Auto), COIL(Auto_Lamp) )`,
+    test: {
+      steps: [
+        { atMs: 0, set: { EStop_OK: true } },
+        { atMs: 100, expect: { Auto: false, Clamp_Valve: false } },
+        // A part without automatic starts nothing
+        { atMs: 200, set: { Part_Ready: true } },
+        { atMs: 300, expect: { Step_Clamp: false, Clamp_Valve: false } },
+        { atMs: 400, set: { Part_Ready: false } },
+        { atMs: 500, set: { Start: true } },
+        { atMs: 600, set: { Start: false } },
+        { atMs: 700, expect: { Auto: true, Auto_Lamp: true, Clamp_Valve: false } },
+        { atMs: 800, set: { Part_Ready: true } },
+        { atMs: 900, expect: { Clamp_Valve: true, Work_Motor: false } },
+        { atMs: 1000, set: { Clamped: true } },
+        { atMs: 1100, expect: { Work_Motor: true, Clamp_Valve: true } },
+        { atMs: 2800, expect: { Work_Motor: true, Clamp_Valve: true } },
+        { atMs: 3200, expect: { Work_Motor: false, Clamp_Valve: false, Step_Release: true } },
+        { atMs: 3300, set: { Clamped: false } },
+        // The cycle has ended, and the part still in place does not start another one
+        { atMs: 3400, expect: { Step_Release: false, Step_Clamp: false, Clamp_Valve: false } },
+        { atMs: 3600, set: { Part_Ready: false } },
+        { atMs: 3700, set: { Part_Ready: true } },
+        { atMs: 3800, expect: { Clamp_Valve: true, Auto: true } },
+        // E-stop in the middle of a cycle
+        { atMs: 3900, set: { EStop_OK: false } },
+        { atMs: 4000, expect: { Clamp_Valve: false, Step_Clamp: false, Auto: false, Auto_Lamp: false } },
+        { atMs: 4100, set: { EStop_OK: true } },
+        { atMs: 4200, expect: { Clamp_Valve: false, Auto: false } },
+        // Reset starts nothing
+        { atMs: 4300, set: { Fault_Reset: true } },
+        { atMs: 4400, set: { Fault_Reset: false } },
+        { atMs: 4500, expect: { Clamp_Valve: false, Auto: false, Step_Clamp: false } },
+        // Start and a new part do
+        { atMs: 4700, set: { Start: true } },
+        { atMs: 4800, set: { Start: false } },
+        { atMs: 4900, expect: { Auto: true } },
+        { atMs: 5000, set: { Part_Ready: false } },
+        { atMs: 5100, set: { Part_Ready: true } },
+        { atMs: 5200, expect: { Clamp_Valve: true } }
+      ]
+    },
+    pitfalls: [
+      'Reset clears the fault and nothing else. A reset that sets the first step makes the machine move without Start, which a machine must not do after an E-stop.',
+      'Every step bit is reset when its step ends and by the fault, also where the request does not say so. A step left on blocks the next cycle or starts the wrong one.',
+      'The clamp valve is spring return, so it is driven through every step that holds the part. A valve that keeps its position by itself needs an open and a close output instead, never on together.',
+      'The cycle starts on the rising edge of Part_Ready, so a part left in place after a cycle does not start another. If the plant signals a new part differently, wait for that.',
+      'The lamp here shows automatic mode. If it should show a cycle in progress, drive it from the steps instead, and say which one you chose.'
+    ]
+  },
+  {
     id: 'analog_threshold',
     category: 'analog',
     summary: 'Scale a raw analog input to engineering units and raise an alarm above a limit.',

@@ -557,5 +557,134 @@ END_FUNCTION_BLOCK
   check('A malformed statement stops the CPU instead of doing nothing', engine.getState(), 'ERROR')
 }
 
+// --- Edge memory belongs to one contact, one call site and one instance -------------------------
+{
+  // Two rising-edge contacts on the same signal with no edge bit: on a CPU each has its own edge memory
+  const ob1: LadBlockDefinition = {
+    blockType: 'OB',
+    blockNumber: 1,
+    name: 'Main',
+    fileName: 'Main.lad.json',
+    optimizedAccess: true,
+    interface: emptyInterface(),
+    schemaVersion: '1',
+    networks: [
+      {
+        networkNumber: 1,
+        title: 'n',
+        nodes: [
+          { id: 'c', kind: 'contact', contactType: 'P_TRIG', operand: '%I0.0', address: '%I0.0' } as never,
+          { id: 'k', kind: 'coil', coilType: 'SET_COIL', operand: '%M10.0', address: '%M10.0' } as never
+        ]
+      },
+      {
+        // The same node ids as network 1, as in networks an agent appended in a later turn
+        networkNumber: 2,
+        title: 'n',
+        nodes: [
+          { id: 'c', kind: 'contact', contactType: 'P_TRIG', operand: '%I0.0', address: '%I0.0' } as never,
+          { id: 'k', kind: 'coil', coilType: 'SET_COIL', operand: '%M10.1', address: '%M10.1' } as never
+        ]
+      },
+      {
+        networkNumber: 3,
+        title: 'n',
+        nodes: [
+          { id: 'f', kind: 'contact', contactType: 'N_TRIG', operand: '%I0.0', address: '%I0.0' } as never,
+          { id: 'kf', kind: 'coil', coilType: 'SET_COIL', operand: '%M10.2', address: '%M10.2' } as never
+        ]
+      }
+    ]
+  }
+  const { engine } = boot(project({ ladBlocks: [ob1] }))
+  engine.runCyclicScan()
+  engine.setVariable('%I0.0', true)
+  engine.runCyclicScan()
+  check('The first rising-edge contact fires', engine.getVariable('%M10.0'), true)
+  check('A second rising-edge contact on the same signal fires too', engine.getVariable('%M10.1'), true)
+  check('A falling-edge contact on it does not fire on the rising edge', engine.getVariable('%M10.2'), false)
+  engine.setVariable('%M10.0', false)
+  engine.setVariable('%M10.1', false)
+  engine.runCyclicScan()
+  check('An edge lasts one scan (first contact)', engine.getVariable('%M10.0'), false)
+  check('An edge lasts one scan (second contact)', engine.getVariable('%M10.1'), false)
+  engine.setVariable('%I0.0', false)
+  engine.runCyclicScan()
+  check('The falling-edge contact fires when the signal drops', engine.getVariable('%M10.2'), true)
+}
+{
+  // R_TRIG without an instance on the same line of two blocks
+  const { engine } = boot(
+    project({
+      sclBlocks: [
+        scl('FC', 1, 'FC_A', `R_TRIG(CLK := %I0.0, Q => %M20.0);`),
+        scl('FC', 2, 'FC_B', `R_TRIG(CLK := %I0.1, Q => %M20.1);`),
+        scl('OB', 1, 'Main', `"FC_A"();\n"FC_B"();`)
+      ]
+    })
+  )
+  engine.setVariable('%I0.0', true)
+  engine.runCyclicScan()
+  check('R_TRIG without an instance sees the rising edge', engine.getVariable('%M20.0'), true)
+  engine.runCyclicScan()
+  check('The same line in another block does not share its edge memory', engine.getVariable('%M20.0'), false)
+}
+{
+  // An FB written in LAD, called through two instances
+  const fb: LadBlockDefinition = {
+    blockType: 'FB',
+    blockNumber: 1,
+    name: 'FB_Edge',
+    fileName: 'FB_Edge.lad.json',
+    optimizedAccess: true,
+    interface: { ...emptyInterface(), input: [v('Trig', 'Bool')], output: [v('Latched', 'Bool'), v('Done', 'Bool')], static: [v('Tmr', 'TON_TIME')] },
+    schemaVersion: '1',
+    networks: [
+      {
+        networkNumber: 1,
+        title: 'n',
+        nodes: [
+          { id: 'c1', kind: 'contact', contactType: 'P_TRIG', operand: '#Trig' } as never,
+          { id: 'k1', kind: 'coil', coilType: 'SET_COIL', operand: '#Latched' } as never
+        ]
+      },
+      {
+        networkNumber: 2,
+        title: 'n',
+        nodes: [
+          { id: 'c2', kind: 'contact', contactType: 'NO_CONTACT', operand: '#Trig' } as never,
+          { id: 't1', kind: 'timer', timerType: 'TON', instanceDb: '#Tmr', inOperand: '', ptOperand: 'T#1s', qOperand: '', etOperand: '' } as never,
+          { id: 'k2', kind: 'coil', coilType: 'OUTPUT_COIL', operand: '#Done' } as never
+        ]
+      }
+    ]
+  }
+  const { engine, advance } = boot(
+    project({
+      ladBlocks: [fb],
+      sclBlocks: [scl('OB', 1, 'Main', `"E1"(Trig := %I0.0);\n"E2"(Trig := %I0.1);`)],
+      dataBlocks: [
+        db(1, 'E1', [], { dbType: 'Instance', parentFbName: 'FB_Edge' }),
+        db(2, 'E2', [], { dbType: 'Instance', parentFbName: 'FB_Edge' })
+      ]
+    })
+  )
+  engine.setVariable('%I0.0', true)
+  engine.runCyclicScan()
+  check('LAD FB: the first instance sees its edge', engine.getVariable('"E1".Latched'), true)
+  check('LAD FB: the second instance saw none', engine.getVariable('"E2".Latched'), false)
+  engine.setVariable('%I0.1', true)
+  engine.runCyclicScan()
+  check('LAD FB: the second instance sees its own edge later', engine.getVariable('"E2".Latched'), true)
+  advance(600)
+  engine.runCyclicScan()
+  engine.setVariable('%I0.1', false)
+  engine.runCyclicScan()
+  advance(600)
+  engine.runCyclicScan()
+  check('LAD FB: the timer of the first instance elapses', engine.getVariable('"E1".Done'), true)
+  check('LAD FB: the timer of the second instance was reset on its own', engine.getVariable('"E2".Done'), false)
+}
+
 console.log(`\nPHASE 13 SUMMARY: ${passed} PASSED, ${failed} FAILED`)
 process.exit(failed > 0 ? 1 : 0)

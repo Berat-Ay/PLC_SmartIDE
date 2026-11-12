@@ -1,0 +1,24 @@
+Otomatik bir garaj kapısı için ladder programı yaz. CPU: S7-1214C.
+
+Girişler:
+• Aç butonu: I0.0 (normalde açık, basınca 1)
+• Kapat butonu: I0.1 (normalde açık, basınca 1)
+• Dur butonu: I0.2 (normalde kapalı kontak: basılı değilken 1, basınca 0)
+• Açık limit şalteri: I0.3 (kapı tam açıkken 1)
+• Kapalı limit şalteri: I0.4 (kapı tam kapalıyken 1)
+• Fotosel: I0.5 (yol boşken 1, engel varken 0)
+
+Çıkışlar:
+• Motor açma yönü: Q0.0
+• Motor kapama yönü: Q0.1
+• Uyarı lambası: Q0.2
+
+İstenen davranış:
+1. Aç'a basılınca kapı açılır ve buton bırakıldıktan sonra da açılmaya devam eder. Açık limitte durur.
+2. Kapat'a basılınca kapı kapanır ve buton bırakıldıktan sonra da kapanmaya devam eder. Kapalı limitte durur.
+3. Motor iki yönde asla aynı anda çalışmaz. Kapı bir yönde hareket ederken diğer yönün butonu dikkate alınmaz.
+4. Dur'a basılınca kapı hemen durur ve kendiliğinden yeniden hareket etmez.
+5. Kapı kapanırken fotosel engel görürse kapanma durur ve kapı kendiliğinden tamamen açılır.
+6. Fotosel engel görürken kapı kapanmaya başlamaz.
+7. Kapı tam açıkken 10 saniye sonra kendiliğinden kapanmaya başlar.
+8. Uyarı lambası kapı hareket ederken yanar.

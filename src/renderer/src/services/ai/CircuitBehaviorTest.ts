@@ -32,6 +32,8 @@ export interface BehaviorResult {
   pulses: string[]
   /** What the program really did, for the model to reason about. */
   timeline: string
+  /** Watched values that were on (non-zero) in at least one scan, as named in the test. A one-scan pulse shows here */
+  seenOn: string[]
 }
 
 const MAX_TEST_MS = 300_000
@@ -40,6 +42,8 @@ const MAX_SCANS = 3_000
 const MIN_SCAN_MS = 10
 const MAX_TIMELINE_ENTRIES = 40
 const PULSE_SCANS = 2
+/** A failed check is watched this many scans more, to tell a late value from a wrong one */
+const LATE_SCANS = 3
 const INSTANCE_FIELD = /^[A-Za-z0-9_]+\.(Q|ET|QU|QD|CV)$/i
 
 /** Checks the shape of a test from the model. A wrong test is the model's to fix. */
@@ -105,7 +109,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
       if (!isKnown(name)) failures.push(`At ${step.atMs} ms the test expects '${name}', which does not exist.`)
     }
   }
-  if (failures.length > 0) return { checks: 0, failures, pulses, timeline: '' }
+  if (failures.length > 0) return { checks: 0, failures, pulses, timeline: '', seenOn: [] }
 
   const expected = new Set(test.steps.flatMap((s) => Object.keys(s.expect || {})))
   const outputs = project.tagTables
@@ -129,14 +133,29 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
 
     const last = new Map<string, unknown>()
     const onForScans = new Map<string, number>()
+    const seenOn = new Set<string>()
     const changes: string[] = []
     let changeCount = 0
     let checks = 0
     const seconds = (): string => ((now - startedAt) / 1000).toFixed(2)
     const read = (name: string): unknown => engine.getVariable(addressOf(name))
+    const matches = (actual: unknown, value: BehaviorValue): boolean =>
+      typeof value === 'boolean' ? !!actual === value : Math.abs(Number(actual) - value) <= Math.max(1e-6, Math.abs(value) * 1e-4)
+    // A failed check whose value arrives a scan or two later is most often a test that looks too early
+    const late: Array<{ failure: number; name: string; value: BehaviorValue; scansLeft: number; scans: number }> = []
 
     const scan = (): void => {
       engine.scanOnce()
+      for (let i = late.length - 1; i >= 0; i--) {
+        const pending = late[i]
+        pending.scans++
+        if (matches(read(pending.name), pending.value)) {
+          failures[pending.failure] += ` It becomes ${formatValue(pending.value)} ${pending.scans} scan(s) later, at ${now - startedAt} ms.`
+          late.splice(i, 1)
+        } else if (--pending.scansLeft === 0) {
+          late.splice(i, 1)
+        }
+      }
       for (const name of watched) {
         const value = read(name)
         if (value !== last.get(name) && (last.has(name) || value)) {
@@ -144,6 +163,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
           if (changes.length < MAX_TIMELINE_ENTRIES) changes.push(`${seconds()}s ${name}=${formatValue(value)}`)
         }
         last.set(name, value)
+        if (value) seenOn.add(name)
         if (outputs.includes(name)) {
           if (value) {
             onForScans.set(name, (onForScans.get(name) || 0) + 1)
@@ -163,6 +183,8 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
         now += scanMs
         scan()
       }
+      // A new input could cause the value itself, so a late value is only told before the next change
+      if (step.set) late.length = 0
       for (const [name, value] of Object.entries(step.set || {})) engine.setVariable(addressOf(name), value)
       if (step.set) {
         now += scanMs
@@ -175,11 +197,17 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
           failures.push(`At ${step.atMs} ms the test expects '${name}', which does not exist in the running program.`)
           continue
         }
-        const same = typeof value === 'boolean' ? !!actual === value : Math.abs(Number(actual) - value) <= Math.max(1e-6, Math.abs(value) * 1e-4)
-        if (!same) {
+        if (!matches(actual, value)) {
           failures.push(`At ${step.atMs} ms '${name}' should be ${formatValue(value)} but is ${formatValue(actual)}.`)
+          late.push({ failure: failures.length - 1, name, value, scansLeft: LATE_SCANS, scans: 0 })
         }
       }
+    }
+
+    // A check that failed at the last step still gets its few scans, only to tell whether its value came late
+    for (let i = 0; i < LATE_SCANS && late.length > 0; i++) {
+      now += scanMs
+      scan()
     }
 
     const state = engine.getState()
@@ -189,7 +217,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
     }
 
     const more = changeCount > changes.length ? `\n... and ${changeCount - changes.length} more changes` : ''
-    return { checks, failures, pulses, timeline: changes.join('\n') + more }
+    return { checks, failures, pulses, timeline: changes.join('\n') + more, seenOn: Array.from(seenOn) }
   } finally {
     engine.stop()
     restoreLadder()

@@ -1,12 +1,10 @@
 import { LadBlockDefinition, LadNetwork, BlockVariable, LadCoil } from '@shared/types/blocks'
 import {
-  LadderNetwork,
   LadderNode,
   LadderCoilNode,
   LadderSeriesNode,
   LadderContactNode
 } from '@shared/types/ladder'
-import { DiagnosticMessage } from '@shared/types/diagnostics'
 
 export interface DoubleCoilConflict {
   operand: string
@@ -140,27 +138,6 @@ export class DoubleCoilDetector {
     }
 
     return conflicts
-  }
-
-  /**
-   * Generates diagnostic messages for all detected double-coils
-   */
-  public static generateDiagnostics(conflicts: DoubleCoilConflict[]): DiagnosticMessage[] {
-    return conflicts.map((c) => ({
-      id: `diag_double_coil_${c.blockFileName}_${c.normalizedOperand}`,
-      severity: 'Warning',
-      code: 'WARN_DOUBLE_COIL',
-      source: 'Double-Coil Guard',
-      message: `Double coil detected on "${c.operand}" in ${c.blockName} across Networks ${c.networkNumbers.join(
-        ' & '
-      )} — only the last evaluated network will control the physical state!`,
-      targetFile: c.blockFileName,
-      targetSymbol: c.operand,
-      autoFixable: true,
-      fixAction: 'AUTO_ASSIGN_ADDRESS',
-      fixLabel: 'Auto-Merge Coils',
-      timestamp: Date.now()
-    }))
   }
 
   /**
