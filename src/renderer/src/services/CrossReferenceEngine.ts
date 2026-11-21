@@ -190,12 +190,15 @@ export class CrossReferenceEngine {
 
     // 4. Index Data Blocks (DBs)
     for (const db of dataBlocks) {
-      const dbId = db.id || db.fileName
+      const stripDbSuffix = (raw: string): string => raw.replace(/(\.db\.json)+$/i, '')
+      const canonicalBase = stripDbSuffix((db.fileName || db.id || db.name || '').trim())
+      const dbFileName = `${canonicalBase}.db.json`
+      const dbKey = db.id || dbFileName
       addRef(db.name, {
-        id: `xref_db_decl_${dbId}`,
+        id: `xref_db_decl_${dbKey}`,
         targetSymbol: db.name,
         sourceObject: db.name,
-        sourceObjectId: dbId,
+        sourceObjectId: dbFileName,
         sourceType: 'DB',
         location: `DB${db.blockNumber} [${db.dbType}]`,
         accessType: 'Declaration',
@@ -205,10 +208,10 @@ export class CrossReferenceEngine {
       for (const v of db.variables) {
         const fullPath = `"${db.name}".${v.name}`
         const item: CrossReferenceItem = {
-          id: `xref_db_var_${dbId}_${v.id}`,
+          id: `xref_db_var_${dbKey}_${v.id}`,
           targetSymbol: fullPath,
           sourceObject: db.name,
-          sourceObjectId: dbId,
+          sourceObjectId: dbFileName,
           sourceType: 'DB',
           location: `Offset ${v.calculatedOffset || 'auto'}`,
           accessType: 'Declaration',
@@ -218,10 +221,10 @@ export class CrossReferenceEngine {
         addRef(v.name, item)
         // If variable references a UDT
         addRef(v.dataType, {
-          id: `xref_db_udt_use_${dbId}_${v.id}`,
+          id: `xref_db_udt_use_${dbKey}_${v.id}`,
           targetSymbol: v.dataType,
           sourceObject: db.name,
-          sourceObjectId: dbId,
+          sourceObjectId: dbFileName,
           sourceType: 'DB',
           location: `Variable "${v.name}"`,
           accessType: 'Read',

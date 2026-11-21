@@ -1,92 +1,88 @@
 import { BlockVariable } from '@shared/types/blocks'
 import { UdtDefinition } from '@shared/types/types'
-import { S7_PRIMITIVE_SPECS, S7PrimitiveType } from '@shared/types/s7types'
+import { buildLayout, LayoutVariable, S7Type, StructType, TypeResolver } from '@shared/s7/typeLayout'
+
+export type FbVariableLookup =
+  | Map<string, LayoutVariable[]>
+  | ((name: string) => LayoutVariable[] | undefined)
+
+function createResolver(
+  udtLookup: Map<string, UdtDefinition> = new Map(),
+  fbLookup?: FbVariableLookup
+): TypeResolver {
+  const udtByLower = new Map<string, UdtDefinition>()
+  for (const [key, def] of udtLookup.entries()) {
+    udtByLower.set(key.toLowerCase(), def)
+    if (def.name) udtByLower.set(def.name.toLowerCase(), def)
+  }
+
+  let fbByLower: Map<string, LayoutVariable[]> | undefined
+  if (fbLookup instanceof Map) {
+    fbByLower = new Map<string, LayoutVariable[]>()
+    for (const [key, vars] of fbLookup.entries()) {
+      fbByLower.set(key.toLowerCase(), vars)
+    }
+  }
+
+  return {
+    udt: (name) => udtByLower.get(name.toLowerCase())?.members as LayoutVariable[] | undefined,
+    fb: (name) => {
+      if (!fbLookup) return undefined
+      if (typeof fbLookup === 'function') return fbLookup(name)
+      return fbByLower?.get(name.toLowerCase())
+    }
+  }
+}
+
+function annotateNestedStructMembers(
+  members: BlockVariable[] | undefined,
+  structType: S7Type,
+  baseByte: number
+): BlockVariable[] | undefined {
+  if (!members || structType.kind !== 'struct') return members
+  return members.map((member, idx) => {
+    const layoutMember = structType.members[idx]
+    if (!layoutMember) return member
+    const absByte = baseByte + layoutMember.byteOffset
+    return {
+      ...member,
+      calculatedOffset: `${absByte}.${layoutMember.bitOffset}`,
+      members: annotateNestedStructMembers(member.members, layoutMember.type, absByte)
+    }
+  })
+}
 
 /**
- * Siemens S7 Standard Access (Non-Optimized) Offset Calculator
- * Accurately calculates Byte.Bit offsets according to Siemens S7 memory alignment and padding rules:
- * - Consecutive BOOLs pack into bits 0..7 of the current byte
- * - Transition from BOOL to any multi-bit type rounds up to the next byte boundary
- * - Multi-byte types (INT, WORD, REAL, DINT, etc.) align to EVEN byte boundaries (word alignment)
- * - Nested UDTs / Structs start on an even byte boundary, pad their inner members, and finish on an even boundary
+ * Siemens S7 Standard Access (Non-Optimized) Offset Calculator.
+ * Delegates layout computation directly to shared/s7/typeLayout.ts so UI offsets and
+ * byte sizes match the binary runtime layout identically across primitives, STRING[n],
+ * nested Structs, multi-dimensional ARRAYs, UDTs, and FB instances.
  */
 export class S7OffsetCalculator {
+  public static calculateLayout(
+    variables: LayoutVariable[],
+    udtLookup: Map<string, UdtDefinition> = new Map(),
+    fbLookup?: FbVariableLookup
+  ): StructType {
+    return buildLayout(variables, createResolver(udtLookup, fbLookup))
+  }
+
   /**
    * Calculates offsets for an array of block variables (e.g. in a DB or Block Interface)
    */
   public static calculateVariableOffsets(
     variables: BlockVariable[],
-    udtLookup: Map<string, UdtDefinition> = new Map()
+    udtLookup: Map<string, UdtDefinition> = new Map(),
+    fbLookup?: FbVariableLookup
   ): BlockVariable[] {
-    let currentByte = 0
-    let currentBit = 0
-
-    return variables.map((variable) => {
-      const typeUpper = variable.dataType.toUpperCase()
-
-      if (typeUpper === 'BOOL') {
-        const offset = `${currentByte}.${currentBit}`
-        currentBit++
-        if (currentBit >= 8) {
-          currentByte++
-          currentBit = 0
-        }
-        return {
-          ...variable,
-          calculatedOffset: offset
-        }
-      }
-
-      // If we were tracking bits in a byte and hit a non-BOOL type, round up to the next whole byte
-      if (currentBit > 0) {
-        currentByte++
-        currentBit = 0
-      }
-
-      // Check if it's a known UDT
-      const udt = udtLookup.get(variable.dataType)
-      if (udt) {
-        // Structs / UDTs align to an even byte boundary in S7
-        if (currentByte % 2 !== 0) {
-          currentByte++
-        }
-        const offset = `${currentByte}.0`
-        const udtByteSize = this.calculateUdtSize(udt, udtLookup)
-        currentByte += udtByteSize
-        // S7 structs pad to an even byte boundary
-        if (currentByte % 2 !== 0) {
-          currentByte++
-        }
-        return {
-          ...variable,
-          calculatedOffset: offset
-        }
-      }
-
-      // Check primitive specs
-      const spec = S7_PRIMITIVE_SPECS[typeUpper as S7PrimitiveType]
-      if (spec) {
-        // Check alignment
-        if (spec.alignment >= 2 && currentByte % 2 !== 0) {
-          currentByte++
-        }
-        const offset = `${currentByte}.0`
-        currentByte += spec.byteSize
-        return {
-          ...variable,
-          calculatedOffset: offset
-        }
-      }
-
-      // Default fallback (e.g. unknown type treated as 2-byte word)
-      if (currentByte % 2 !== 0) {
-        currentByte++
-      }
-      const offset = `${currentByte}.0`
-      currentByte += 2
+    const layout = buildLayout(variables as LayoutVariable[], createResolver(udtLookup, fbLookup))
+    return variables.map((variable, idx) => {
+      const member = layout.members[idx]
+      if (!member) return variable
       return {
         ...variable,
-        calculatedOffset: offset
+        calculatedOffset: `${member.byteOffset}.${member.bitOffset}`,
+        members: annotateNestedStructMembers(variable.members, member.type, member.byteOffset)
       }
     })
   }
@@ -96,64 +92,10 @@ export class S7OffsetCalculator {
    */
   public static calculateUdtSize(
     udt: UdtDefinition,
-    udtLookup: Map<string, UdtDefinition> = new Map()
+    udtLookup: Map<string, UdtDefinition> = new Map(),
+    fbLookup?: FbVariableLookup
   ): number {
-    let currentByte = 0
-    let currentBit = 0
-
-    for (const member of udt.members) {
-      const typeUpper = member.dataType.toUpperCase()
-
-      if (typeUpper === 'BOOL') {
-        currentBit++
-        if (currentBit >= 8) {
-          currentByte++
-          currentBit = 0
-        }
-        continue
-      }
-
-      if (currentBit > 0) {
-        currentByte++
-        currentBit = 0
-      }
-
-      const nestedUdt = udtLookup.get(member.dataType)
-      if (nestedUdt && nestedUdt.name !== udt.name) {
-        if (currentByte % 2 !== 0) {
-          currentByte++
-        }
-        currentByte += this.calculateUdtSize(nestedUdt, udtLookup)
-        if (currentByte % 2 !== 0) {
-          currentByte++
-        }
-        continue
-      }
-
-      const spec = S7_PRIMITIVE_SPECS[typeUpper as S7PrimitiveType]
-      if (spec) {
-        if (spec.alignment >= 2 && currentByte % 2 !== 0) {
-          currentByte++
-        }
-        currentByte += spec.byteSize
-      } else {
-        if (currentByte % 2 !== 0) {
-          currentByte++
-        }
-        currentByte += 2
-      }
-    }
-
-    if (currentBit > 0) {
-      currentByte++
-      currentBit = 0
-    }
-
-    // Align total struct size to even boundary
-    if (currentByte % 2 !== 0) {
-      currentByte++
-    }
-
-    return currentByte
+    const layout = buildLayout(udt.members as LayoutVariable[], createResolver(udtLookup, fbLookup))
+    return layout.byteSize
   }
 }

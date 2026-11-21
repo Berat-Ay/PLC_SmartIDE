@@ -18,27 +18,27 @@ import { parseS7Time } from '@shared/s7/time'
  * An empty or unresolvable preset falls back to 10 s; the compiler reports invalid literals.
  */
 export function parseTimePresetMs(val: unknown, context?: SclExecutionContext): number {
-  if (typeof val === 'number' && !isNaN(val) && val > 0) {
+  if (typeof val === 'number' && Number.isFinite(val) && val >= 0) {
     return Math.round(val)
   }
-  if (!val) return 10000
+  if (val === undefined || val === null || val === '') return 10000
 
   const s = String(val).replace(/^["']|["']$/g, '').trim()
   if (!s) return 10000
 
   if (/^\d+$/.test(s)) {
     const parsed = parseInt(s, 10)
-    return parsed > 0 ? parsed : 10000
+    return parsed >= 0 ? parsed : 10000
   }
 
   const literal = parseS7Time(s)
-  if (literal !== null) return literal
+  if (literal !== null && literal >= 0) return literal
   if (/^(LTIME|TIME|LT|T)#/i.test(s)) return 10000
 
   if (context) {
     try {
       const evalRes = Number(SclInterpreter.evaluateExpression(s, context))
-      if (!isNaN(evalRes) && evalRes >= 0) return Math.round(evalRes)
+      if (Number.isFinite(evalRes) && evalRes >= 0) return Math.round(evalRes)
     } catch {
       // Falls through to the default preset
     }
@@ -194,11 +194,19 @@ export class LadderEvaluator {
           const ownEdge = c.id ? `N${networkNumber}:${c.id}` : c.address || cleanOp
           const edgeKey = (context.instancePrefix?.() || '') + (c.edgeTag || ownEdge)
           const usesEdgeBit = !!c.edgeTag && !!context.hasSymbol?.(c.edgeTag)
-          const edgeState = this.edgeStates.get(edgeKey) || { prevVal: false }
-          const previous = usesEdgeBit ? !!context.getVar(c.edgeTag as string) : edgeState.prevVal
-          isConducting = c.contactType === 'P_TRIG' ? !previous && isTrue : previous && !isTrue
-          edgeState.prevVal = isTrue
-          this.edgeStates.set(edgeKey, edgeState)
+          if (memory) {
+            const memEdgeKey = `__LAD_EDGE__:${edgeKey}`
+            const memEdge = memory.edgeStates.get(memEdgeKey)
+            const previous = usesEdgeBit ? !!context.getVar(c.edgeTag as string) : memEdge ? memEdge.prevClk : false
+            isConducting = c.contactType === 'P_TRIG' ? !previous && isTrue : previous && !isTrue
+            memory.edgeStates.set(memEdgeKey, { CLK: isTrue, Q: isConducting, prevClk: isTrue })
+          } else {
+            const edgeState = this.edgeStates.get(edgeKey) || { prevVal: false }
+            const previous = usesEdgeBit ? !!context.getVar(c.edgeTag as string) : edgeState.prevVal
+            isConducting = c.contactType === 'P_TRIG' ? !previous && isTrue : previous && !isTrue
+            edgeState.prevVal = isTrue
+            this.edgeStates.set(edgeKey, edgeState)
+          }
           if (usesEdgeBit) context.setVar(c.edgeTag as string, isTrue)
         }
 
@@ -334,9 +342,12 @@ export class LadderEvaluator {
         const c = node as LadderCounterNode
         const instName = normalizeTimerKey(this.instanceKey(c.instanceDb || 'C1', context))
 
-        const pv = Number(this.readOperand(c.pvOperand, context)) || 10
+        const rawPv = this.readOperand(c.pvOperand, context)
+        const parsedPv = rawPv === undefined || rawPv === '' ? NaN : Number(rawPv)
+        const pv = Number.isFinite(parsedPv) ? parsedPv : 10
         const isReset = !!this.readOperand(c.rLdOperand, context)
-        const cuRlo = c.cuOperand ? !!this.readOperand(c.cuOperand, context) : incomingPower
+        const isLoad = c.ldOperand ? !!this.readOperand(c.ldOperand, context) : false
+        const cuRlo = c.cuOperand ? incomingPower && !!this.readOperand(c.cuOperand, context) : incomingPower
         const cdRlo = c.cdOperand
           ? !!this.readOperand(c.cdOperand, context)
           : c.counterType === 'CTD'
@@ -346,7 +357,7 @@ export class LadderEvaluator {
         const mem = memory || this.fallbackMemory
         const s7c =
           c.counterType === 'CTUD'
-            ? mem.updateCtudCounter(instName, cuRlo, cdRlo, isReset, false, pv)
+            ? mem.updateCtudCounter(instName, cuRlo, cdRlo, isReset, isLoad, pv)
             : c.counterType === 'CTD'
               ? mem.updateCtdCounter(instName, cdRlo, isReset, pv)
               : mem.updateCtuCounter(instName, cuRlo, isReset, pv)
@@ -405,10 +416,18 @@ export class LadderEvaluator {
           return false
         }
 
+        const evalFiniteNumber = (expr: string | undefined, fallback: number): number => {
+          if (expr === undefined || expr.trim() === '') return fallback
+          const parsed = Number(SclInterpreter.evaluateExpression(expr, context))
+          return Number.isFinite(parsed) ? parsed : fallback
+        }
+
         if (m.boxType === 'NORM_X') {
-          const min = Number(SclInterpreter.evaluateExpression(m.min || '0', context)) || 0
-          const max = Number(SclInterpreter.evaluateExpression(m.max || m.in2 || '27648', context)) || 27648
-          const val = Number(SclInterpreter.evaluateExpression(m.value || m.in1 || '0', context)) || 0
+          const min = evalFiniteNumber(m.min, 0)
+          const maxExpr = m.max !== undefined && m.max.trim() !== '' ? m.max : m.in2
+          const valExpr = m.value !== undefined && m.value.trim() !== '' ? m.value : m.in1
+          const max = evalFiniteNumber(maxExpr, 27648)
+          const val = evalFiniteNumber(valExpr, 0)
           const norm = max !== min ? (val - min) / (max - min) : 0
           if (m.out) this.writeOperand(m.out, norm, context)
           results[m.id] = {
@@ -416,9 +435,11 @@ export class LadderEvaluator {
             liveValues: { in: val, out: Math.round(norm * 1000) / 1000 }
           }
         } else if (m.boxType === 'SCALE_X') {
-          const min = Number(SclInterpreter.evaluateExpression(m.min || '0', context)) || 0
-          const max = Number(SclInterpreter.evaluateExpression(m.max || m.in2 || '10', context)) || 10
-          const val = Number(SclInterpreter.evaluateExpression(m.value || m.in1 || '0', context)) || 0
+          const min = evalFiniteNumber(m.min, 0)
+          const maxExpr = m.max !== undefined && m.max.trim() !== '' ? m.max : m.in2
+          const valExpr = m.value !== undefined && m.value.trim() !== '' ? m.value : m.in1
+          const max = evalFiniteNumber(maxExpr, 10)
+          const val = evalFiniteNumber(valExpr, 0)
           const scaled = min + val * (max - min)
           if (m.out) this.writeOperand(m.out, scaled, context)
           results[m.id] = {

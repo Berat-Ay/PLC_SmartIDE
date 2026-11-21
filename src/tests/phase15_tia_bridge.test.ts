@@ -179,7 +179,7 @@ async function main(): Promise<void> {
   const roundTripRun = runMotor({ ...smoke, ...back, ladBlocks: [] } as ProjectLoadPayload)
   check('Round-tripped program behaves the same in the simulator', roundTripRun.join() === originalRun.join(), roundTripRun)
 
-  // --- LAD and bundle warnings ----------------------------------------------
+  // --- LAD transpilation and opt-out skip warnings --------------------------
   const lad: LadBlockDefinition = {
     blockType: 'OB',
     blockNumber: 1,
@@ -189,10 +189,13 @@ async function main(): Promise<void> {
     interface: emptyInterface(),
     networks: []
   } as unknown as LadBlockDefinition
-  const withLad = buildTiaBundle({ ...smoke, ladBlocks: [lad] })
-  check('A LAD block is skipped and named', withLad.manifest.skipped.some((s) => s.name === 'OB1_Lad'))
-  check('A LAD block produces a warning', withLad.manifest.warnings.some((w) => w.includes('LAD')))
-  check('No file is written for a LAD block', !withLad.files.some((f) => f.filename.includes('OB1_Lad')))
+  const withLadTranspiled = buildTiaBundle({ ...smoke, ladBlocks: [lad] })
+  check('A LAD block is transpiled to .scl by default', withLadTranspiled.manifest.skipped.length === 0 && !!withLadTranspiled.manifest.transpiledLad?.some((t) => t.name === 'OB1_Lad'))
+  check('A transpiled .scl file is written for the LAD block', withLadTranspiled.files.some((f) => f.filename === 'OB1_Lad.scl'))
+  const withLadSkipped = buildTiaBundle({ ...smoke, ladBlocks: [lad] }, { transpileLadToScl: false })
+  check('When LAD transpilation is disabled, the LAD block is skipped and named', withLadSkipped.manifest.skipped.some((s) => s.name === 'OB1_Lad'))
+  check('When LAD transpilation is disabled, a LAD warning is emitted', withLadSkipped.manifest.warnings.some((w) => w.includes('LAD')))
+  check('When LAD transpilation is disabled, no file is written for the LAD block', !withLadSkipped.files.some((f) => f.filename.includes('OB1_Lad')))
 
   const cycle = buildTiaBundle({
     ...smoke,

@@ -41,7 +41,6 @@ export const TraceOscilloscope: React.FC = () => {
   // Trace channels state
   const [channels, setChannels] = useState<TraceChannel[]>(DEFAULT_CHANNELS)
   const [timebaseMs, setTimebaseMs] = useState<number>(10000) // 10s default
-  const sampleRateMs = 10 // 10ms (1x scan)
   const [triggerMode, setTriggerMode] = useState<TriggerMode>('FREE_RUN')
   const [triggerChannelId, setTriggerChannelId] = useState<string>('ch1')
   const [triggerState, setTriggerState] = useState<TriggerState>('RUNNING')
@@ -53,10 +52,18 @@ export const TraceOscilloscope: React.FC = () => {
 
   // Trace buffer
   const samplesRef = useRef<SamplePoint[]>([])
-  const lastSampleTimeRef = useRef<number>(0)
+  const lastCycleRef = useRef<number>(0)
   const lastTriggerBitValRef = useRef<boolean>(false)
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  // Keep engine informed when trace recording is active so full 100 Hz snapshots retain data
+  useEffect(() => {
+    engine.setTraceRecordingActive(triggerState === 'RUNNING' || triggerState === 'ARMED')
+    return () => {
+      engine.setTraceRecordingActive(false)
+    }
+  }, [engine, triggerState])
 
   // The drawing buffer follows the element's size, or the plot and its labels get stretched and blurred
   useEffect(() => {
@@ -74,54 +81,60 @@ export const TraceOscilloscope: React.FC = () => {
     return () => observer.disconnect()
   }, [])
 
-  // Listen for runtime cyclic ticks and push samples
+  // Drain all newly recorded 100 Hz ring-buffer frames since the last rendered cycle
   useEffect(() => {
     if (!currentSnapshot || triggerState === 'STOPPED') return
 
-    const now = performance.now()
-    if (now - lastSampleTimeRef.current < sampleRateMs) return
-    lastSampleTimeRef.current = now
-
-    // Extract values for all channels from engine/snapshot
-    const vals: Record<string, number | boolean> = {}
-    channels.forEach((ch) => {
-      const val = engine.getVariable(ch.address)
-      if (ch.type === 'BOOL') {
-        vals[ch.id] = !!val
-      } else {
-        vals[ch.id] = typeof val === 'number' ? val : Number(val) || 0
-      }
-    })
-
-    const sample: SamplePoint = {
-      timestamp: Date.now(),
-      cycle: currentSnapshot.cycleNumber,
-      triggeringOb: currentSnapshot.triggeringOb,
-      values: vals
+    if (currentSnapshot.cycleNumber < lastCycleRef.current) {
+      lastCycleRef.current = 0
     }
 
-    // Trigger condition evaluation
-    if (triggerState === 'ARMED') {
-      if (triggerMode === 'RISING_EDGE') {
-        const curBit = !!vals[triggerChannelId]
-        if (!lastTriggerBitValRef.current && curBit) {
-          setTriggerState('TRIGGERED')
+    const newFrames = engine.getHistorySince(lastCycleRef.current)
+    if (newFrames.length === 0) return
+
+    let nextTriggerState: TriggerState | null = null
+    for (const snap of newFrames) {
+      const vals: Record<string, number | boolean> = {}
+      channels.forEach((ch) => {
+        const val = engine.getVariableFromSnapshot(snap, ch.address)
+        if (ch.type === 'BOOL') {
+          vals[ch.id] = !!val
+        } else {
+          vals[ch.id] = typeof val === 'number' ? val : Number(val) || 0
         }
-        lastTriggerBitValRef.current = curBit
-      } else if (triggerMode === 'OB82_FAULT') {
-        if (currentSnapshot.triggeringOb === 82) {
-          setTriggerState('TRIGGERED')
+      })
+
+      samplesRef.current.push({
+        timestamp: snap.timestamp,
+        cycle: snap.cycleNumber,
+        triggeringOb: snap.triggeringOb,
+        values: vals
+      })
+
+      if (triggerState === 'ARMED' && nextTriggerState === null) {
+        if (triggerMode === 'RISING_EDGE') {
+          const curBit = !!vals[triggerChannelId]
+          if (!lastTriggerBitValRef.current && curBit) {
+            nextTriggerState = 'TRIGGERED'
+          }
+          lastTriggerBitValRef.current = curBit
+        } else if (triggerMode === 'OB82_FAULT' && snap.triggeringOb === 82) {
+          nextTriggerState = 'TRIGGERED'
         }
       }
+
+      lastCycleRef.current = snap.cycleNumber
     }
 
-    samplesRef.current.push(sample)
+    if (nextTriggerState) {
+      setTriggerState(nextTriggerState)
+    }
 
     // Limit buffer to 4,000 samples (~40s at 10ms)
     if (samplesRef.current.length > 4000) {
-      samplesRef.current.shift()
+      samplesRef.current.splice(0, samplesRef.current.length - 4000)
     }
-  }, [currentSnapshot, triggerState, channels, sampleRateMs, triggerMode, triggerChannelId, engine])
+  }, [currentSnapshot, triggerState, channels, triggerMode, triggerChannelId, engine])
 
   // Continuous 60 FPS Canvas Drawing Loop
   useEffect(() => {

@@ -20,9 +20,19 @@ import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useProjectStore } from '../../stores/useProjectStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
+import { PromptModal } from '../common/PromptModal'
+
+type RenameTarget =
+  | { kind: 'lad'; fileName: string; currentName: string; title: string }
+  | { kind: 'scl'; fileName: string; currentName: string; title: string }
+  | { kind: 'db'; fileName: string; currentName: string; title: string }
+  | { kind: 'tagTable'; id: string; currentName: string; title: string }
+  | { kind: 'udt'; id: string; currentName: string; title: string }
 
 export const ProjectTree: React.FC = () => {
-  const { openTab, closeTab, setAddBlockModalOpen } = useUIStore()
+  const { openTab, closeTab, updateTabTitle, setAddBlockModalOpen } = useUIStore()
+  const { markDirty } = useProjectStore()
+  const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
   const { tagTables, createTagTable, renameTagTable, deleteTagTable } = useTagStore()
   const {
     udts,
@@ -230,8 +240,7 @@ export const ProjectTree: React.FC = () => {
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            const n = prompt('Rename Block:', b.name)
-                            if (n && n.trim() && n.trim() !== b.name) updateLadBlock(b.fileName, { name: n.trim() })
+                            setRenameTarget({ kind: 'lad', fileName: b.fileName, currentName: b.name, title: 'Rename Block' })
                           }}
                           title="Rename Block"
                           className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -279,8 +288,7 @@ export const ProjectTree: React.FC = () => {
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            const n = prompt('Rename Block:', b.name)
-                            if (n && n.trim() && n.trim() !== b.name) updateSclBlock(b.fileName, { name: n.trim() })
+                            setRenameTarget({ kind: 'scl', fileName: b.fileName, currentName: b.name, title: 'Rename Block' })
                           }}
                           title="Rename Block"
                           className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -328,8 +336,7 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          const n = prompt('Rename FB:', b.name)
-                          if (n && n.trim() && n.trim() !== b.name) updateLadBlock(b.fileName, { name: n.trim() })
+                          setRenameTarget({ kind: 'lad', fileName: b.fileName, currentName: b.name, title: 'Rename FB' })
                         }}
                         title="Rename FB"
                         className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -372,8 +379,7 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          const n = prompt('Rename FB:', b.name)
-                          if (n && n.trim() && n.trim() !== b.name) updateSclBlock(b.fileName, { name: n.trim() })
+                          setRenameTarget({ kind: 'scl', fileName: b.fileName, currentName: b.name, title: 'Rename FB' })
                         }}
                         title="Rename FB"
                         className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -418,8 +424,7 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          const n = prompt('Rename FC:', b.name)
-                          if (n && n.trim() && n.trim() !== b.name) updateLadBlock(b.fileName, { name: n.trim() })
+                          setRenameTarget({ kind: 'lad', fileName: b.fileName, currentName: b.name, title: 'Rename FC' })
                         }}
                         title="Rename FC"
                         className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -462,8 +467,7 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          const n = prompt('Rename FC:', b.name)
-                          if (n && n.trim() && n.trim() !== b.name) updateSclBlock(b.fileName, { name: n.trim() })
+                          setRenameTarget({ kind: 'scl', fileName: b.fileName, currentName: b.name, title: 'Rename FC' })
                         }}
                         title="Rename FC"
                         className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -509,8 +513,7 @@ export const ProjectTree: React.FC = () => {
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
-                        const n = prompt('Rename DB:', b.name)
-                        if (n && n.trim() && n.trim() !== b.name) updateDataBlock(b.fileName, { name: n.trim() })
+                        setRenameTarget({ kind: 'db', fileName: b.fileName, currentName: b.name, title: 'Rename DB' })
                       }}
                       title="Rename DB"
                       className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -585,8 +588,7 @@ export const ProjectTree: React.FC = () => {
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
-                        const n = prompt('Rename Tag Table:', tbl.name)
-                        if (n && n.trim() && n.trim() !== tbl.name) renameTagTable(tbl.id, n.trim())
+                        setRenameTarget({ kind: 'tagTable', id: tbl.id, currentName: tbl.name, title: 'Rename Tag Table' })
                       }}
                       title="Rename Tag Table"
                       className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -659,8 +661,7 @@ export const ProjectTree: React.FC = () => {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          const n = prompt('Rename UDT:', udt.name)
-                          if (n && n.trim() && n.trim() !== udt.name) updateUdt(udt.id, { name: n.trim() })
+                          setRenameTarget({ kind: 'udt', id: udt.id, currentName: udt.name, title: 'Rename UDT' })
                         }}
                         title="Rename UDT"
                         className="p-0.5 text-industrial-400 hover:text-cyan-400 rounded-none"
@@ -756,6 +757,47 @@ export const ProjectTree: React.FC = () => {
           )}
         </div>
       </div>
+
+      <PromptModal
+        isOpen={renameTarget !== null}
+        title={renameTarget?.title || 'Rename'}
+        label="New Name"
+        initialValue={renameTarget?.currentName || ''}
+        confirmLabel="Rename"
+        validate={(val) => {
+          const trimmed = val.trim()
+          if (!trimmed) return 'Name cannot be empty.'
+          if (trimmed === '.' || trimmed === '..' || /[\\/"\r\n]/.test(trimmed)) {
+            return 'Name contains invalid characters.'
+          }
+          return null
+        }}
+        onCancel={() => setRenameTarget(null)}
+        onConfirm={(val) => {
+          if (!renameTarget) return
+          const trimmed = val.trim()
+          if (trimmed !== renameTarget.currentName) {
+            if (renameTarget.kind === 'lad') {
+              updateLadBlock(renameTarget.fileName, { name: trimmed })
+              updateTabTitle('lad', renameTarget.fileName, trimmed)
+            } else if (renameTarget.kind === 'scl') {
+              updateSclBlock(renameTarget.fileName, { name: trimmed })
+              updateTabTitle('scl', renameTarget.fileName, trimmed)
+            } else if (renameTarget.kind === 'db') {
+              updateDataBlock(renameTarget.fileName, { name: trimmed })
+              updateTabTitle('db', renameTarget.fileName, trimmed)
+            } else if (renameTarget.kind === 'tagTable') {
+              renameTagTable(renameTarget.id, trimmed)
+              updateTabTitle('tagTable', renameTarget.id, trimmed)
+            } else if (renameTarget.kind === 'udt') {
+              updateUdt(renameTarget.id, { name: trimmed })
+              updateTabTitle('udt', renameTarget.id, trimmed)
+            }
+            markDirty(true)
+          }
+          setRenameTarget(null)
+        }}
+      />
     </div>
   )
 }

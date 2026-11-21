@@ -5,6 +5,8 @@ import {
 } from 'lucide-react'
 import { useCrossRefStore } from '../../stores/useCrossRefStore'
 import { useUIStore } from '../../stores/useUIStore'
+import { useBlockStore } from '../../stores/useBlockStore'
+import { resolveDbCrossReferenceTab } from '../../utils/crossRefNavigation'
 import { CrossReferenceItem } from '@shared/types/crossref'
 
 export const CrossReferenceTab: React.FC = () => {
@@ -32,14 +34,11 @@ export const CrossReferenceTab: React.FC = () => {
           })
         }
         break
-      case 'DB':
-        openTab({
-          id: `tab_db_${ref.sourceObjectId}.db.json`,
-          title: ref.sourceObject,
-          type: 'db',
-          targetId: `${ref.sourceObject}.db.json`
-        })
+      case 'DB': {
+        const { dataBlocks } = useBlockStore.getState()
+        openTab(resolveDbCrossReferenceTab(ref, dataBlocks))
         break
+      }
       case 'TagTable':
         openTab({
           id: `tab_tags_${ref.sourceObjectId}`,

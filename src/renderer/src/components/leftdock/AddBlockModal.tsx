@@ -1,13 +1,16 @@
-import React, { useState } from 'react'
-import { X, Box, Code, Cpu, FileCode2, Database } from 'lucide-react'
+import React, { useEffect, useState } from 'react'
+import { X, Box, Code, Cpu, FileCode2, Database, AlertCircle } from 'lucide-react'
 import { useUIStore } from '../../stores/useUIStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useProjectStore } from '../../stores/useProjectStore'
 import { BlockType, BlockLanguage, DbType } from '@shared/types/blocks'
+import { effectiveInterface } from '@shared/scl/sourceBlock'
+import { createDataBlockDefinition, createInitialLadNetworks } from '@shared/blocks/blockFactory'
+import { S7OffsetCalculator } from '../../services/S7OffsetCalculator'
 
 export const AddBlockModal: React.FC = () => {
   const { isAddBlockModalOpen, setAddBlockModalOpen, openTab } = useUIStore()
-  const { addDataBlock, addLadBlock, addSclBlock } = useBlockStore()
+  const { ladBlocks, sclBlocks, udts, addDataBlock, addLadBlock, addSclBlock } = useBlockStore()
   const { markDirty } = useProjectStore()
 
   const [blockType, setBlockType] = useState<BlockType>('FB')
@@ -16,8 +19,46 @@ export const AddBlockModal: React.FC = () => {
   const [name, setName] = useState<string>('FB2_ValveControl')
   const [optimizedAccess, setOptimizedAccess] = useState<boolean>(true)
   const [dbType, setDbType] = useState<DbType>('Global')
+  const [parentFbName, setParentFbName] = useState<string>('')
+
+  const availableFbs = [
+    ...ladBlocks
+      .filter((b) => b.blockType === 'FB')
+      .map((b) => ({
+        name: b.name,
+        blockNumber: b.blockNumber,
+        language: 'LAD' as const,
+        interface: b.interface
+      })),
+    ...sclBlocks
+      .filter((b) => b.blockType === 'FB')
+      .map((b) => ({
+        name: b.name,
+        blockNumber: b.blockNumber,
+        language: 'SCL' as const,
+        interface: effectiveInterface(b)
+      }))
+  ]
+
+  useEffect(() => {
+    if (!isAddBlockModalOpen || blockType !== 'DB' || dbType !== 'Instance') return
+    if (availableFbs.length === 0) {
+      if (parentFbName !== '') setParentFbName('')
+      return
+    }
+    if (!availableFbs.some((fb) => fb.name === parentFbName)) {
+      setParentFbName(availableFbs[0].name)
+    }
+  }, [isAddBlockModalOpen, blockType, dbType, ladBlocks, sclBlocks])
 
   if (!isAddBlockModalOpen) return null
+
+  const selectedFb =
+    blockType === 'DB' && dbType === 'Instance'
+      ? availableFbs.find((fb) => fb.name === parentFbName)
+      : undefined
+  const isInstanceDbInvalid = blockType === 'DB' && dbType === 'Instance' && !selectedFb
+  const canSubmit = name.trim().length > 0 && !isInstanceDbInvalid
 
   const handleTypeChange = (type: BlockType) => {
     setBlockType(type)
@@ -30,31 +71,35 @@ export const AddBlockModal: React.FC = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    if (!canSubmit) return
+
+    const cleanName = name.trim()
 
     if (blockType === 'DB') {
-      const fileName = `${name}.db.json`
-      addDataBlock({
-        blockType: 'DB',
+      const dbDef = createDataBlockDefinition({
         blockNumber,
-        name,
-        fileName,
+        name: cleanName,
         dbType,
         optimizedAccess,
-        variables: [],
-        comment: `User created ${dbType} Data Block`
+        parentFb: selectedFb
       })
+      if (!optimizedAccess && dbDef.variables.length > 0) {
+        const udtMap = new Map(udts.map((u) => [u.name, u]))
+        dbDef.variables = S7OffsetCalculator.calculateVariableOffsets(dbDef.variables, udtMap)
+      }
+      addDataBlock(dbDef)
       openTab({
-        id: `tab_db_${fileName}`,
-        title: name,
+        id: `tab_db_${dbDef.fileName}`,
+        title: cleanName,
         type: 'db',
-        targetId: fileName
+        targetId: dbDef.fileName
       })
     } else if (language === 'LAD') {
-      const fileName = `${name}.lad.json`
+      const fileName = `${cleanName}.lad.json`
       addLadBlock({
         blockType,
         blockNumber,
-        name,
+        name: cleanName,
         fileName,
         optimizedAccess,
         interface: {
@@ -65,29 +110,31 @@ export const AddBlockModal: React.FC = () => {
           temp: [],
           constant: []
         },
-        networks: [
-          {
-            networkNumber: 1,
-            title: 'Initial Rung',
-            elements: []
-          }
-        ],
+        networks: createInitialLadNetworks(),
         schemaVersion: '1.0.0'
       })
       openTab({
         id: `tab_lad_${fileName}`,
-        title: name,
+        title: cleanName,
         type: 'lad',
         targetId: fileName
       })
     } else {
-      const fileName = `${name}.scl`
+      const fileName = `${cleanName}.scl`
+      const headerDecl =
+        blockType === 'OB'
+          ? `ORGANIZATION_BLOCK "${cleanName}"`
+          : blockType === 'FB'
+          ? `FUNCTION_BLOCK "${cleanName}"`
+          : `FUNCTION "${cleanName}" : Void`
+      const endDecl =
+        blockType === 'OB' ? 'END_ORGANIZATION_BLOCK' : blockType === 'FB' ? 'END_FUNCTION_BLOCK' : 'END_FUNCTION'
       const initialCode = `// ============================================================
-// Block: ${name} (${blockType}${blockNumber})
+// Block: ${cleanName} (${blockType}${blockNumber})
 // ============================================================
 
-${blockType === 'OB' ? 'ORGANIZATION_BLOCK' : blockType === 'FB' ? 'FUNCTION_BLOCK' : 'FUNCTION'} "${name}"
-TITLE = "${name}"
+${headerDecl}
+TITLE = "${cleanName}"
 { S7_Optimized_Access := '${optimizedAccess ? 'TRUE' : 'FALSE'}' }
 VERSION : 0.1
 
@@ -99,12 +146,12 @@ END_VAR
 
 BEGIN
   // SCL Logic execution
-END_${blockType === 'OB' ? 'ORGANIZATION_BLOCK' : blockType === 'FB' ? 'FUNCTION_BLOCK' : 'FUNCTION'}
+${endDecl}
 `
       addSclBlock({
         blockType,
         blockNumber,
-        name,
+        name: cleanName,
         fileName,
         optimizedAccess,
         interface: {
@@ -119,7 +166,7 @@ END_${blockType === 'OB' ? 'ORGANIZATION_BLOCK' : blockType === 'FB' ? 'FUNCTION
       })
       openTab({
         id: `tab_scl_${fileName}`,
-        title: name,
+        title: cleanName,
         type: 'scl',
         targetId: fileName
       })
@@ -216,34 +263,83 @@ END_${blockType === 'OB' ? 'ORGANIZATION_BLOCK' : blockType === 'FB' ? 'FUNCTION
 
           {/* DB Type Selection */}
           {blockType === 'DB' && (
-            <div>
-              <label className="block text-xs font-medium text-industrial-300 mb-1.5">Data Block Type</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDbType('Global')}
-                  className={`flex items-center justify-center gap-2 py-2 px-3 rounded border text-xs transition-all ${
-                    dbType === 'Global'
-                      ? 'border-amber-500 bg-amber-950/40 text-amber-300 font-semibold'
-                      : 'border-industrial-750 bg-industrial-850 text-industrial-400 hover:text-industrial-200'
-                  }`}
-                >
-                  <Database className="w-3.5 h-3.5" />
-                  <span>Global DB</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDbType('Instance')}
-                  className={`flex items-center justify-center gap-2 py-2 px-3 rounded border text-xs transition-all ${
-                    dbType === 'Instance'
-                      ? 'border-amber-500 bg-amber-950/40 text-amber-300 font-semibold'
-                      : 'border-industrial-750 bg-industrial-850 text-industrial-400 hover:text-industrial-200'
-                  }`}
-                >
-                  <Box className="w-3.5 h-3.5" />
-                  <span>Instance DB (FB Link)</span>
-                </button>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-industrial-300 mb-1.5">Data Block Type</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDbType('Global')}
+                    className={`flex items-center justify-center gap-2 py-2 px-3 rounded border text-xs transition-all ${
+                      dbType === 'Global'
+                        ? 'border-amber-500 bg-amber-950/40 text-amber-300 font-semibold'
+                        : 'border-industrial-750 bg-industrial-850 text-industrial-400 hover:text-industrial-200'
+                    }`}
+                  >
+                    <Database className="w-3.5 h-3.5" />
+                    <span>Global DB</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDbType('Instance')}
+                    className={`flex items-center justify-center gap-2 py-2 px-3 rounded border text-xs transition-all ${
+                      dbType === 'Instance'
+                        ? 'border-amber-500 bg-amber-950/40 text-amber-300 font-semibold'
+                        : 'border-industrial-750 bg-industrial-850 text-industrial-400 hover:text-industrial-200'
+                    }`}
+                  >
+                    <Box className="w-3.5 h-3.5" />
+                    <span>Instance DB (FB Link)</span>
+                  </button>
+                </div>
               </div>
+
+              {dbType === 'Instance' && (
+                <div>
+                  <label className="block text-xs font-medium text-industrial-300 mb-1.5">
+                    Parent Function Block (FB)
+                  </label>
+                  {availableFbs.length > 0 ? (
+                    <>
+                      <select
+                        data-testid="add-block-parent-fb-select"
+                        value={parentFbName}
+                        onChange={(e) => setParentFbName(e.target.value)}
+                        required
+                        className="w-full bg-industrial-950 border border-industrial-700 rounded px-2.5 py-1.5 text-xs text-industrial-100 font-mono focus:border-amber-500 focus:outline-hidden"
+                      >
+                        {availableFbs.map((fb) => (
+                          <option key={`${fb.language}_${fb.name}_${fb.blockNumber}`} value={fb.name}>
+                            {fb.name} (FB{fb.blockNumber} - {fb.language})
+                          </option>
+                        ))}
+                      </select>
+                      {selectedFb && (
+                        <div className="mt-1 text-[11px] text-industrial-400">
+                          Initializes{' '}
+                          <span className="text-amber-300 font-mono">
+                            {selectedFb.interface.input.length +
+                              selectedFb.interface.output.length +
+                              selectedFb.interface.inOut.length +
+                              selectedFb.interface.static.length}
+                          </span>{' '}
+                          instance variable(s) from <span className="font-mono text-industrial-200">{selectedFb.name}</span>.
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div
+                      data-testid="add-block-no-fb-warning"
+                      className="p-2.5 rounded bg-amber-950/40 border border-amber-700/70 text-amber-200 text-[11px] flex items-start gap-2"
+                    >
+                      <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <span>
+                        No Function Blocks (FB) exist in this project yet. Create an FB first before creating an Instance DB.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -304,7 +400,8 @@ END_${blockType === 'OB' ? 'ORGANIZATION_BLOCK' : blockType === 'FB' ? 'FUNCTION
             </button>
             <button
               type="submit"
-              className="px-4 py-1.5 text-xs font-semibold text-white bg-siemens-cyan hover:bg-cyan-600 rounded shadow-sm transition-colors"
+              disabled={!canSubmit}
+              className="px-4 py-1.5 text-xs font-semibold text-white bg-siemens-cyan hover:bg-cyan-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-sm transition-colors"
             >
               Create Block
             </button>

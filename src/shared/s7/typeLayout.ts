@@ -120,10 +120,15 @@ export function builtinInstanceKind(name: string): BuiltinInstanceKind | undefin
 }
 
 /** Parses a type name such as Int, "UDT_Pump", String[20] or Array[0..9, 1..2] of Real. */
-export function parseTypeName(rawName: string, resolver: TypeResolver = {}, members?: LayoutVariable[]): S7Type {
+export function parseTypeName(
+  rawName: string,
+  resolver: TypeResolver = {},
+  members?: LayoutVariable[],
+  seen: Set<string> = new Set()
+): S7Type {
   const name = rawName.trim()
 
-  if (/^struct$/i.test(name)) return buildLayout(members || [], resolver)
+  if (/^struct$/i.test(name)) return buildLayout(members || [], resolver, seen)
 
   const arrayMatch = name.match(/^array\s*\[(.+?)\]\s*of\s+(.+)$/i)
   if (arrayMatch) {
@@ -135,7 +140,7 @@ export function parseTypeName(rawName: string, resolver: TypeResolver = {}, memb
       resolver.onUnknownType?.(name)
       return { kind: 'elementary', name: 'WORD', byteSize: 2 }
     }
-    let type = parseTypeName(arrayMatch[2], resolver, members)
+    let type = parseTypeName(arrayMatch[2], resolver, members, seen)
     for (let i = dims.length - 1; i >= 0; i--) {
       type = makeArray(dims[i]!.low, dims[i]!.high, type)
     }
@@ -158,12 +163,20 @@ export function parseTypeName(rawName: string, resolver: TypeResolver = {}, memb
     return { kind: 'instance', builtin: BUILTIN_INSTANCES[upper], byteSize: 0 }
   }
 
+  if (seen.has(upper)) {
+    resolver.onUnknownType?.(name)
+    return { kind: 'elementary', name: 'WORD', byteSize: 2 }
+  }
+
+  const nextSeen = new Set(seen)
+  nextSeen.add(upper)
+
   const udtMembers = resolver.udt?.(unquoted)
-  if (udtMembers) return buildLayout(udtMembers, resolver)
+  if (udtMembers) return buildLayout(udtMembers, resolver, nextSeen)
 
   const fbInterface = resolver.fb?.(unquoted)
   if (fbInterface) {
-    const layout = buildLayout(fbInterface, resolver)
+    const layout = buildLayout(fbInterface, resolver, nextSeen)
     return { kind: 'fbInstance', fbName: unquoted, layout, byteSize: layout.byteSize }
   }
 
@@ -185,14 +198,18 @@ function alignEven(n: number): number {
 }
 
 /** Computes member offsets using S7 standard access rules. */
-export function buildLayout(variables: LayoutVariable[], resolver: TypeResolver = {}): StructType {
+export function buildLayout(
+  variables: LayoutVariable[],
+  resolver: TypeResolver = {},
+  seen: Set<string> = new Set()
+): StructType {
   const members: LayoutMember[] = []
   const byName = new Map<string, LayoutMember>()
   let byte = 0
   let bit = 0
 
   for (const variable of variables) {
-    const type = parseTypeName(variable.dataType, resolver, variable.members)
+    const type = parseTypeName(variable.dataType, resolver, variable.members, seen)
     let member: LayoutMember
 
     if (type.kind === 'elementary' && type.byteSize === 0) {

@@ -25,6 +25,19 @@ import { DoubleCoilConflict } from '../../../services/DoubleCoilDetector'
 import { LadderGridLayoutEngine, LADDER_MIN_WIDTH } from '../../../services/layout/LadderGridLayoutEngine'
 import { TagAutocompleteCombobox } from './TagAutocompleteCombobox'
 import { InstructionRibbon } from './InstructionRibbon'
+import { isEditableElement } from '../../../utils/keyboardShortcuts'
+import {
+  ARITHMETIC_MATH_OPTIONS,
+  ArithmeticMathBoxType,
+  COMPARATOR_OPERATOR_OPTIONS,
+  ComparatorOperatorType,
+  ComparatorPinKey,
+  MathPinKey,
+  updateComparatorOperator,
+  updateComparatorPin,
+  updateMathBoxType,
+  updateMathPin
+} from '../../../utils/ladderBoxEdits'
 import {
   ArrowUp,
   ArrowDown,
@@ -130,11 +143,34 @@ function createInstructionNode(
   }
 }
 
+function getInstructionBoxDimensions(n: LadderNode): { width: number; height: number } {
+  if (n.kind === 'counter' && (n as LadderCounterNode).counterType === 'CTUD') {
+    return { width: 165, height: 90 }
+  }
+  if (n.kind === 'comparator') {
+    return { width: 176, height: 76 }
+  }
+  if (n.kind === 'math') {
+    const boxType = (n as LadderMathNode).boxType
+    if (boxType === 'NORM_X' || boxType === 'SCALE_X') {
+      return { width: 190, height: 96 }
+    }
+    if (boxType === 'ADD' || boxType === 'SUB' || boxType === 'MUL' || boxType === 'DIV') {
+      return { width: 186, height: 84 }
+    }
+    return { width: 176, height: 74 }
+  }
+  return { width: 150, height: 74 }
+}
+
 function getNodeWidth(n: LadderNode): number {
   if (n.kind === 'contact') return 175
   if (n.kind === 'coil') return 175
   if (n.kind === 'emptyBox') return 130
-  if (['timer', 'counter', 'comparator', 'math'].includes(n.kind)) return 150
+  if (['timer', 'counter', 'comparator', 'math'].includes(n.kind)) {
+    const dims = getInstructionBoxDimensions(n)
+    return n.kind === 'comparator' || n.kind === 'math' ? dims.width + 30 : 150
+  }
   if (n.kind === 'parallel') {
     const p = n as LadderParallelBranchNode
     let maxBWidth = 160
@@ -197,6 +233,24 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
     pos: { x: number; y: number }
   } | null>(null)
   const [timerPropInputValue, setTimerPropInputValue] = useState('')
+
+  // Direct In-Place Comparator / Math pin & operator editing state
+  const [editingBoxPin, setEditingBoxPin] = useState<{
+    netIdx: number
+    nodeId: string
+    kind: 'comparator' | 'math'
+    pin: ComparatorPinKey | MathPinKey
+    label: string
+    currentValue: string
+    pos: { x: number; y: number }
+  } | null>(null)
+  const [editingBoxOp, setEditingBoxOp] = useState<{
+    netIdx: number
+    nodeId: string
+    kind: 'comparator' | 'math'
+    currentOp: string
+    pos: { x: number; y: number }
+  } | null>(null)
 
   // Drag and drop state
   const [isDraggingInstruction, setIsDraggingInstruction] = useState(false)
@@ -308,7 +362,16 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
   // Keyboard shortcut listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (editingNode || editingAddressNode) return
+      if (
+        isEditableElement(e.target) ||
+        editingNode ||
+        editingAddressNode ||
+        editingTimerProp ||
+        editingBoxPin ||
+        editingBoxOp
+      ) {
+        return
+      }
 
       // Shift+Delete: Delete selected network
       if (e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) {
@@ -335,13 +398,16 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
       } else if (e.shiftKey && e.key === 'F3') {
         e.preventDefault()
         insertContact('NC_CONTACT')
-      } else if (e.key === 'F7') {
+      } else if (e.shiftKey && e.key === 'F7') {
         e.preventDefault()
         insertCoil('OUTPUT_COIL')
-      } else if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) {
+      } else if (
+        (e.shiftKey && e.key === 'F8') ||
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'b' || e.key === 'B'))
+      ) {
         e.preventDefault()
         insertParallelBranch()
-      } else if (e.ctrlKey && (e.key === 'r' || e.key === 'R')) {
+      } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
         e.preventDefault()
         addNewNetwork()
       }
@@ -349,7 +415,17 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedNodeId, selectedBranchTarget, editingNode, editingAddressNode, block, selectedNetworkNumber])
+  }, [
+    selectedNodeId,
+    selectedBranchTarget,
+    editingNode,
+    editingAddressNode,
+    editingTimerProp,
+    editingBoxPin,
+    editingBoxOp,
+    block,
+    selectedNetworkNumber
+  ])
 
   // Insertion handlers (Default operand is '???')
   const insertContact = (type: ContactType) => {
@@ -991,6 +1067,48 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
     }))
 
     onUpdateBlock({ ...block, networks: updatedNetworks })
+  }
+
+  const handleBoxPinSelect = (newValue: string) => {
+    if (!editingBoxPin) return
+    const updated =
+      editingBoxPin.kind === 'comparator'
+        ? updateComparatorPin(
+            block,
+            editingBoxPin.netIdx,
+            editingBoxPin.nodeId,
+            editingBoxPin.pin as ComparatorPinKey,
+            newValue
+          )
+        : updateMathPin(
+            block,
+            editingBoxPin.netIdx,
+            editingBoxPin.nodeId,
+            editingBoxPin.pin as MathPinKey,
+            newValue
+          )
+    onUpdateBlock(updated)
+    setEditingBoxPin(null)
+  }
+
+  const handleBoxOpSelect = (newOp: string) => {
+    if (!editingBoxOp) return
+    const updated =
+      editingBoxOp.kind === 'comparator'
+        ? updateComparatorOperator(
+            block,
+            editingBoxOp.netIdx,
+            editingBoxOp.nodeId,
+            newOp as ComparatorOperatorType
+          )
+        : updateMathBoxType(
+            block,
+            editingBoxOp.netIdx,
+            editingBoxOp.nodeId,
+            newOp as ArithmeticMathBoxType
+          )
+    onUpdateBlock(updated)
+    setEditingBoxOp(null)
   }
 
   // Direct In-Place Bit Address Submission
@@ -1855,7 +1973,43 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
                         },
                         updateContactType,
                         wrapNodeInBranch,
-                        updateCoilType
+                        updateCoilType,
+                        (netIndex, nodeId, kind, pin, label, currentValue, e) => {
+                          const rect = (e.currentTarget as Element).getBoundingClientRect()
+                          setEditingNode(null)
+                          setEditingAddressNode(null)
+                          setEditingTimerProp(null)
+                          setEditingBoxOp(null)
+                          setEditingBoxPin({
+                            netIdx: netIndex,
+                            nodeId,
+                            kind,
+                            pin,
+                            label,
+                            currentValue,
+                            pos: {
+                              x: Math.max(8, Math.min(rect.left, window.innerWidth - 300)),
+                              y: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 280))
+                            }
+                          })
+                        },
+                        (netIndex, nodeId, kind, currentOp, e) => {
+                          const rect = (e.currentTarget as Element).getBoundingClientRect()
+                          setEditingNode(null)
+                          setEditingAddressNode(null)
+                          setEditingTimerProp(null)
+                          setEditingBoxPin(null)
+                          setEditingBoxOp({
+                            netIdx: netIndex,
+                            nodeId,
+                            kind,
+                            currentOp,
+                            pos: {
+                              x: Math.max(8, Math.min(rect.left, window.innerWidth - 200)),
+                              y: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 120))
+                            }
+                          })
+                        }
                       )
                     )}
 
@@ -2011,6 +2165,71 @@ export const SvgLadderCanvas: React.FC<SvgLadderCanvasProps> = ({
           </div>
         </div>
       )}
+
+      {/* Direct In-Place Comparator / Math Pin Combobox Popover (Supports Tags, DB Members & Numeric Literals) */}
+      {editingBoxPin && (
+        <TagAutocompleteCombobox
+          currentValue={editingBoxPin.currentValue}
+          blockInterface={block.interface}
+          position={editingBoxPin.pos}
+          allowLiterals={true}
+          title={`Edit ${editingBoxPin.label} Pin`}
+          placeholder="Tag, C1.CV, DB member, or literal (10, 8.0)..."
+          onSelect={handleBoxPinSelect}
+          onClose={() => setEditingBoxPin(null)}
+        />
+      )}
+
+      {/* Direct In-Place Comparator / Math Operator Dropdown Popover */}
+      {editingBoxOp && (
+        <div
+          data-testid="box-operator-popover"
+          style={{
+            position: 'fixed',
+            left: editingBoxOp.pos.x,
+            top: editingBoxOp.pos.y,
+            zIndex: 60
+          }}
+          className="bg-[#111317] border border-[#00a3a6] p-1.5 shadow-2xl flex flex-col gap-1 min-w-[165px] rounded-none select-none"
+        >
+          <div className="flex items-center justify-between gap-2 text-[10px] font-mono font-bold text-cyan-400 uppercase tracking-wider">
+            <span>{editingBoxOp.kind === 'comparator' ? 'Comparator Operator' : 'Math Operation'}</span>
+            <button
+              type="button"
+              onClick={() => setEditingBoxOp(null)}
+              className="text-industrial-400 hover:text-white px-1"
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
+          <select
+            data-testid="box-operator-select"
+            autoFocus
+            value={editingBoxOp.currentOp}
+            onChange={(e) => handleBoxOpSelect(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                setEditingBoxOp(null)
+              }
+            }}
+            onBlur={() => setEditingBoxOp(null)}
+            className="h-6 px-1.5 py-0.5 bg-[#09090b] text-[#38bdf8] border border-[#38bdf8] font-mono text-xs rounded-none outline-none focus:ring-1 focus:ring-[#38bdf8]"
+          >
+            {editingBoxOp.kind === 'comparator'
+              ? COMPARATOR_OPERATOR_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))
+              : ARITHMETIC_MATH_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+          </select>
+        </div>
+      )}
     </div>
   )
 }
@@ -2056,7 +2275,23 @@ function renderNodes(
   onOpenTimerProp?: (netIdx: number, nodeId: string, propType: 'instance' | 'preset', currentVal: string, e: React.MouseEvent) => void,
   onUpdateContactType?: (nodeId: string, newType: ContactType) => void,
   onWrapNodeInBranch?: (nodeId: string) => void,
-  onUpdateCoilType?: (nodeId: string, newType: CoilType) => void
+  onUpdateCoilType?: (nodeId: string, newType: CoilType) => void,
+  onOpenBoxPinEdit?: (
+    netIdx: number,
+    nodeId: string,
+    kind: 'comparator' | 'math',
+    pin: ComparatorPinKey | MathPinKey,
+    label: string,
+    currentValue: string,
+    e: React.MouseEvent
+  ) => void,
+  onOpenBoxOpEdit?: (
+    netIdx: number,
+    nodeId: string,
+    kind: 'comparator' | 'math',
+    currentOp: string,
+    e: React.MouseEvent
+  ) => void
 ): React.ReactNode {
   let curX = startX
   let currentRlo = branchContext?.incomingRlo !== undefined ? branchContext.incomingRlo : true
@@ -2856,7 +3091,9 @@ function renderNodes(
                     onOpenTimerProp,
                     onUpdateContactType,
                     onWrapNodeInBranch,
-                    onUpdateCoilType
+                    onUpdateCoilType,
+                    onOpenBoxPinEdit,
+                    onOpenBoxOpEdit
                   )
                 )}
 
@@ -3052,10 +3289,14 @@ function renderNodes(
         renderDropTargetSquare(curX - 10, y, afterBoxTarget, `drop_after_box_${idx}_${b.id}`)
       )
     } else if (node.kind === 'timer' || node.kind === 'counter' || node.kind === 'comparator' || node.kind === 'math') {
-      const isCtud = node.kind === 'counter' && (node as LadderCounterNode).counterType === 'CTUD'
-      const isCmp = node.kind === 'comparator'
-      const boxWidth = isCtud ? 165 : isCmp ? 145 : 150
-      const boxHeight = isCtud ? 90 : isCmp ? 64 : 74
+      const { width: boxWidth, height: boxHeight } = getInstructionBoxDimensions(node)
+      const isArithMath =
+        node.kind === 'math' &&
+        ['ADD', 'SUB', 'MUL', 'DIV'].includes((node as LadderMathNode).boxType)
+      const truncPin = (val: string | undefined, max = 10) => {
+        const s = (val ?? '').trim() || '??'
+        return s.length > max ? `${s.slice(0, max - 1)}…` : s
+      }
       const boxX = curX + 15
       const boxY = y - boxHeight / 2
       const title =
@@ -3151,24 +3392,59 @@ function renderNodes(
           })()}
 
           {/* Box Header */}
-          <rect
-            x={boxX}
-            y={boxY}
-            width={boxWidth}
-            height="18"
-            fill="#1f2937"
-          />
-          <text
-            x={boxX + boxWidth / 2}
-            y={boxY + 13}
-            fill="#38bdf8"
-            fontSize="10"
-            fontWeight="bold"
-            textAnchor="middle"
-            fontFamily="monospace"
-          >
-            {title}
-          </text>
+          {isArithMath ? (
+            <g
+              data-testid={`math-op-${node.id}`}
+              className="cursor-pointer group/mathhead"
+              onClick={(e) => {
+                e.stopPropagation()
+                onOpenBoxOpEdit?.(netIdx, node.id, 'math', title, e)
+              }}
+            >
+              <title>Click to change math operation (ADD / SUB / MUL / DIV)</title>
+              <rect
+                x={boxX}
+                y={boxY}
+                width={boxWidth}
+                height="18"
+                fill="#1f2937"
+                className="group-hover/mathhead:fill-[#283548] transition-colors"
+              />
+              <text
+                x={boxX + boxWidth / 2}
+                y={boxY + 13}
+                fill="#38bdf8"
+                fontSize="10"
+                fontWeight="bold"
+                textAnchor="middle"
+                fontFamily="monospace"
+                className="group-hover/mathhead:fill-cyan-200 transition-colors"
+              >
+                {title} ▾
+              </text>
+            </g>
+          ) : (
+            <>
+              <rect
+                x={boxX}
+                y={boxY}
+                width={boxWidth}
+                height="18"
+                fill="#1f2937"
+              />
+              <text
+                x={boxX + boxWidth / 2}
+                y={boxY + 13}
+                fill="#38bdf8"
+                fontSize="10"
+                fontWeight="bold"
+                textAnchor="middle"
+                fontFamily="monospace"
+              >
+                {title}
+              </text>
+            </>
+          )}
 
           {/* Box Detail / Live Info */}
           {node.kind === 'timer' && (
@@ -3315,27 +3591,109 @@ function renderNodes(
             const isCompTrue = state?.liveValues?.result === 'TRUE' || isPowered
             return (
               <g data-testid={`comparator-${cmp.id}`}>
-                <text x={boxX + 8} y={boxY + 34} fill="#94a3b8" fontSize="8.5" fontFamily="monospace">
-                  IN1: {cmp.op1}
-                </text>
-                <text
-                  x={boxX + boxWidth / 2}
-                  y={boxY + 48}
-                  fill="#38bdf8"
-                  fontSize="11"
-                  fontWeight="bold"
-                  textAnchor="middle"
-                  fontFamily="monospace"
+                {/* Clickable IN1 Pin (op1) */}
+                <g
+                  data-testid={`comparator-op1-${cmp.id}`}
+                  className="cursor-pointer group/pin"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenBoxPinEdit?.(netIdx, cmp.id, 'comparator', 'op1', 'IN1', cmp.op1, e)
+                  }}
                 >
-                  [ {opSymbol} ]
-                </text>
-                <text x={boxX + boxWidth - 8} y={boxY + 34} fill="#94a3b8" fontSize="8.5" textAnchor="end" fontFamily="monospace">
-                  IN2: {cmp.op2}
-                </text>
+                  <title>IN1: {cmp.op1} (Click to edit)</title>
+                  <rect
+                    x={boxX + 4}
+                    y={boxY + 23}
+                    width={80}
+                    height={15}
+                    fill="#0b0f17"
+                    stroke="#1e293b"
+                    strokeWidth="1"
+                    className="group-hover/pin:stroke-[#38bdf8] transition-colors"
+                  />
+                  <text
+                    x={boxX + 8}
+                    y={boxY + 34}
+                    fill="#e2e8f0"
+                    fontSize="8.5"
+                    fontFamily="monospace"
+                    className="group-hover/pin:fill-cyan-200 transition-colors"
+                  >
+                    IN1:{truncPin(cmp.op1, 7)}
+                  </text>
+                </g>
+
+                {/* Clickable IN2 Pin (op2) */}
+                <g
+                  data-testid={`comparator-op2-${cmp.id}`}
+                  className="cursor-pointer group/pin"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenBoxPinEdit?.(netIdx, cmp.id, 'comparator', 'op2', 'IN2', cmp.op2, e)
+                  }}
+                >
+                  <title>IN2: {cmp.op2} (Click to edit)</title>
+                  <rect
+                    x={boxX + boxWidth - 84}
+                    y={boxY + 23}
+                    width={80}
+                    height={15}
+                    fill="#0b0f17"
+                    stroke="#1e293b"
+                    strokeWidth="1"
+                    className="group-hover/pin:stroke-[#38bdf8] transition-colors"
+                  />
+                  <text
+                    x={boxX + boxWidth - 8}
+                    y={boxY + 34}
+                    fill="#e2e8f0"
+                    fontSize="8.5"
+                    textAnchor="end"
+                    fontFamily="monospace"
+                    className="group-hover/pin:fill-cyan-200 transition-colors"
+                  >
+                    IN2:{truncPin(cmp.op2, 7)}
+                  </text>
+                </g>
+
+                {/* Clickable Operator Selector Badge */}
+                <g
+                  data-testid={`comparator-op-${cmp.id}`}
+                  className="cursor-pointer group/op"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenBoxOpEdit?.(netIdx, cmp.id, 'comparator', cmp.comparatorType, e)
+                  }}
+                >
+                  <title>Click to change operator ({opSymbol})</title>
+                  <rect
+                    x={boxX + boxWidth / 2 - 28}
+                    y={boxY + 42}
+                    width={56}
+                    height={16}
+                    fill="#0f172a"
+                    stroke="#334155"
+                    strokeWidth="1"
+                    className="group-hover/op:stroke-[#38bdf8] transition-colors"
+                  />
+                  <text
+                    x={boxX + boxWidth / 2}
+                    y={boxY + 53}
+                    fill="#38bdf8"
+                    fontSize="10.5"
+                    fontWeight="bold"
+                    textAnchor="middle"
+                    fontFamily="monospace"
+                    className="group-hover/op:fill-cyan-200 transition-colors"
+                  >
+                    [ {opSymbol} ]
+                  </text>
+                </g>
+
                 {isMonitoring && (
                   <text
                     x={boxX + boxWidth / 2}
-                    y={boxY + 59}
+                    y={boxY + 69}
                     fill={isCompTrue ? '#10b981' : '#64748b'}
                     fontSize="8"
                     fontWeight="bold"
@@ -3349,25 +3707,100 @@ function renderNodes(
             )
           })()}
 
-          {node.kind === 'math' && (
-            <>
-              <text x={boxX + 8} y={boxY + 34} fill="#94a3b8" fontSize="9" fontFamily="monospace">IN</text>
-              <text x={boxX + boxWidth - 24} y={boxY + 34} fill="#94a3b8" fontSize="9" fontFamily="monospace">OUT</text>
-              {isMonitoring && state?.liveValues?.out !== undefined && (
-                <text
-                  x={boxX + boxWidth / 2}
-                  y={boxY + 54}
-                  fill="#10b981"
-                  fontSize="10"
-                  fontWeight="bold"
-                  textAnchor="middle"
-                  fontFamily="monospace"
+          {node.kind === 'math' && (() => {
+            const m = node as LadderMathNode
+            const renderMathPin = (
+              pinKey: MathPinKey,
+              label: string,
+              rawVal: string | undefined,
+              rowY: number,
+              alignRight = false
+            ) => {
+              const displayVal = rawVal ?? '??'
+              const pillW = alignRight ? 82 : 94
+              const pillX = alignRight ? boxX + boxWidth - pillW - 4 : boxX + 4
+              const textX = alignRight ? pillX + pillW - 4 : pillX + 4
+              return (
+                <g
+                  key={pinKey}
+                  data-testid={`math-pin-${pinKey}-${m.id}`}
+                  className="cursor-pointer group/pin"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenBoxPinEdit?.(netIdx, m.id, 'math', pinKey, label, rawVal ?? '', e)
+                  }}
                 >
-                  {String(state.liveValues.out)}
-                </text>
-              )}
-            </>
-          )}
+                  <title>{label}: {displayVal} (Click to edit)</title>
+                  <rect
+                    x={pillX}
+                    y={rowY - 10}
+                    width={pillW}
+                    height={14}
+                    fill="#0b0f17"
+                    stroke="#1e293b"
+                    strokeWidth="1"
+                    className="group-hover/pin:stroke-[#38bdf8] transition-colors"
+                  />
+                  <text
+                    x={textX}
+                    y={rowY}
+                    fill="#e2e8f0"
+                    fontSize="8.5"
+                    textAnchor={alignRight ? 'end' : 'start'}
+                    fontFamily="monospace"
+                    className="group-hover/pin:fill-cyan-200 transition-colors"
+                  >
+                    {label}:{truncPin(displayVal, alignRight ? 7 : 8)}
+                  </text>
+                </g>
+              )
+            }
+
+            const isScaling = m.boxType === 'NORM_X' || m.boxType === 'SCALE_X'
+            const isArithmetic =
+              m.boxType === 'ADD' ||
+              m.boxType === 'SUB' ||
+              m.boxType === 'MUL' ||
+              m.boxType === 'DIV'
+
+            return (
+              <g data-testid={`math-${m.id}`}>
+                {isScaling ? (
+                  <>
+                    {renderMathPin('min', 'MIN', m.min ?? '0', boxY + 34)}
+                    {renderMathPin('value', 'VAL', m.value ?? m.in1 ?? '??', boxY + 52)}
+                    {renderMathPin('max', 'MAX', m.max ?? m.in2 ?? '100', boxY + 70)}
+                    {renderMathPin('out', 'OUT', m.out ?? '??', boxY + 34, true)}
+                  </>
+                ) : isArithmetic ? (
+                  <>
+                    {renderMathPin('in1', 'IN1', m.in1 ?? '??', boxY + 34)}
+                    {renderMathPin('in2', 'IN2', m.in2 ?? '??', boxY + 54)}
+                    {renderMathPin('out', 'OUT', m.out ?? '??', boxY + 34, true)}
+                  </>
+                ) : (
+                  <>
+                    {renderMathPin('in1', 'IN', m.in1 ?? '??', boxY + 34)}
+                    {renderMathPin('out', 'OUT', m.out ?? '??', boxY + 34, true)}
+                  </>
+                )}
+
+                {isMonitoring && state?.liveValues?.out !== undefined && (
+                  <text
+                    x={boxX + boxWidth - 8}
+                    y={boxY + boxHeight - 8}
+                    fill="#10b981"
+                    fontSize="9"
+                    fontWeight="bold"
+                    textAnchor="end"
+                    fontFamily="monospace"
+                  >
+                    {String(state.liveValues.out)}
+                  </text>
+                )}
+              </g>
+            )
+          })()}
 
           {/* Selection frame */}
           {isSelected && (

@@ -308,11 +308,14 @@ function testTiaExportBridge() {
   assert.ok(tagFile.content.includes('"EmergencyStop"') || tagFile.content.includes('>EmergencyStop<'), 'Contains EmergencyStop tag')
   testPass('Tag table written as SimaticML')
 
-  // LAD blocks are reported as skipped until a real SimaticML writer exists
+  // LAD blocks are transpiled to TIA Portal SCL external sources by default
   assert.ok(!bundle.files.some((f) => f.content.includes('<FlgNet')), 'No hand-made LAD XML is exported')
-  assert.ok(bundle.manifest.skipped.length > 0, 'The demo LAD blocks are listed as skipped')
-  assert.ok(bundle.manifest.warnings.some((w) => w.includes('LAD')), 'Skipping LAD produces a warning')
-  testPass('LAD blocks are skipped with an explicit warning')
+  assert.strictEqual(bundle.manifest.skipped.length, 0, 'Zero blocks skipped when LAD-to-SCL transpiler is active')
+  assert.ok(bundle.files.some((f) => f.filename === 'OB1_Main.scl'), 'OB1_Main LAD block exported as OB1_Main.scl')
+  assert.ok(bundle.files.some((f) => f.filename === 'OB82_DiagFault.scl'), 'OB82_DiagFault LAD block exported as OB82_DiagFault.scl')
+  assert.ok(bundle.files.some((f) => f.filename === 'DB2_TON_Pump.db'), 'Synthesized TON instance DB DB2_TON_Pump.db exported')
+  assert.ok((bundle.manifest.transpiledLad?.length || 0) >= 2, 'Manifest records transpiled LAD blocks')
+  testPass('Demo LAD blocks transpiled to valid TIA Portal SCL & Instance DB sources')
 
   // Spreadsheet input for hand import
   const csvFile = bundle.files.find((f) => f.filename === 'PLC_Tags.csv')

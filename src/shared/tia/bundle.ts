@@ -5,7 +5,8 @@ import { builtinInstanceKind } from '../s7/typeLayout'
 import { effectiveInterface, parseSourceBlock } from '../scl/sourceBlock'
 import { SclLexer } from '../scl/lexer'
 import { writeDataBlock, writeSclBlock, writeTagCsv, writeTagTableXml, writeUdt } from './writers'
-import { BlockVariable } from '../types/blocks'
+import { transpileLadToScl } from './ladToScl'
+import { BlockVariable, DataBlockDefinition, SclBlockDefinition } from '../types/blocks'
 
 export type TiaFileType = 'scl' | 'db' | 'udt' | 'xml' | 'csv' | 'manifest'
 
@@ -32,8 +33,14 @@ export interface TiaManifest {
   tagTables: { file: string; name: string }[]
   /** Source files in the order TIA has to generate them. */
   steps: TiaManifestStep[]
+  transpiledLad?: { name: string; file: string }[]
   skipped: { name: string; reason: string }[]
   warnings: string[]
+}
+
+export interface TiaBundleOptions {
+  /** Convert LAD blocks into equivalent TIA SCL sources (default: true). */
+  transpileLadToScl?: boolean
 }
 
 export interface TiaBundle {
@@ -93,21 +100,48 @@ function orderSteps(steps: PlannedStep[], warnings: string[]): PlannedStep[] {
   return out
 }
 
-export function buildTiaBundle(payload: ProjectLoadPayload): TiaBundle {
+export function buildTiaBundle(payload: ProjectLoadPayload, options: TiaBundleOptions = {}): TiaBundle {
   const warnings: string[] = []
   const skipped: TiaManifest['skipped'] = []
   const steps: PlannedStep[] = []
+  const shouldTranspileLad = options.transpileLadToScl !== false
 
   const globals = new Set<string>()
   for (const table of payload.tagTables) for (const t of table.tags || []) globals.add(t.name.toLowerCase())
   for (const db of payload.dataBlocks) globals.add(db.name.toLowerCase())
   for (const b of [...payload.sclBlocks, ...payload.ladBlocks]) globals.add(b.name.toLowerCase())
 
-  for (const lad of payload.ladBlocks) {
-    skipped.push({ name: lad.name, reason: 'LAD blocks are not exported yet: TIA needs SimaticML, planned for phase 3.' })
-  }
-  if (payload.ladBlocks.length > 0) {
-    warnings.push(`${payload.ladBlocks.length} LAD block(s) were not exported. SCL that calls them will not compile in TIA.`)
+  const existingDbNames = new Set(payload.dataBlocks.map((db) => db.name.toLowerCase()))
+  let nextDbNumber = payload.dataBlocks.reduce((m, d) => Math.max(m, d.blockNumber || 0), 0) + 1
+  const synthesizedDbs: DataBlockDefinition[] = []
+  const transpiledSclBlocks: SclBlockDefinition[] = []
+  const transpiledLad: { name: string; file: string }[] = []
+
+  if (shouldTranspileLad) {
+    for (const lad of payload.ladBlocks) {
+      const res = transpileLadToScl(lad, { existingDbNames, nextDbNumber })
+      for (const db of res.synthesizedDbs) {
+        existingDbNames.add(db.name.toLowerCase())
+        globals.add(db.name.toLowerCase())
+        nextDbNumber = Math.max(nextDbNumber, (db.blockNumber || 0) + 1)
+        synthesizedDbs.push(db)
+      }
+      transpiledSclBlocks.push(res.sclBlock)
+      transpiledLad.push({ name: lad.name, file: `sources/${safeFileName(lad.name)}.scl` })
+      warnings.push(...res.warnings)
+    }
+    if (transpiledLad.length > 0) {
+      warnings.push(
+        `${transpiledLad.length} LAD block(s) transpiled to SCL for TIA Portal import (${transpiledLad.map((b) => b.name).join(', ')}).`
+      )
+    }
+  } else {
+    for (const lad of payload.ladBlocks) {
+      skipped.push({ name: lad.name, reason: 'LAD blocks were excluded (transpileLadToScl disabled).' })
+    }
+    if (payload.ladBlocks.length > 0) {
+      warnings.push(`${payload.ladBlocks.length} LAD block(s) were not exported. SCL that calls them will not compile in TIA.`)
+    }
   }
 
   for (const udt of payload.udts) {
@@ -118,7 +152,7 @@ export function buildTiaBundle(payload: ProjectLoadPayload): TiaBundle {
     steps.push({ file: `${safeFileName(udt.name)}.udt`, kind: 'udt', name: udt.name, content: written.content, dependsOn })
   }
 
-  for (const db of payload.dataBlocks) {
+  for (const db of [...payload.dataBlocks, ...synthesizedDbs]) {
     const written = writeDataBlock(db)
     const dependsOn = new Set<string>()
     variableReferences(db.variables, dependsOn)
@@ -136,7 +170,7 @@ export function buildTiaBundle(payload: ProjectLoadPayload): TiaBundle {
     })
   }
 
-  for (const block of payload.sclBlocks) {
+  for (const block of [...payload.sclBlocks, ...transpiledSclBlocks]) {
     const written = writeSclBlock(block, { globals })
     const iface = effectiveInterface(block)
     const dependsOn = new Set<string>()
@@ -186,6 +220,7 @@ export function buildTiaBundle(payload: ProjectLoadPayload): TiaBundle {
     cpu: profile ? { name: profile.name, orderNumber: profile.orderNumber, firmware: profile.firmwareVersion } : null,
     tagTables,
     steps: ordered.map(({ file, kind, name, number }) => ({ file: `sources/${file}`, kind, name, number })),
+    ...(transpiledLad.length > 0 ? { transpiledLad } : {}),
     skipped,
     warnings
   }

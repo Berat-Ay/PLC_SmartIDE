@@ -142,6 +142,12 @@ export const UdtEditor: React.FC<UdtEditorProps> = ({ udtId }) => {
                             ))}
                         </optgroup>
                       )}
+                      {!['BOOL', 'BYTE', 'WORD', 'DWORD', 'INT', 'DINT', 'REAL', 'TIME', 'STRING'].includes(m.dataType) &&
+                        !udts.some((u) => u.id !== udtId && u.name === m.dataType) && (
+                          <optgroup label="Custom / Complex" className="bg-industrial-950 text-amber-300">
+                            <option value={m.dataType}>{m.dataType}</option>
+                          </optgroup>
+                        )}
                     </select>
                   </td>
                   <td className="py-1 px-3 whitespace-nowrap">
