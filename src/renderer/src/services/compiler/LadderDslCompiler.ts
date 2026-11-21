@@ -624,6 +624,7 @@ export class LadderDslCompiler {
         let cuOp = ''
         let cdOp = ''
         let rLdOp = ''
+        let ldOp = ''
 
         for (let i = 1; i < subArgs.length; i++) {
           const arg = subArgs[i].trim()
@@ -634,6 +635,10 @@ export class LadderDslCompiler {
             cuOp = arg.substring(3).trim().replace(/['"]/g, '')
           } else if (upperArg.startsWith('CD=')) {
             cdOp = arg.substring(3).trim().replace(/['"]/g, '')
+          } else if (upperArg.startsWith('LD=') || upperArg.startsWith('LOAD=')) {
+            const val = arg.split('=')[1].trim().replace(/['"]/g, '')
+            if (name === 'CTD') rLdOp = val
+            else ldOp = val
           } else if (upperArg.startsWith('R=') || upperArg.startsWith('RESET=')) {
             rLdOp = arg.split('=')[1].trim().replace(/['"]/g, '')
           } else if (i === 1 && !arg.includes('=')) {
@@ -650,6 +655,7 @@ export class LadderDslCompiler {
           cuCdOperand: cuOp || (counterType === 'CTD' ? cdOp : ''),
           cuOperand: cuOp || undefined,
           cdOperand: cdOp || undefined,
+          ldOperand: ldOp || undefined,
           rLdOperand: rLdOp,
           pvOperand: pvValue,
           qOperand: `${instName}.${counterType === 'CTD' ? 'QD' : 'QU'}`,
@@ -855,6 +861,7 @@ export class LadderDslCompiler {
           const extraParams: string[] = [`PV=${cnt.pvOperand || '10'}`]
           if (cnt.cuOperand) extraParams.push(`CU=${cnt.cuOperand}`)
           if (cnt.cdOperand) extraParams.push(`CD=${cnt.cdOperand}`)
+          if (cnt.ldOperand) extraParams.push(`LD=${cnt.ldOperand}`)
           if (cnt.rLdOperand) extraParams.push(`R=${cnt.rLdOperand}`)
           return `${cnt.counterType || 'CTU'}(${cnt.instanceDb || 'C1'}, ${extraParams.join(', ')})`
         }

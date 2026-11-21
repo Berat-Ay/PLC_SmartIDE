@@ -1,12 +1,13 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
-import { ProjectLoadPayload } from '../shared/types/ipc'
+import { CreateProjectRequest, ProjectLoadPayload } from '../shared/types/ipc'
 import { ProjectMetadata } from '../shared/types/project'
 import { CpuConfig } from '../shared/types/hardware'
 import { TagTable } from '../shared/types/tags'
 import { UdtDefinition } from '../shared/types/types'
 import { DataBlockDefinition, LadBlockDefinition, SclBlockDefinition } from '../shared/types/blocks'
 import { getDefaultCpuConfig } from '../shared/constants/hardwareDefaults'
+import { buildInitialProjectPayload } from '../shared/project/createProjectPayload'
 import { effectiveInterface, emptyInterface, parseSourceBlock, toFullSource } from '../shared/scl/sourceBlock'
 import { assertPlainFileName, resolveInside } from './pathGuard'
 
@@ -42,6 +43,35 @@ export class FileEngine {
       const fullPath = path.join(projectDir, subdir)
       await fs.mkdir(fullPath, { recursive: true })
     }
+  }
+
+  /**
+   * Creates a new modular S7 project directory structure on disk and returns the loaded payload.
+   */
+  public static async createProject(options: CreateProjectRequest): Promise<ProjectLoadPayload> {
+    const target = options.targetPath?.trim()
+    if (!target) {
+      throw new Error('Target project directory cannot be empty')
+    }
+    const normalizedDir = path.resolve(target)
+    try {
+      const stat = await fs.stat(normalizedDir)
+      if (stat.isFile()) {
+        throw new Error(`'${normalizedDir}' is a file, not a directory`)
+      }
+    } catch (err) {
+      if (!isMissingFile(err)) throw err
+    }
+
+    await fs.mkdir(normalizedDir, { recursive: true })
+    await this.ensureProjectDirectories(normalizedDir)
+
+    const initial = buildInitialProjectPayload({
+      ...options,
+      targetPath: normalizedDir
+    })
+    await this.saveProject(initial)
+    return await this.loadProject(normalizedDir)
   }
 
   /**

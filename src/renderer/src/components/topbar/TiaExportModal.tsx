@@ -37,7 +37,11 @@ const NameList: React.FC<{ title: string; items: string[]; tone: string }> = ({ 
   )
 
 const ExportModalBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const bundle = useMemo(() => TiaExportBridge.generateBundle(), [])
+  const [transpileLadToScl, setTranspileLadToScl] = useState(true)
+  const bundle = useMemo(
+    () => TiaExportBridge.generateBundle({ transpileLadToScl }),
+    [transpileLadToScl]
+  )
   const [tab, setTab] = useState<ModalTab>('export')
   const [selected, setSelected] = useState(0)
   const [copied, setCopied] = useState(false)
@@ -102,7 +106,7 @@ const ExportModalBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             <div>
               <h2 className="text-sm font-bold text-industrial-100">TIA Portal</h2>
               <p className="text-[11px] text-industrial-400">
-                {bundle.targetCpu}: SCL blocks, data blocks, UDTs and tag tables. LAD blocks are not exported yet.
+                {bundle.targetCpu}: SCL, LAD (transpiled to SCL), data blocks, UDTs and tag tables.
               </p>
             </div>
           </div>
@@ -133,8 +137,29 @@ const ExportModalBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             ))}
           </div>
           <div className="flex items-center gap-2 text-[11px] font-mono text-industrial-300">
+            <label
+              title="Convert LAD networks into standard Siemens SCL files for TIA Portal export"
+              className="flex items-center gap-1.5 bg-industrial-900 px-2 py-0.5 rounded border border-industrial-800 cursor-pointer hover:border-cyan-700"
+            >
+              <input
+                data-testid="tia-toggle-lad-transpile"
+                type="checkbox"
+                checked={transpileLadToScl}
+                onChange={(e) => {
+                  setTranspileLadToScl(e.target.checked)
+                  setSelected(0)
+                }}
+                className="accent-cyan-500"
+              />
+              <span>LAD → SCL</span>
+            </label>
             <span className="bg-industrial-900 px-2 py-0.5 rounded border border-industrial-800">{bundle.summary.totalTagsExported} Tags</span>
             <span className="bg-industrial-900 px-2 py-0.5 rounded border border-industrial-800">{bundle.summary.sclFilesCount} SCL</span>
+            {bundle.summary.ladTranspiledCount > 0 && (
+              <span className="bg-cyan-950 text-cyan-300 px-2 py-0.5 rounded border border-cyan-800">
+                {bundle.summary.ladTranspiledCount} LAD→SCL
+              </span>
+            )}
             <span className="bg-industrial-900 px-2 py-0.5 rounded border border-industrial-800">{bundle.summary.dbFilesCount} DBs</span>
             <span className="bg-industrial-900 px-2 py-0.5 rounded border border-industrial-800">{bundle.summary.udtFilesCount} UDTs</span>
             {bundle.summary.skippedBlocksCount > 0 && (

@@ -68,6 +68,7 @@ interface UIStoreState {
   setDebugLogModalOpen: (open: boolean) => void
   openTab: (tab: EditorTab) => void
   closeTab: (tabId: string) => void
+  updateTabTitle: (type: TabType, targetId: string, title: string) => void
   setTabs: (tabs: EditorTab[]) => void
   setActiveTab: (tabId: string | null) => void
   toggleSplitView: () => void
@@ -165,6 +166,13 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
       isSplitView: newSplit !== null && newTabs.length > 1
     })
   },
+
+  updateTabTitle: (type, targetId, title) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.type === type && t.targetId === targetId ? { ...t, title } : t
+      )
+    })),
 
   setActiveTab: (activeTabId) => set({ activeTabId }),
 

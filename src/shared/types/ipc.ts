@@ -25,8 +25,17 @@ export interface FileChangeEventPayload {
   content?: string
 }
 
+export interface CreateProjectRequest {
+  name: string
+  targetPath: string
+  cpuProfileId: string
+  defaultLanguage: 'LAD' | 'SCL'
+}
+
 export interface ElectronApi {
   selectProjectDirectory: () => Promise<string | null>
+  selectDirectory: () => Promise<string | null>
+  createProject: (options: CreateProjectRequest) => Promise<ProjectLoadPayload>
   openProject: (projectDir: string) => Promise<ProjectLoadPayload>
   saveProjectFile: (projectDir: string, relativePath: string, content: string) => Promise<boolean>
   /** Moves a file from blocks, types or tags to the project's .trash folder. False if it was never saved. */

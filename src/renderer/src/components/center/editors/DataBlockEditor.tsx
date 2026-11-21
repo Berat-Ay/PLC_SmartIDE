@@ -1,15 +1,22 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { Plus, Trash2, Database, Layers } from 'lucide-react'
 import { useBlockStore } from '../../../stores/useBlockStore'
 import { useProjectStore } from '../../../stores/useProjectStore'
 import { useRuntimeStore } from '../../../stores/useRuntimeStore'
 import { BlockVariable } from '@shared/types/blocks'
+import { getOnlineValuePlaceholder, parseOnlineValue } from '@shared/s7/onlineValueParser'
+import { PromptModal } from '../../common/PromptModal'
 
 interface DataBlockEditorProps {
   fileName: string
 }
 
 export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) => {
+  const [modifyTarget, setModifyTarget] = useState<{
+    variable: BlockVariable
+    sym: string
+    currentValue: string
+  } | null>(null)
   const {
     dataBlocks,
     udts,
@@ -197,6 +204,12 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
                           ))}
                         </optgroup>
                       )}
+                      {!['BOOL', 'BYTE', 'WORD', 'DWORD', 'INT', 'DINT', 'REAL', 'TIME', 'STRING'].includes(v.dataType) &&
+                        !udts.some((u) => u.name === v.dataType) && (
+                          <optgroup label="Custom / Complex" className="bg-industrial-950 text-amber-300">
+                            <option value={v.dataType}>{v.dataType}</option>
+                          </optgroup>
+                        )}
                     </select>
                   </td>
 
@@ -246,11 +259,11 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
                                 const b = !(liveVal === true || liveVal === 'TRUE')
                                 forceValue(sym, b, true)
                               } else {
-                                const next = prompt(`Modify value for ${sym}:`, String(liveVal ?? 0))
-                                if (next !== null) {
-                                  const parsed = v.dataType === 'REAL' ? parseFloat(next) : parseInt(next, 10)
-                                  forceValue(sym, isNaN(parsed) ? next : parsed, true)
-                                }
+                                setModifyTarget({
+                                  variable: v,
+                                  sym,
+                                  currentValue: String(liveVal ?? '')
+                                })
                               }
                             }}
                             title="Modify DB variable online"
@@ -311,6 +324,28 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
           </tbody>
         </table>
       </div>
+
+      <PromptModal
+        isOpen={modifyTarget !== null}
+        title={modifyTarget ? `Modify DB Value: ${modifyTarget.sym}` : 'Modify DB Value'}
+        label={modifyTarget ? `New ${modifyTarget.variable.dataType} value` : undefined}
+        initialValue={modifyTarget?.currentValue ?? ''}
+        placeholder={modifyTarget ? getOnlineValuePlaceholder(modifyTarget.variable.dataType) : undefined}
+        confirmLabel="Apply Value"
+        validate={(val) => {
+          if (!modifyTarget) return null
+          const res = parseOnlineValue(val, modifyTarget.variable.dataType)
+          return res.ok ? null : res.error
+        }}
+        onCancel={() => setModifyTarget(null)}
+        onConfirm={(val) => {
+          if (!modifyTarget) return
+          const res = parseOnlineValue(val, modifyTarget.variable.dataType)
+          if (!res.ok) return
+          forceValue(modifyTarget.sym, res.value, true)
+          setModifyTarget(null)
+        }}
+      />
     </div>
   )
 }

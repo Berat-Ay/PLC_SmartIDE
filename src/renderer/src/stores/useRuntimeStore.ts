@@ -17,6 +17,7 @@ interface RuntimeStoreState {
   isMonitoring: boolean // [MONITOR ON/OFF]
   metrics: RuntimeWorkerMetrics
   currentSnapshot: RuntimeMemorySnapshot | null
+  liveTagValues: Record<string, unknown>
   timeTravelActive: boolean
   scrubbedSnapshot: RuntimeMemorySnapshot | null
   scrubbedIndex: number // -N from live
@@ -66,12 +67,13 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
   })
 
   defaultEngine.setOnSnapshot((snapshot, metrics) => {
-    const { timeTravelActive } = get()
+    const { timeTravelActive, isMonitoring } = get()
+    const liveTagValues = isMonitoring ? defaultEngine.getLiveTagValues() : get().liveTagValues
     if (!timeTravelActive) {
-      set({ currentSnapshot: snapshot, metrics })
+      set({ currentSnapshot: snapshot, metrics, liveTagValues })
     } else {
       // Keep updating metrics even when scrubbing
-      set({ metrics })
+      set({ metrics, liveTagValues })
     }
   })
 
@@ -81,6 +83,7 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
     isMonitoring: false,
     metrics: initialMetrics,
     currentSnapshot: null,
+    liveTagValues: {},
     timeTravelActive: false,
     scrubbedSnapshot: null,
     scrubbedIndex: 0,
@@ -133,14 +136,25 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
 
     reset: () => {
       get().engine.reset()
-      set({ timeTravelActive: false, scrubbedSnapshot: null, scrubbedIndex: 0 })
+      set({ timeTravelActive: false, scrubbedSnapshot: null, scrubbedIndex: 0, liveTagValues: {} })
     },
 
     toggleMonitoring: () => {
-      set((s) => ({ isMonitoring: !s.isMonitoring }))
+      const next = !get().isMonitoring
+      get().engine.setMonitoringEnabled(next)
+      set({
+        isMonitoring: next,
+        liveTagValues: next ? get().engine.getLiveTagValues() : {}
+      })
     },
 
-    setMonitoring: (isMonitoring) => set({ isMonitoring }),
+    setMonitoring: (isMonitoring) => {
+      get().engine.setMonitoringEnabled(isMonitoring)
+      set({
+        isMonitoring,
+        liveTagValues: isMonitoring ? get().engine.getLiveTagValues() : {}
+      })
+    },
 
     forceValue: (addressOrSymbol, value, active) => {
       get().engine.setForcedValue(addressOrSymbol, value, active)
@@ -148,7 +162,10 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
         const copy = new Map(s.forceOverrides)
         if (active) copy.set(addressOrSymbol, value)
         else copy.delete(addressOrSymbol)
-        return { forceOverrides: copy }
+        return {
+          forceOverrides: copy,
+          liveTagValues: s.isMonitoring ? s.engine.getLiveTagValues() : s.liveTagValues
+        }
       })
     },
 
@@ -195,61 +212,15 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
     },
 
     jumpToLastEdge: (symbolOrAddress) => {
+      const found = get().engine.jumpToLastEdge(symbolOrAddress)
+      if (!found) return
       const history = get().engine.getHistory()
-      if (history.length < 2) return
-
-      // Search backwards through ring buffer
-      const clean = symbolOrAddress.trim().replace(/"/g, '')
-
-      const evalSnapshotValue = (snap: RuntimeMemorySnapshot): boolean => {
-        // Look in DB
-        if (clean.includes('.')) {
-          const parts = clean.split('.')
-          const dbName = parts[0]
-          const field = parts[1]
-          if (snap.dataBlocks[dbName] && field in snap.dataBlocks[dbName]) {
-            return !!snap.dataBlocks[dbName][field]
-          }
-        }
-        // Look in process images
-        const parsed = useTagStore.getState().tagTables
-        for (const t of parsed) {
-          const found = t.tags.find((tag) => tag.name.toLowerCase() === clean.toLowerCase())
-          if (found) {
-            const addr = found.address.toUpperCase()
-            if (addr.startsWith('%I')) {
-              const byte = parseInt(addr.slice(2).split('.')[0], 10) || 0
-              const bit = parseInt(addr.slice(2).split('.')[1], 10) || 0
-              return (snap.pii[byte] & (1 << bit)) !== 0
-            }
-            if (addr.startsWith('%Q')) {
-              const byte = parseInt(addr.slice(2).split('.')[0], 10) || 0
-              const bit = parseInt(addr.slice(2).split('.')[1], 10) || 0
-              return (snap.piq[byte] & (1 << bit)) !== 0
-            }
-            if (addr.startsWith('%M')) {
-              const byte = parseInt(addr.slice(2).split('.')[0], 10) || 0
-              const bit = parseInt(addr.slice(2).split('.')[1], 10) || 0
-              return (snap.merker[byte] & (1 << bit)) !== 0
-            }
-          }
-        }
-        return false
-      }
-
-      for (let i = history.length - 1; i > 0; i--) {
-        const vNow = evalSnapshotValue(history[i])
-        const vPrev = evalSnapshotValue(history[i - 1])
-        if (vNow !== vPrev) {
-          // Found transition!
-          set({
-            timeTravelActive: true,
-            scrubbedSnapshot: history[i],
-            scrubbedIndex: i
-          })
-          break
-        }
-      }
+      const idx = history.findIndex((s) => s.cycleNumber === found.cycleNumber)
+      set({
+        timeTravelActive: true,
+        scrubbedSnapshot: found,
+        scrubbedIndex: idx >= 0 ? idx : Math.max(0, history.length - 1)
+      })
     },
 
     injectFault: (channel = '%IW64') => {

@@ -9,10 +9,16 @@ import {
   ArrowRight,
   HardDrive,
   CheckCircle2,
-  Shield
+  Shield,
+  AlertCircle
 } from 'lucide-react'
 import { ALL_CPU_PROFILES, CpuProfile, CPU_1214C_PROFILE } from '@shared/constants/cpuProfiles'
 import { useProjectStore } from '../../stores/useProjectStore'
+
+function formatIpcError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  return raw.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, '')
+}
 
 export const ProjectStartupWizard: React.FC = () => {
   const { createNewProject, loadDemoProject } = useProjectStore()
@@ -20,8 +26,11 @@ export const ProjectStartupWizard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'create' | 'open'>('create')
   const [projectName, setProjectName] = useState('Project_01')
   const [projectPath, setProjectPath] = useState('C:/Projects/S7/Project_01')
+  const [isCustomPath, setIsCustomPath] = useState(false)
   const [selectedCpuId, setSelectedCpuId] = useState<string>(CPU_1214C_PROFILE.id)
   const [selectedLanguage, setSelectedLanguage] = useState<'LAD' | 'SCL'>('LAD')
+  const [isCreating, setIsCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const selectedProfile: CpuProfile =
     ALL_CPU_PROFILES.find((p) => p.id === selectedCpuId) || CPU_1214C_PROFILE
@@ -29,21 +38,66 @@ export const ProjectStartupWizard: React.FC = () => {
   const s7_1200_cpus = ALL_CPU_PROFILES.filter((p) => p.family === 'S7-1200')
   const s7_1500_cpus = ALL_CPU_PROFILES.filter((p) => p.family === 'S7-1500')
 
-  const handleCreate = () => {
-    createNewProject({
-      name: projectName.trim() || 'Project_01',
-      targetPath: projectPath.trim(),
-      cpuProfileId: selectedCpuId,
-      defaultLanguage: selectedLanguage
-    })
+  const handleBrowseDirectory = async () => {
+    setCreateError(null)
+    if (!window.electronApi?.selectDirectory) return
+    try {
+      const selected = await window.electronApi.selectDirectory()
+      if (selected) {
+        setProjectPath(selected)
+        setIsCustomPath(true)
+      }
+    } catch (err) {
+      setCreateError(formatIpcError(err))
+    }
+  }
+
+  const handleCreate = async () => {
+    const cleanName = projectName.trim() || 'Project_01'
+    const cleanPath = projectPath.trim()
+    setCreateError(null)
+
+    if (window.electronApi?.createProject) {
+      if (!cleanPath) {
+        setCreateError('Please specify a Target Directory for the new project.')
+        return
+      }
+      setIsCreating(true)
+      try {
+        useProjectStore.getState().noteLocalWrite()
+        const payload = await window.electronApi.createProject({
+          name: cleanName,
+          targetPath: cleanPath,
+          cpuProfileId: selectedCpuId,
+          defaultLanguage: selectedLanguage
+        })
+        useProjectStore.getState().initializeCreatedProject(payload, selectedLanguage)
+      } catch (err) {
+        setCreateError(formatIpcError(err))
+      } finally {
+        setIsCreating(false)
+      }
+    } else {
+      createNewProject({
+        name: cleanName,
+        targetPath: cleanPath,
+        cpuProfileId: selectedCpuId,
+        defaultLanguage: selectedLanguage
+      })
+    }
   }
 
   const handleOpenExisting = async () => {
+    setCreateError(null)
     if (window.electronApi) {
-      const selected = await window.electronApi.selectProjectDirectory()
-      if (selected) {
-        const payload = await window.electronApi.openProject(selected)
-        useProjectStore.getState().setProject(payload)
+      try {
+        const selected = await window.electronApi.selectProjectDirectory()
+        if (selected) {
+          const payload = await window.electronApi.openProject(selected)
+          useProjectStore.getState().setProject(payload)
+        }
+      } catch (err) {
+        setCreateError(formatIpcError(err))
       }
     } else {
       loadDemoProject()
@@ -154,7 +208,10 @@ export const ProjectStartupWizard: React.FC = () => {
                   onChange={(e) => {
                     const name = e.target.value
                     setProjectName(name)
-                    setProjectPath(`C:/Projects/S7/${name.trim() || 'Project_01'}`)
+                    setCreateError(null)
+                    if (!isCustomPath) {
+                      setProjectPath(`C:/Projects/S7/${name.trim() || 'Project_01'}`)
+                    }
                   }}
                   className="w-full h-8 px-3 bg-[#0c0d10] border border-[#27272a] text-xs font-mono text-industrial-100 focus:border-[#00a3a6] focus:outline-hidden"
                 />
@@ -164,13 +221,29 @@ export const ProjectStartupWizard: React.FC = () => {
                 <label className="block text-[11px] font-mono text-industrial-300 mb-1">
                   Target Directory:
                 </label>
-                <input
-                  data-testid="wizard-project-path"
-                  type="text"
-                  value={projectPath}
-                  onChange={(e) => setProjectPath(e.target.value)}
-                  className="w-full h-8 px-3 bg-[#0c0d10] border border-[#27272a] text-xs font-mono text-industrial-300 focus:border-[#00a3a6] focus:outline-hidden"
-                />
+                <div className="flex items-center gap-1.5">
+                  <input
+                    data-testid="wizard-project-path"
+                    type="text"
+                    value={projectPath}
+                    onChange={(e) => {
+                      setProjectPath(e.target.value)
+                      setIsCustomPath(true)
+                      setCreateError(null)
+                    }}
+                    className="flex-1 min-w-0 h-8 px-3 bg-[#0c0d10] border border-[#27272a] text-xs font-mono text-industrial-300 focus:border-[#00a3a6] focus:outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    data-testid="wizard-browse-directory"
+                    onClick={handleBrowseDirectory}
+                    title="Browse for target folder"
+                    className="h-8 px-2.5 bg-[#181a1f] hover:bg-[#22252c] border border-[#27272a] hover:border-[#00a3a6] text-xs font-mono text-industrial-200 flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5 text-[#00a3a6]" />
+                    <span>Browse...</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -392,6 +465,16 @@ export const ProjectStartupWizard: React.FC = () => {
             </div>
           </div>
 
+          {createError && (
+            <div
+              data-testid="wizard-create-error"
+              className="p-3 border border-red-700/80 bg-red-950/50 text-red-200 text-xs font-mono flex items-center gap-2"
+            >
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <span>{createError}</span>
+            </div>
+          )}
+
           {/* Action Row */}
           <div className="pt-2 flex items-center justify-between border-t border-[#27272a]">
             <div className="text-xs text-industrial-400 font-mono flex items-center gap-1.5">
@@ -402,9 +485,10 @@ export const ProjectStartupWizard: React.FC = () => {
             <button
               data-testid="wizard-create-project"
               onClick={handleCreate}
-              className="h-10 px-6 bg-[#00a3a6] hover:bg-[#008f91] text-white font-mono font-bold text-xs flex items-center gap-2 border border-[#00c2c5] shadow-md transition-colors cursor-pointer"
+              disabled={isCreating}
+              className="h-10 px-6 bg-[#00a3a6] hover:bg-[#008f91] disabled:opacity-50 disabled:cursor-not-allowed text-white font-mono font-bold text-xs flex items-center gap-2 border border-[#00c2c5] shadow-md transition-colors cursor-pointer"
             >
-              <span>CREATE PROJECT & INITIALIZE WORKSPACE</span>
+              <span>{isCreating ? 'CREATING PROJECT...' : 'CREATE PROJECT & INITIALIZE WORKSPACE'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>

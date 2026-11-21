@@ -371,3 +371,35 @@ export function toFullSource(block: SclBlockDefinition): string {
   if (parsed.hasHeader) return block.code
   return composeSource(block, block.interface || emptyInterface(), block.code || '', parsed)
 }
+
+/** Updates the block declaration header name (e.g. FUNCTION_BLOCK "Old" -> FUNCTION_BLOCK "New") while preserving comments, return type, and body. */
+export function renameSourceBlockHeader(source: string, newName: string): string {
+  const trimmed = newName.trim()
+  if (!trimmed) return source
+  const eol = source.includes('\r\n') ? '\r\n' : '\n'
+  const lines = source.split(/\r?\n/)
+  let inBlockComment = false
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineTrimmed = lines[i].trim()
+    if (inBlockComment) {
+      if (lineTrimmed.includes('*)')) inBlockComment = false
+      continue
+    }
+    if (!lineTrimmed || lineTrimmed.startsWith('//')) continue
+    if (lineTrimmed.startsWith('(*')) {
+      if (!lineTrimmed.includes('*)')) inBlockComment = true
+      continue
+    }
+    const match = lines[i].match(
+      /^(\s*(?:ORGANIZATION_BLOCK|FUNCTION_BLOCK|FUNCTION|DATA_BLOCK|TYPE)\s+)(?:"[^"]+"|[^\s:]+)(\s*(?::\s*\S.*?)?\s*)$/i
+    )
+    if (match) {
+      lines[i] = `${match[1]}"${trimmed}"${match[2]}`
+      return lines.join(eol)
+    }
+    break
+  }
+
+  return source
+}

@@ -247,9 +247,20 @@ export async function runAgentLoop(
     | { circuit: AiCircuitSynthesisPayload; problems: string[]; round: number; acceptance?: AcceptanceSummary }
     | undefined
 
+  const keepBestCandidate = (
+    circuit: AiCircuitSynthesisPayload,
+    failed: string[],
+    roundNum: number,
+    acc?: AcceptanceSummary
+  ): void => {
+    if (!candidate || failed.length <= candidate.problems.length) {
+      candidate = { circuit, problems: failed, round: roundNum, acceptance: acc }
+    }
+  }
+
   const respond = (fields: Partial<AgentExecutionResponse> & { replyText: string }): AgentExecutionResponse => ({
     tier,
-    providerUsed: 'gemini',
+    providerUsed: ctx.provider,
     toolCallsExecuted: executed,
     toolResults,
     ragRulesConsulted,
@@ -347,19 +358,27 @@ export async function runAgentLoop(
         if (reply.circuit && writes.length === 0) {
           tools.holdDiskWrites()
           appliedMoves = applyCircuitPayload(reply.circuit, 'auto-apply', { trialRun: true }).addressMoves
-          const moved = approved ? approvedTagsMoved(approved.tags, useTagStore.getState().tagTables.flatMap((t) => t.tags)) : []
-          const behavior = moved.length
-            ? { problems: moved, note: '' }
-            : checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
-          // The acceptance test runs only on a circuit that passed its own test, as in auto-apply
-          const judged = behavior.problems.length === 0 && scenario ? judgeAcceptance(scenario, gate, isTurkish) : undefined
-          tools.discardDiskWrites()
-          tools.restoreSnapshot(turnStart)
-          const failed = [...behavior.problems, ...(judged?.problems || [])]
-          problems.push(...failed)
-          if (failed.length > 0) candidate = { circuit: reply.circuit, problems: failed, round: round + 1, acceptance: judged?.summary }
-          if (judged) acceptance = judged.summary
-          behaviorNote = [behavior.note, judged?.note].filter(Boolean).join('\n\n')
+          const trialReport = tools.runCompilerVerification()
+          const trialNewErrors = trialReport.errors.filter((e) => !errorsBefore.has(e))
+          if (trialNewErrors.length > 0) {
+            tools.discardDiskWrites()
+            tools.restoreSnapshot(turnStart)
+            problems.push(...trialNewErrors)
+          } else {
+            const moved = approved ? approvedTagsMoved(approved.tags, useTagStore.getState().tagTables.flatMap((t) => t.tags)) : []
+            const behavior = moved.length
+              ? { problems: moved, note: '' }
+              : checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
+            // The acceptance test runs only on a circuit that passed its own test, as in auto-apply
+            const judged = behavior.problems.length === 0 && scenario ? judgeAcceptance(scenario, gate, isTurkish) : undefined
+            tools.discardDiskWrites()
+            tools.restoreSnapshot(turnStart)
+            const failed = [...behavior.problems, ...(judged?.problems || [])]
+            problems.push(...failed)
+            if (failed.length > 0) keepBestCandidate(reply.circuit, failed, round + 1, judged?.summary)
+            if (judged) acceptance = judged.summary
+            behaviorNote = [behavior.note, judged?.note].filter(Boolean).join('\n\n')
+          }
         } else if (reply.circuit) {
           behaviorNote = isTurkish
             ? '**Simülasyon testi:** Bu yanıt yeni blok veya etiket de oluşturduğu için onaydan önce çalıştırılamadı, devrenin davranışı doğrulanmadı.'
@@ -427,7 +446,7 @@ export async function runAgentLoop(
             .join('')
           // A reply that also writes blocks or tags cannot be offered as one staged circuit
           if (failed.length > 0 && writes.length === 0) {
-            candidate = { circuit: reply.circuit, problems: failed, round: round + 1, acceptance: judged?.summary }
+            keepBestCandidate(reply.circuit, failed, round + 1, judged?.summary)
           }
         }
         if (problems.length === 0) {

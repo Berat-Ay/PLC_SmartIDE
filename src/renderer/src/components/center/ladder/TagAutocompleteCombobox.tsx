@@ -10,6 +10,9 @@ interface TagAutocompleteComboboxProps {
   onSelect: (value: string) => void
   onClose: () => void
   position?: { x: number; y: number }
+  allowLiterals?: boolean
+  title?: string
+  placeholder?: string
 }
 
 interface SymbolOption {
@@ -25,7 +28,10 @@ export const TagAutocompleteCombobox: React.FC<TagAutocompleteComboboxProps> = (
   blockInterface,
   onSelect,
   onClose,
-  position
+  position,
+  allowLiterals = false,
+  title,
+  placeholder
 }) => {
   const { tagTables } = useTagStore()
   const { dataBlocks } = useBlockStore()
@@ -165,14 +171,22 @@ export const TagAutocompleteCombobox: React.FC<TagAutocompleteComboboxProps> = (
       (opt.comment && opt.comment.toLowerCase().includes(query.toLowerCase()))
   )
 
+  const trimmedQuery = query.trim()
+  const isNumericLiteral = /^-?\d+(\.\d+)?$/.test(trimmedQuery)
+  const hasExactSymbolMatch = filtered.some(
+    (opt) => opt.symbol.toLowerCase() === trimmedQuery.toLowerCase()
+  )
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
       onClose()
     } else if (e.key === 'Enter') {
-      if (filtered.length > 0) {
+      if (allowLiterals && trimmedQuery && (isNumericLiteral || filtered.length === 0)) {
+        onSelect(trimmedQuery)
+      } else if (filtered.length > 0) {
         onSelect(filtered[0].symbol)
-      } else if (query.trim()) {
-        onSelect(query.trim())
+      } else if (trimmedQuery) {
+        onSelect(trimmedQuery)
       }
       onClose()
     }
@@ -190,6 +204,11 @@ export const TagAutocompleteCombobox: React.FC<TagAutocompleteComboboxProps> = (
       }}
       className="w-72 bg-industrial-950 border border-cyan-500 rounded-none shadow-2xl overflow-hidden text-xs font-mono"
     >
+      {title && (
+        <div className="px-2 py-1 bg-[#14161b] border-b border-industrial-800 text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
+          {title}
+        </div>
+      )}
       <div className="p-2 border-b border-industrial-800 flex items-center gap-2 bg-industrial-900">
         <Search className="w-3.5 h-3.5 text-cyan-400" />
         <input
@@ -199,7 +218,7 @@ export const TagAutocompleteCombobox: React.FC<TagAutocompleteComboboxProps> = (
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Search Tag, DB or #Local..."
+          placeholder={placeholder || 'Search Tag, DB or #Local...'}
           className="w-full bg-transparent text-industrial-100 placeholder-industrial-500 focus:outline-hidden text-xs"
         />
         <button onClick={onClose} className="text-industrial-400 hover:text-white">
@@ -208,6 +227,24 @@ export const TagAutocompleteCombobox: React.FC<TagAutocompleteComboboxProps> = (
       </div>
 
       <div className="max-h-56 overflow-y-auto divide-y divide-industrial-850">
+        {allowLiterals && trimmedQuery && (isNumericLiteral || !hasExactSymbolMatch) && (
+          <button
+            type="button"
+            data-testid="tag-combobox-use-literal"
+            onClick={() => {
+              onSelect(trimmedQuery)
+              onClose()
+            }}
+            className="w-full text-left px-2.5 py-1.5 bg-cyan-950/30 hover:bg-cyan-950/60 text-cyan-200 cursor-pointer transition-colors flex items-center justify-between"
+          >
+            <span className="truncate">
+              Use value / literal: <strong className="text-cyan-300 font-bold">{trimmedQuery}</strong>
+            </span>
+            <span className="text-[10px] text-cyan-400 font-mono px-1 rounded bg-industrial-900 border border-cyan-800">
+              VAL
+            </span>
+          </button>
+        )}
         {filtered.length === 0 ? (
           <div
             onClick={() => {

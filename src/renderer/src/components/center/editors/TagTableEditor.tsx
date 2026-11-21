@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 import {
   AlertTriangle,
   Wand2,
@@ -12,12 +12,19 @@ import { useProjectStore } from '../../../stores/useProjectStore'
 import { useRuntimeStore } from '../../../stores/useRuntimeStore'
 import { TagDefinition } from '@shared/types/tags'
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
+import { getOnlineValuePlaceholder, parseOnlineValue } from '@shared/s7/onlineValueParser'
+import { PromptModal } from '../../common/PromptModal'
 
 interface TagTableEditorProps {
   tableId?: string // undefined means "All Tags" view
 }
 
 export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
+  const [modifyTarget, setModifyTarget] = useState<{
+    sourceTableId: string
+    tag: TagDefinition
+    currentValue: string
+  } | null>(null)
   const {
     tagTables,
     collisions,
@@ -30,7 +37,7 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
     resolveAllOverlaps
   } = useTagStore()
   const { markDirty } = useProjectStore()
-  const { isMonitoring, state: runtimeState, engine, forceValue } = useRuntimeStore()
+  const { isMonitoring, state: runtimeState, engine, forceValue, liveTagValues } = useRuntimeStore()
   const showMonitoring = isMonitoring && runtimeState === 'RUN'
 
   const isAllTags = !tableId
@@ -275,9 +282,9 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
                     {/* Live Monitor Value */}
                     {showMonitoring && (() => {
                       const liveVal =
+                        liveTagValues[tag.id] ??
                         (tag.address ? engine.getVariable(tag.address) : undefined) ??
-                        (tag.name ? engine.getVariable(tag.name) : undefined) ??
-                        tag.monitorValue
+                        (tag.name ? engine.getVariable(tag.name) : undefined)
                       const isBool = tag.dataType === 'BOOL' || typeof liveVal === 'boolean'
                       return (
                         <td className="py-1 px-3 whitespace-nowrap">
@@ -304,20 +311,12 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
                                   forceValue(tag.name, nextVal, true)
                                   engine.setVariable(tag.address, nextVal)
                                   engine.setVariable(tag.name, nextVal)
-                                  tag.monitorValue = nextVal
-                                  updateTag(sourceTableId, tag.id, { monitorValue: nextVal })
                                 } else {
-                                  const next = prompt(`Modify value for ${tag.name} (${tag.address}):`, String(liveVal ?? 0))
-                                  if (next !== null) {
-                                    const parsed = tag.dataType === 'REAL' ? parseFloat(next) : parseInt(next, 10)
-                                    const valToWrite = isNaN(parsed) ? next : parsed
-                                    forceValue(tag.address, valToWrite, true)
-                                    forceValue(tag.name, valToWrite, true)
-                                    engine.setVariable(tag.address, valToWrite)
-                                    engine.setVariable(tag.name, valToWrite)
-                                    tag.monitorValue = valToWrite
-                                    updateTag(sourceTableId, tag.id, { monitorValue: valToWrite })
-                                  }
+                                  setModifyTarget({
+                                    sourceTableId,
+                                    tag,
+                                    currentValue: String(liveVal ?? '')
+                                  })
                                 }
                               }}
                               title="Modify / Force value online"
@@ -386,6 +385,36 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
           </tbody>
         </table>
       </div>
+
+      <PromptModal
+        isOpen={modifyTarget !== null}
+        title={modifyTarget ? `Modify Online Value: ${modifyTarget.tag.name}` : 'Modify Online Value'}
+        label={
+          modifyTarget
+            ? `New ${modifyTarget.tag.dataType} value (${modifyTarget.tag.address || modifyTarget.tag.name})`
+            : undefined
+        }
+        initialValue={modifyTarget?.currentValue ?? ''}
+        placeholder={modifyTarget ? getOnlineValuePlaceholder(modifyTarget.tag.dataType) : undefined}
+        confirmLabel="Apply Value"
+        validate={(val) => {
+          if (!modifyTarget) return null
+          const res = parseOnlineValue(val, modifyTarget.tag.dataType)
+          return res.ok ? null : res.error
+        }}
+        onCancel={() => setModifyTarget(null)}
+        onConfirm={(val) => {
+          if (!modifyTarget) return
+          const res = parseOnlineValue(val, modifyTarget.tag.dataType)
+          if (!res.ok) return
+          const { tag } = modifyTarget
+          forceValue(tag.address, res.value, true)
+          forceValue(tag.name, res.value, true)
+          engine.setVariable(tag.address, res.value)
+          engine.setVariable(tag.name, res.value)
+          setModifyTarget(null)
+        }}
+      />
     </div>
   )
 }

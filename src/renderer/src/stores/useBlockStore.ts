@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import { effectiveInterface, emptyInterface, mergeInterfaces, parseSourceBlock, rewriteSourceInterface } from '@shared/scl/sourceBlock'
+import { effectiveInterface, emptyInterface, mergeInterfaces, parseSourceBlock, renameSourceBlockHeader, rewriteSourceInterface } from '@shared/scl/sourceBlock'
+import { LayoutVariable } from '@shared/s7/typeLayout'
 import {
   DataBlockDefinition,
   LadBlockDefinition,
@@ -7,8 +8,25 @@ import {
   BlockVariable
 } from '@shared/types/blocks'
 import { UdtDefinition, UdtMember } from '@shared/types/types'
-import { S7OffsetCalculator } from '../services/S7OffsetCalculator'
+import { FbVariableLookup, S7OffsetCalculator } from '../services/S7OffsetCalculator'
 import { useCrossRefStore } from './useCrossRefStore'
+
+function createFbLookup(ladBlocks: LadBlockDefinition[], sclBlocks: SclBlockDefinition[]): FbVariableLookup {
+  return (name: string) => {
+    const lower = name.toLowerCase()
+    const ladFb = ladBlocks.find((b) => b.blockType === 'FB' && b.name.toLowerCase() === lower)
+    if (ladFb) {
+      const iface = ladFb.interface
+      return [...iface.input, ...iface.output, ...iface.inOut, ...iface.static] as LayoutVariable[]
+    }
+    const sclFb = sclBlocks.find((b) => b.blockType === 'FB' && b.name.toLowerCase() === lower)
+    if (sclFb) {
+      const iface = effectiveInterface(sclFb)
+      return [...iface.input, ...iface.output, ...iface.inOut, ...iface.static] as LayoutVariable[]
+    }
+    return undefined
+  }
+}
 
 /** A block's source text is the authority on its interface when the source has a header. */
 function normalizeSclBlock(block: SclBlockDefinition): SclBlockDefinition {
@@ -112,8 +130,9 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   toggleDbOptimizedAccess: (fileName) => {
-    const { dataBlocks, udts } = get()
+    const { dataBlocks, udts, ladBlocks, sclBlocks } = get()
     const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     set({
       dataBlocks: dataBlocks.map((db) => {
@@ -122,7 +141,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         let updatedVariables = db.variables
         if (!newOptimized) {
           // Calculate standard S7 byte.bit offsets
-          updatedVariables = S7OffsetCalculator.calculateVariableOffsets(db.variables, udtMap)
+          updatedVariables = S7OffsetCalculator.calculateVariableOffsets(db.variables, udtMap, fbLookup)
         }
         return {
           ...db,
@@ -134,8 +153,9 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   addDbVariable: (fileName, initial) => {
-    const { dataBlocks, udts } = get()
+    const { dataBlocks, udts, ladBlocks, sclBlocks } = get()
     const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     const newVar: BlockVariable = {
       id: `v_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
@@ -153,7 +173,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         const rawVars = [...db.variables, newVar]
         const variables = db.optimizedAccess
           ? rawVars
-          : S7OffsetCalculator.calculateVariableOffsets(rawVars, udtMap)
+          : S7OffsetCalculator.calculateVariableOffsets(rawVars, udtMap, fbLookup)
         return { ...db, variables }
       })
     })
@@ -162,8 +182,9 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   updateDbVariable: (fileName, varId, updates) => {
-    const { dataBlocks, udts } = get()
+    const { dataBlocks, udts, ladBlocks, sclBlocks } = get()
     const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     set({
       dataBlocks: dataBlocks.map((db) => {
@@ -171,7 +192,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         const rawVars = db.variables.map((v) => (v.id === varId ? { ...v, ...updates } : v))
         const variables = db.optimizedAccess
           ? rawVars
-          : S7OffsetCalculator.calculateVariableOffsets(rawVars, udtMap)
+          : S7OffsetCalculator.calculateVariableOffsets(rawVars, udtMap, fbLookup)
         return { ...db, variables }
       })
     })
@@ -180,8 +201,9 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   deleteDbVariable: (fileName, varId) => {
-    const { dataBlocks, udts } = get()
+    const { dataBlocks, udts, ladBlocks, sclBlocks } = get()
     const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     set({
       dataBlocks: dataBlocks.map((db) => {
@@ -189,7 +211,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         const rawVars = db.variables.filter((v) => v.id !== varId)
         const variables = db.optimizedAccess
           ? rawVars
-          : S7OffsetCalculator.calculateVariableOffsets(rawVars, udtMap)
+          : S7OffsetCalculator.calculateVariableOffsets(rawVars, udtMap, fbLookup)
         return { ...db, variables }
       })
     })
@@ -218,8 +240,9 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   addUdtMember: (udtId, initial) => {
-    const { udts } = get()
+    const { udts, ladBlocks, sclBlocks } = get()
     const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     const newMember: UdtMember = {
       id: `m_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
@@ -240,7 +263,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
           retain: false,
           accessibleFromHMI: true
         }))
-        const calculated = S7OffsetCalculator.calculateVariableOffsets(tempVars, udtMap)
+        const calculated = S7OffsetCalculator.calculateVariableOffsets(tempVars, udtMap, fbLookup)
         const updatedMembers = members.map((m, idx) => ({
           ...m,
           calculatedOffset: calculated[idx]?.calculatedOffset
@@ -248,7 +271,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         return {
           ...u,
           members: updatedMembers,
-          calculatedSizeInBytes: S7OffsetCalculator.calculateUdtSize({ ...u, members: updatedMembers }, udtMap)
+          calculatedSizeInBytes: S7OffsetCalculator.calculateUdtSize({ ...u, members: updatedMembers }, udtMap, fbLookup)
         }
       })
     })
@@ -257,8 +280,9 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   updateUdtMember: (udtId, memberId, updates) => {
-    const { udts } = get()
+    const { udts, ladBlocks, sclBlocks } = get()
     const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     set({
       udts: udts.map((u) => {
@@ -271,7 +295,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
           retain: false,
           accessibleFromHMI: true
         }))
-        const calculated = S7OffsetCalculator.calculateVariableOffsets(tempVars, udtMap)
+        const calculated = S7OffsetCalculator.calculateVariableOffsets(tempVars, udtMap, fbLookup)
         const updatedMembers = members.map((m, idx) => ({
           ...m,
           calculatedOffset: calculated[idx]?.calculatedOffset
@@ -279,7 +303,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         return {
           ...u,
           members: updatedMembers,
-          calculatedSizeInBytes: S7OffsetCalculator.calculateUdtSize({ ...u, members: updatedMembers }, udtMap)
+          calculatedSizeInBytes: S7OffsetCalculator.calculateUdtSize({ ...u, members: updatedMembers }, udtMap, fbLookup)
         }
       })
     })
@@ -288,8 +312,9 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   },
 
   deleteUdtMember: (udtId, memberId) => {
-    const { udts } = get()
+    const { udts, ladBlocks, sclBlocks } = get()
     const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     set({
       udts: udts.map((u) => {
@@ -302,7 +327,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
           retain: false,
           accessibleFromHMI: true
         }))
-        const calculated = S7OffsetCalculator.calculateVariableOffsets(tempVars, udtMap)
+        const calculated = S7OffsetCalculator.calculateVariableOffsets(tempVars, udtMap, fbLookup)
         const updatedMembers = members.map((m, idx) => ({
           ...m,
           calculatedOffset: calculated[idx]?.calculatedOffset
@@ -310,7 +335,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         return {
           ...u,
           members: updatedMembers,
-          calculatedSizeInBytes: S7OffsetCalculator.calculateUdtSize({ ...u, members: updatedMembers }, udtMap)
+          calculatedSizeInBytes: S7OffsetCalculator.calculateUdtSize({ ...u, members: updatedMembers }, udtMap, fbLookup)
         }
       })
     })
@@ -345,7 +370,14 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
 
   updateSclBlock: (fileName, updates) => {
     set((state) => ({
-      sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? normalizeSclBlock({ ...b, ...updates }) : b))
+      sclBlocks: state.sclBlocks.map((b) => {
+        if (b.fileName !== fileName) return b
+        const nextCode =
+          updates.name && updates.name !== b.name && updates.code === undefined
+            ? renameSourceBlockHeader(b.code, updates.name)
+            : updates.code ?? b.code
+        return normalizeSclBlock({ ...b, ...updates, code: nextCode })
+      })
     }))
     useCrossRefStore.getState().reindex()
   },

@@ -180,7 +180,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
           onDragStart={(e) => handleDragStart(e, 'coil', 'OUTPUT_COIL', 'Output Coil')}
           onDragEnd={handleDragEnd}
           onClick={() => onInsertCoil('OUTPUT_COIL')}
-          title="Output Coil (Coil) - Drag or F7"
+          title="Output Coil (Coil) - Drag or Shift+F7"
           className="h-7 px-2 flex items-center gap-1.5 bg-[#181a1f] hover:bg-[#22252c] border border-[#27272a] hover:border-emerald-500/80 text-emerald-400 hover:text-white transition-colors cursor-grab active:cursor-grabbing rounded-none shrink-0"
         >
           <svg width="28" height="20" viewBox="0 0 28 20" className="stroke-emerald-400 fill-none" strokeWidth="1.5">
@@ -220,7 +220,7 @@ export const InstructionRibbon: React.FC<InstructionRibbonProps> = ({
           onDragStart={(e) => handleDragStart(e, 'parallel', 'OPEN_BRANCH', 'Open Branch')}
           onDragEnd={handleDragEnd}
           onClick={onInsertParallelBranch}
-          title="Open Parallel Branch - Drag or Ctrl+B"
+          title="Open Parallel Branch - Drag, Shift+F8 or Ctrl+Shift+B"
           className="h-7 px-2 flex items-center gap-1.5 bg-[#181a1f] hover:bg-[#22252c] border border-[#27272a] hover:border-indigo-500/80 text-indigo-300 hover:text-white transition-colors cursor-grab active:cursor-grabbing rounded-none shrink-0"
         >
           <svg width="28" height="20" viewBox="0 0 28 20" className="stroke-indigo-400 fill-none" strokeWidth="1.5">

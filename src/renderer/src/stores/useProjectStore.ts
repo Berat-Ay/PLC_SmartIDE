@@ -1,10 +1,7 @@
 import { create } from 'zustand'
 import { ProjectMetadata, CpuOperatingState } from '@shared/types/project'
 import { ProjectLoadPayload } from '@shared/types/ipc'
-import { CpuConfig } from '@shared/types/hardware'
-import { TagTable } from '@shared/types/tags'
-import { LadBlockDefinition, SclBlockDefinition } from '@shared/types/blocks'
-import { ALL_CPU_PROFILES, CPU_1214C_PROFILE } from '@shared/constants/cpuProfiles'
+import { buildInitialProjectPayload } from '@shared/project/createProjectPayload'
 import { DemoProjectSeeder } from '../services/DemoProjectSeeder'
 import { CompileEngine, CompileResult } from '../services/CompileEngine'
 import { useHardwareStore } from './useHardwareStore'
@@ -33,6 +30,7 @@ interface ProjectStoreState {
   noteLocalWrite: () => void
 
   setProject: (payload: ProjectLoadPayload) => void
+  initializeCreatedProject: (payload: ProjectLoadPayload, defaultLanguage: 'LAD' | 'SCL') => void
   createNewProject: (options: CreateProjectOptions) => void
   loadDemoProject: () => void
   closeProject: () => void
@@ -85,179 +83,35 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     }
   },
 
-  createNewProject: (options: CreateProjectOptions) => {
-    const profile = ALL_CPU_PROFILES.find((p) => p.id === options.cpuProfileId) || CPU_1214C_PROFILE
+  initializeCreatedProject: (payload: ProjectLoadPayload, defaultLanguage: 'LAD' | 'SCL') => {
+    get().setProject(payload)
 
-    const hardware: CpuConfig = {
-      general: {
-        cpuName: profile.name,
-        targetCpu: `${profile.name} (${profile.orderNumber})`,
-        cycleWatchdogTimeMs: 150,
-        minCycleTimeEnabled: false,
-        minCycleTimeMs: 1,
-        retentiveMemory: {
-          startByte: 0,
-          byteCount: 2048
-        }
-      },
-      // As in TIA Portal, a new CPU has system and clock memory off; the user turns them on in the CPU settings
-      systemMemory: {
-        enabled: false,
-        byteAddress: 1
-      },
-      clockMemory: {
-        enabled: false,
-        byteAddress: 0
-      },
-      digitalIO: {
-        diStartByte: 0,
-        dqStartByte: 0,
-        diChannels: profile.defaultDiChannels,
-        dqChannels: profile.defaultDqChannels
-      },
-      analogIO: {
-        aiChannels: profile.defaultAiChannels,
-        aqChannels: profile.defaultAqChannels
-      },
-      organizationBlocks: [
-        {
-          blockNumber: 1,
-          name: 'OB1_Main',
-          type: 'Cyclic',
-          enabled: true,
-          priority: 1,
-          description: 'Main Program Cycle Execution'
-        },
-        {
-          blockNumber: 100,
-          name: 'OB100_Startup',
-          type: 'Startup',
-          enabled: true,
-          priority: 1,
-          description: 'Warm Restart Execution'
-        },
-        {
-          blockNumber: 30,
-          name: 'OB30_CyclicInterrupt',
-          type: 'CyclicInterrupt',
-          enabled: true,
-          cycleTimeMs: 100,
-          phaseOffsetMs: 0,
-          priority: 7,
-          description: '100ms High-Speed Cyclic Interrupt'
-        },
-        {
-          blockNumber: 82,
-          name: 'OB82_DiagFault',
-          type: 'DiagnosticInterrupt',
-          enabled: true,
-          priority: 26,
-          description: 'Hardware Diagnostic Interrupt (Wire-break / Overflow)'
-        }
-      ]
-    }
+    const isLad = defaultLanguage === 'LAD'
+    const activeFileName = isLad
+      ? payload.ladBlocks[0]?.fileName || 'OB1_Main.lad.json'
+      : payload.sclBlocks[0]?.fileName || 'OB1_Main.scl'
 
-    const defaultTagTable: TagTable = {
-      id: 'table_default',
-      name: 'default_tags',
-      fileName: 'default_tags.tags.json',
-      tags: []
-    }
-
-    const ladBlocks: LadBlockDefinition[] =
-      options.defaultLanguage === 'LAD'
-        ? [
-            {
-              blockType: 'OB',
-              name: 'Main [OB1]',
-              fileName: 'OB1_Main.lad.json',
-              blockNumber: 1,
-              optimizedAccess: true,
-              schemaVersion: '1.0.0',
-              interface: {
-                input: [],
-                output: [],
-                inOut: [],
-                static: [],
-                temp: [],
-                constant: []
-              },
-              networks: [
-                {
-                  id: 'net_1',
-                  networkNumber: 1,
-                  title: 'Network 1',
-                  comment: 'Empty network ready for LAD logic',
-                  nodes: []
-                }
-              ]
-            }
-          ]
-        : []
-
-    const sclBlocks: SclBlockDefinition[] =
-      options.defaultLanguage === 'SCL'
-        ? [
-            {
-              blockType: 'OB',
-              name: 'Main [OB1]',
-              fileName: 'OB1_Main.scl.json',
-              blockNumber: 1,
-              optimizedAccess: true,
-              interface: {
-                input: [],
-                output: [],
-                inOut: [],
-                static: [],
-                temp: [],
-                constant: []
-              },
-              code: `ORGANIZATION_BLOCK "Main [OB1]"\nTITLE = "Main Program Cycle (OB1)"\n{ S7_Optimized_Access := 'TRUE' }\nVERSION : 0.1\n\nVAR_TEMP\nEND_VAR\n\nBEGIN\n    // Main cyclic execution logic\nEND_ORGANIZATION_BLOCK\n`
-            }
-          ]
-        : []
-
-    const projectName = options.name?.trim() || 'Project_01'
-    const targetCpuType: 'Virtual S7-1500' | 'Virtual S7-1200' | 'Virtual S7-300' =
-      profile.name.includes('1500') || profile.orderNumber.includes('511') || profile.orderNumber.includes('516')
-        ? 'Virtual S7-1500'
-        : 'Virtual S7-1200'
-
-    const metadata: ProjectMetadata = {
-      id: `proj_${Date.now()}`,
-      name: projectName,
-      schemaVersion: '1.0.0',
-      targetCpu: targetCpuType,
-      firmwareVersion: profile.firmwareVersion,
-      author: 'Industrial Automation Architect',
-      description: `${projectName} configured on ${profile.name} (${profile.orderNumber})`,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    get().setProject({
-      projectPath: options.targetPath || `C:/Projects/S7/${projectName}`,
-      metadata,
-      hardware,
-      tagTables: [defaultTagTable],
-      udts: [],
-      dataBlocks: [],
-      ladBlocks,
-      sclBlocks
-    })
-
-    // Open Main [OB1] in editor
-    const activeFileName = options.defaultLanguage === 'LAD' ? 'OB1_Main.lad.json' : 'OB1_Main.scl.json'
     useUIStore.getState().setTabs([
       {
         id: activeFileName,
         title: 'OB1_Main',
-        type: options.defaultLanguage === 'LAD' ? 'lad' : 'scl',
+        type: isLad ? 'lad' : 'scl',
         targetId: activeFileName
       }
     ])
     useUIStore.getState().setActiveTab(activeFileName)
     useUIStore.getState().setPortalViewOpen(false)
+  },
+
+  createNewProject: (options: CreateProjectOptions) => {
+    const projectName = options.name?.trim() || 'Project_01'
+    const payload = buildInitialProjectPayload({
+      name: projectName,
+      targetPath: options.targetPath?.trim() || `C:/Projects/S7/${projectName}`,
+      cpuProfileId: options.cpuProfileId,
+      defaultLanguage: options.defaultLanguage
+    })
+    get().initializeCreatedProject(payload, options.defaultLanguage)
   },
 
   loadDemoProject: () => {

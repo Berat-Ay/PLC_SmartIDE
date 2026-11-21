@@ -7,7 +7,7 @@ import { BundleFileToWrite, bundleFolderName, readImportFolder, writeBundleFiles
 import { getSecret, setSecret } from './secretStore'
 import { cancelAiHttpRequest, sendAiHttpRequest } from './aiHttp'
 import { ProjectWatcher } from './watcher'
-import { AiHttpRequest, ProjectLoadPayload } from '../shared/types/ipc'
+import { AiHttpRequest, CreateProjectRequest, ProjectLoadPayload } from '../shared/types/ipc'
 
 let mainWindow: BrowserWindow | null = null
 const projectWatcher = new ProjectWatcher()
@@ -79,6 +79,23 @@ ipcMain.handle('dialog:selectProjectDirectory', async () => {
   })
   if (result.canceled || result.filePaths.length === 0) return null
   return result.filePaths[0]
+})
+
+ipcMain.handle('dialog:selectDirectory', async () => {
+  if (!mainWindow) return null
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Select Target Directory'
+  })
+  if (result.canceled || result.filePaths.length === 0) return null
+  return result.filePaths[0]
+})
+
+ipcMain.handle('project:create', async (_, options: CreateProjectRequest) => {
+  const payload = await FileEngine.createProject(options)
+  registerProjectRoot(payload.projectPath)
+  projectWatcher.startWatching(payload.projectPath, () => mainWindow)
+  return payload
 })
 
 ipcMain.handle('project:open', async (_, projectDir: string) => {

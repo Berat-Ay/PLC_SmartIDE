@@ -29,6 +29,7 @@ import { ProjectLoadPayload } from '@shared/types/ipc'
 import { TagTable, TagDefinition } from '@shared/types/tags'
 import { UdtDefinition } from '@shared/types/types'
 import { BlockInterface, LadBlockDefinition, SclBlockDefinition, DataBlockDefinition } from '@shared/types/blocks'
+import { LadderNode } from '@shared/types/ladder'
 
 /** Live editor state. The engine reads it so online edits take effect, without importing any store. */
 export interface LiveProjectProvider {
@@ -144,9 +145,18 @@ export class PlcRuntimeEngine {
   private currentLadPowerStates: Record<string, { powered: boolean; liveValues?: Record<string, string | number> }> = {}
   private currentSclLineValues: Record<string, Record<number, string | number>> = {}
 
-  // 1,000-Cycle Circular Ring Buffer
-  private historyBuffer: RuntimeMemorySnapshot[] = []
+  // 1,000-Cycle O(1) Circular Ring Buffer
   private readonly MAX_HISTORY = 1000
+  private historySlots: Array<RuntimeMemorySnapshot | undefined> = new Array(1000)
+  private historyHead = 0
+  private historyCount = 0
+
+  // Throttling & Monitoring Flags
+  private monitoringEnabled = false
+  private traceRecordingActive = false
+  private isCyclicAutoMode = false
+  private lastUiEmitTime = 0
+  private readonly UI_EMIT_INTERVAL_MS = 40
 
   // Project AST & Configuration reference
   private projectPayload: ProjectLoadPayload | null = null
@@ -170,6 +180,18 @@ export class PlcRuntimeEngine {
   /** Replaces the time source. Used by tests to run timers without waiting. */
   public setClock(clock: () => number): void {
     this.clock = clock
+  }
+
+  public setMonitoringEnabled(enabled: boolean): void {
+    this.monitoringEnabled = enabled
+  }
+
+  public isMonitoringEnabled(): boolean {
+    return this.monitoringEnabled
+  }
+
+  public setTraceRecordingActive(active: boolean): void {
+    this.traceRecordingActive = active
   }
 
   public getDiagnostics(): RuntimeDiagnostic[] {
@@ -304,12 +326,17 @@ export class PlcRuntimeEngine {
     this.applyForces()
 
     this.runOb(100)
-    if ((this.state as RuntimeOperatingState) !== 'RUN' || options.manualScans) return
+    if ((this.state as RuntimeOperatingState) !== 'RUN' || options.manualScans) {
+      this.isCyclicAutoMode = false
+      return
+    }
 
+    this.isCyclicAutoMode = true
+    this.lastUiEmitTime = 0
     const minCycle = this.projectPayload?.hardware?.general?.minCycleTimeEnabled
       ? this.projectPayload.hardware.general.minCycleTimeMs
       : 0
-    this.intervalHandle = setInterval(() => this.runCyclicScan(), Math.max(10, minCycle || 0))
+    this.intervalHandle = setInterval(() => this.runCyclicScan(false), Math.max(10, minCycle || 0))
 
     for (const block of this.organizationBlocks()) {
       const number = this.blockNumber(block)
@@ -323,7 +350,7 @@ export class PlcRuntimeEngine {
 
   /** Runs one main cycle. For a CPU started with manualScans. */
   public scanOnce(): void {
-    this.runCyclicScan()
+    this.runCyclicScan(true)
   }
 
   private clearTimers(): void {
@@ -331,6 +358,7 @@ export class PlcRuntimeEngine {
     this.intervalHandle = null
     for (const handle of this.interruptHandles) clearInterval(handle)
     this.interruptHandles = []
+    this.isCyclicAutoMode = false
   }
 
   public stop(): void {
@@ -360,7 +388,10 @@ export class PlcRuntimeEngine {
     this.counterStates = {}
     this.forceOverrides.clear()
     this.cycleNumber = 0
-    this.historyBuffer = []
+    this.historySlots = new Array(this.MAX_HISTORY)
+    this.historyHead = 0
+    this.historyCount = 0
+    this.lastUiEmitTime = 0
     this.currentLadPowerStates = {}
     this.currentSclLineValues = {}
     this.dbEntries.clear()
@@ -371,15 +402,56 @@ export class PlcRuntimeEngine {
       this.loadProject(this.projectPayload)
     }
 
-    this.emitSnapshot(1)
+    this.emitSnapshot(1, true)
   }
 
   public getState(): RuntimeOperatingState {
     return this.state
   }
 
+  private pushHistory(snapshot: RuntimeMemorySnapshot): void {
+    this.historySlots[this.historyHead] = snapshot
+    this.historyHead = (this.historyHead + 1) % this.MAX_HISTORY
+    if (this.historyCount < this.MAX_HISTORY) {
+      this.historyCount++
+    }
+  }
+
+  private historyAt(logicalIndex: number): RuntimeMemorySnapshot | undefined {
+    if (logicalIndex < 0 || logicalIndex >= this.historyCount) return undefined
+    const oldestSlot = this.historyCount < this.MAX_HISTORY ? 0 : this.historyHead
+    return this.historySlots[(oldestSlot + logicalIndex) % this.MAX_HISTORY]
+  }
+
   public getHistory(): RuntimeMemorySnapshot[] {
-    return this.historyBuffer
+    const out: RuntimeMemorySnapshot[] = new Array(this.historyCount)
+    for (let i = 0; i < this.historyCount; i++) {
+      out[i] = this.historyAt(i)!
+    }
+    return out
+  }
+
+  public getRecentHistory(count: number): RuntimeMemorySnapshot[] {
+    if (count <= 0 || this.historyCount === 0) return []
+    const take = Math.min(count, this.historyCount)
+    const start = this.historyCount - take
+    const out: RuntimeMemorySnapshot[] = new Array(take)
+    for (let i = 0; i < take; i++) {
+      out[i] = this.historyAt(start + i)!
+    }
+    return out
+  }
+
+  public getHistorySince(afterCycleNumber: number): RuntimeMemorySnapshot[] {
+    if (this.historyCount === 0) return []
+    const out: RuntimeMemorySnapshot[] = []
+    for (let i = this.historyCount - 1; i >= 0; i--) {
+      const snap = this.historyAt(i)
+      if (!snap || snap.cycleNumber <= afterCycleNumber) break
+      out.push(snap)
+    }
+    out.reverse()
+    return out
   }
 
   public getLiveTagTables(): TagTable[] {
@@ -420,35 +492,80 @@ export class PlcRuntimeEngine {
   }
 
   public getSnapshotAtCycle(cycleNumber: number): RuntimeMemorySnapshot | undefined {
-    return this.historyBuffer.find((s) => s.cycleNumber === cycleNumber)
-  }
-
-  public jumpToLastEdge(symbolOrAddress: string): RuntimeMemorySnapshot | undefined {
-    // Scan backward through history to find where bit changed value
-    if (this.historyBuffer.length < 2) return undefined
-    let lastVal: boolean | null = null
-
-    for (let i = this.historyBuffer.length - 1; i >= 0; i--) {
-      const snap = this.historyBuffer[i]
-      const curVal = !!this.getVariableFromSnapshot(snap, symbolOrAddress)
-      if (lastVal !== null && curVal !== lastVal) {
-        return snap
-      }
-      lastVal = curVal
+    for (let i = this.historyCount - 1; i >= 0; i--) {
+      const snap = this.historyAt(i)
+      if (snap && snap.cycleNumber === cycleNumber) return snap
     }
     return undefined
   }
 
-  private getVariableFromSnapshot(snapshot: RuntimeMemorySnapshot, symbolOrAddress: string): unknown {
-    const raw = symbolOrAddress.trim()
-    const upper = raw.toUpperCase()
-    if (upper.startsWith('%') || /^[IQM]/.test(upper)) {
-      const parsed = parseS7Address(upper)
-      if (parsed.isValid && parsed.sizeCategory === 'BIT') {
+  public jumpToLastEdge(symbolOrAddress: string): RuntimeMemorySnapshot | undefined {
+    // Scan backward through history to find where bit/value changed
+    if (this.historyCount < 2) return undefined
+    for (let i = this.historyCount - 1; i > 0; i--) {
+      const curSnap = this.historyAt(i)!
+      const prevSnap = this.historyAt(i - 1)!
+      const curVal = !!this.getVariableFromSnapshot(curSnap, symbolOrAddress)
+      const prevVal = !!this.getVariableFromSnapshot(prevSnap, symbolOrAddress)
+      if (curVal !== prevVal) {
+        return curSnap
+      }
+    }
+    return undefined
+  }
+
+  public getVariableFromSnapshot(snapshot: RuntimeMemorySnapshot, symbolOrAddress: string): unknown {
+    const clean = symbolOrAddress.trim().replace(/^"|"$/g, '').trim()
+    if (!clean) return undefined
+
+    this.refreshTagIndex()
+    const tag = this.tagByName.get(clean.toLowerCase())
+    const addrTarget = tag?.address ? tag.address.trim().toUpperCase() : clean.toUpperCase()
+    const dataType = tag?.dataType?.toUpperCase()
+
+    // Check Data Block path (e.g. "DB1_PlantData.PressureBar")
+    if (!tag && clean.includes('.')) {
+      const segments = splitPath(clean)
+      const dbKey = Object.keys(snapshot.dataBlocks).find((k) => k.toLowerCase() === segments[0].toLowerCase())
+      if (dbKey) {
+        let cur: unknown = snapshot.dataBlocks[dbKey]
+        for (let i = 1; i < segments.length; i++) {
+          if (cur && typeof cur === 'object') {
+            const obj = cur as Record<string, unknown>
+            const propKey = Object.keys(obj).find((k) => k.toLowerCase() === segments[i].toLowerCase())
+            cur = propKey !== undefined ? obj[propKey] : undefined
+          } else {
+            cur = undefined
+          }
+        }
+        if (cur !== undefined) return cur
+      }
+    }
+
+    if (addrTarget.startsWith('%') || /^[IQM]/i.test(addrTarget)) {
+      const parsed = parseS7Address(addrTarget)
+      if (parsed.isValid) {
         const buf = parsed.area === 'I' ? snapshot.pii : parsed.area === 'Q' ? snapshot.piq : snapshot.merker
         const byte = parsed.byteAddress
-        const bit = parsed.bitAddress || 0
-        return ((buf[byte] || 0) & (1 << bit)) !== 0
+        if (parsed.sizeCategory === 'BIT') {
+          const bit = parsed.bitAddress || 0
+          return ((buf[byte] || 0) & (1 << bit)) !== 0
+        }
+        if (parsed.sizeCategory === 'BYTE') {
+          return buf[byte] || 0
+        }
+        if (parsed.sizeCategory === 'WORD') {
+          const tmp = new Uint8Array([buf[byte] || 0, buf[byte + 1] || 0])
+          const view = new DataView(tmp.buffer)
+          return dataType === 'WORD' || dataType === 'UINT' ? view.getUint16(0, false) : view.getInt16(0, false)
+        }
+        if (parsed.sizeCategory === 'DWORD') {
+          const tmp = new Uint8Array([buf[byte] || 0, buf[byte + 1] || 0, buf[byte + 2] || 0, buf[byte + 3] || 0])
+          const view = new DataView(tmp.buffer)
+          if (dataType === 'REAL') return view.getFloat32(0, false)
+          if (dataType === 'DWORD' || dataType === 'UDINT') return view.getUint32(0, false)
+          return view.getInt32(0, false)
+        }
       }
     }
     return undefined
@@ -503,7 +620,7 @@ export class PlcRuntimeEngine {
   /**
    * Main cyclic scan (OB1)
    */
-  private runCyclicScan(): void {
+  private runCyclicScan(forceEmit: boolean = true): void {
     if (this.state !== 'RUN') return
 
     const startTime = performance.now()
@@ -524,11 +641,11 @@ export class PlcRuntimeEngine {
     this.updateClockMemory()
     this.applyForces()
 
+    this.currentLadPowerStates = {}
     this.runOb(1)
 
     this.applyForces()
     this.syncInstanceStates()
-    this.syncAllTagMonitorValues()
 
     if (this.firstScanPending) {
       this.firstScanPending = false
@@ -543,7 +660,7 @@ export class PlcRuntimeEngine {
     this.maxCycleDurationMs = Math.max(this.maxCycleDurationMs, this.lastCycleDurationMs)
     this.checkWatchdog(duration)
 
-    this.emitSnapshot(1)
+    this.emitSnapshot(1, forceEmit)
   }
 
   private watchdogLimit(): number {
@@ -727,7 +844,7 @@ export class PlcRuntimeEngine {
    */
   private executeOb82(_faultChannel: string): void {
     this.runOb(82)
-    this.emitSnapshot(82)
+    this.emitSnapshot(82, true)
   }
 
   // ===========================================================================
@@ -968,13 +1085,60 @@ export class PlcRuntimeEngine {
     if (loc) this.writeLocation(scope, loc, value)
   }
 
+  private isDeclaredCounter(upperKey: string): boolean {
+    if (this.memory.counterStates.has(upperKey)) return true
+
+    for (const entry of this.dbEntries.values()) {
+      if (entry.name.toUpperCase() === upperKey && (entry.builtin === 'CTU' || entry.builtin === 'CTD' || entry.builtin === 'CTUD')) {
+        return true
+      }
+    }
+
+    const hasCounterNode = (nodes: LadderNode[]): boolean => {
+      for (const n of nodes) {
+        if (n.kind === 'counter') {
+          const db = (n.instanceDb || '').replace(/^["']|["']$/g, '').trim().toUpperCase()
+          if (db === upperKey || upperKey.endsWith(`.${db}`)) return true
+        } else if (n.kind === 'parallel') {
+          for (const branch of n.branches) {
+            if (hasCounterNode(branch)) return true
+          }
+        }
+      }
+      return false
+    }
+
+    for (const lad of this.getLiveLadBlocks()) {
+      for (const net of lad.networks || []) {
+        if (hasCounterNode(net.nodes || [])) return true
+      }
+    }
+
+    const tail = upperKey.split('.').pop() || upperKey
+    for (const scl of this.getLiveSclBlocks()) {
+      const iface = this.interfaceOf(scl)
+      for (const v of [...iface.static, ...iface.inOut, ...iface.input, ...iface.output]) {
+        if (v.name.toUpperCase() === tail || v.name.toUpperCase() === upperKey) {
+          const kind = builtinInstanceKind(v.dataType)
+          if (kind === 'CTU' || kind === 'CTD' || kind === 'CTUD') return true
+        }
+      }
+    }
+
+    return false
+  }
+
   private readInstanceField(key: string, field: string): unknown {
     const upperKey = key.toUpperCase()
     if (this.memory.edgeStates.has(upperKey)) {
       const e = this.memory.getEdge(upperKey)
       return field === 'CLK' ? e.CLK : e.Q
     }
-    const isCounter = this.memory.counterStates.has(upperKey) || ['QU', 'QD', 'CV', 'PV', 'CU', 'CD', 'R', 'LD'].includes(field)
+    const isCounter =
+      !this.memory.timerStates.has(upperKey) &&
+      (this.memory.counterStates.has(upperKey) ||
+        ['QU', 'QD', 'CV', 'PV', 'CU', 'CD', 'R', 'LD'].includes(field) ||
+        this.isDeclaredCounter(upperKey))
     if (isCounter) {
       const c = this.memory.getCounter(upperKey)
       const values: Record<string, unknown> = { Q: c.QU, QU: c.QU, QD: c.QD, CV: c.CV, PV: c.PV, CU: c.CU, CD: c.CD, R: c.R, LD: c.LD }
@@ -1193,7 +1357,6 @@ export class PlcRuntimeEngine {
       }
       if (tag.dataType && resolved.sizeCategory !== 'BIT') this.memory.writeTyped(resolved, tag.dataType, value)
       else this.writeAddress(resolved, value)
-      tag.monitorValue = value as string | number | boolean
       return
     }
 
@@ -1261,13 +1424,17 @@ export class PlcRuntimeEngine {
     return name
   }
 
-  private syncAllTagMonitorValues(): void {
+  public getLiveTagValues(): Record<string, unknown> {
+    const out: Record<string, unknown> = {}
     for (const table of this.getLiveTagTables()) {
       for (const tag of table.tags || []) {
         const liveVal = tag.address ? this.getVariable(tag.address) : tag.name ? this.getVariable(tag.name) : undefined
-        if (liveVal !== undefined) tag.monitorValue = liveVal as string | number | boolean
+        if (liveVal !== undefined) {
+          out[tag.id] = liveVal
+        }
       }
     }
+    return out
   }
 
   // Bit/Byte/Word/DWord helpers - routed directly through S7BinaryMemory
@@ -1318,10 +1485,31 @@ export class PlcRuntimeEngine {
     return area.slice(0, end)
   }
 
+  private cloneSclLineValues(): Record<string, Record<number, string | number>> {
+    const out: Record<string, Record<number, string | number>> = {}
+    for (const [fileName, lines] of Object.entries(this.currentSclLineValues)) {
+      out[fileName] = { ...lines }
+    }
+    return out
+  }
+
   /**
-   * Emits snapshot and maintains the 1,000-cycle circular ring buffer
+   * Emits snapshot (throttled to ~25 FPS in free-running cyclic mode) and maintains the O(1) 1,000-cycle ring buffer
    */
-  private emitSnapshot(triggeringOb: number): void {
+  private emitSnapshot(triggeringOb: number, forceEmit: boolean = true): void {
+    let shouldEmitUi = true
+    if (this.isCyclicAutoMode && !forceEmit) {
+      const nowWall = performance.now()
+      if (this.lastUiEmitTime !== 0 && nowWall - this.lastUiEmitTime < this.UI_EMIT_INTERVAL_MS) {
+        shouldEmitUi = false
+      } else {
+        this.lastUiEmitTime = nowWall
+      }
+    }
+
+    const skipHeavyClones =
+      this.isCyclicAutoMode && !forceEmit && !shouldEmitUi && !this.monitoringEnabled && !this.traceRecordingActive
+
     const snapshot: RuntimeMemorySnapshot = {
       cycleNumber: this.cycleNumber,
       timestamp: this.clock(),
@@ -1330,16 +1518,15 @@ export class PlcRuntimeEngine {
       pii: this.trimmedCopy(this.pii),
       piq: this.trimmedCopy(this.piq),
       merker: this.trimmedCopy(this.merker),
-      dataBlocks: this.decodeDataBlocks(),
-      ladPowerState: { ...this.currentLadPowerStates },
-      sclLineValues: JSON.parse(JSON.stringify(this.currentSclLineValues))
+      dataBlocks: skipHeavyClones ? {} : this.decodeDataBlocks(),
+      ladPowerState: skipHeavyClones ? {} : { ...this.currentLadPowerStates },
+      sclLineValues: skipHeavyClones ? {} : this.cloneSclLineValues()
     }
 
-    // Add to 1,000-cycle ring buffer
-    this.historyBuffer.push(snapshot)
-    if (this.historyBuffer.length > this.MAX_HISTORY) {
-      this.historyBuffer.shift()
-    }
+    // Add to O(1) 1,000-cycle ring buffer
+    this.pushHistory(snapshot)
+
+    if (!shouldEmitUi) return
 
     const metrics: RuntimeWorkerMetrics = {
       cycleNumber: this.cycleNumber,

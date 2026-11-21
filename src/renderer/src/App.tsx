@@ -17,6 +17,7 @@ import { useBlockStore } from './stores/useBlockStore'
 import { BlackBoxLogger } from './services/diagnostics/BlackBoxLogger'
 import { Bot, Layers } from 'lucide-react'
 import { AiModelRouter } from './services/ai/AiModelRouter'
+import { resolveGlobalShortcut } from './utils/keyboardShortcuts'
 
 const EXTERNAL_WRITE_QUIET_MS = 2000
 // The docks may not take so much of the window that the editor cannot show a toolbar
@@ -50,8 +51,7 @@ export const App: React.FC = () => {
     setRightDockWidth,
     toggleRightDock,
     rightActiveTab,
-    setRightActiveTab,
-    setBottomActiveTab
+    setRightActiveTab
   } = useUIStore()
 
   // Resizing state for Left Dock
@@ -106,22 +106,68 @@ export const App: React.FC = () => {
     }
   }, [isResizingRight, setRightDockWidth])
 
-  // Global keyboard shortcuts: F11 (Cross-Reference), F7 & Ctrl+B (Compile Project)
+  // Global keyboard shortcuts matching TopAppBar & BottomInspector labels
   useEffect(() => {
+    const handleGlobalOpenProject = async () => {
+      const projectStore = useProjectStore.getState()
+      if (window.electronApi) {
+        const selected = await window.electronApi.selectProjectDirectory()
+        if (selected) {
+          const payload = await window.electronApi.openProject(selected)
+          projectStore.setProject(payload)
+        }
+      } else {
+        projectStore.loadDemoProject()
+      }
+    }
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'F11') {
-        e.preventDefault()
-        setBottomActiveTab('crossref')
-      } else if (e.key === 'F7' || ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B'))) {
-        e.preventDefault()
-        useProjectStore.getState().compileProject()
-        setBottomActiveTab('compile')
+      const action = resolveGlobalShortcut(e)
+      if (!action) return
+
+      e.preventDefault()
+      const ui = useUIStore.getState()
+      const project = useProjectStore.getState()
+      const runtime = useRuntimeStore.getState()
+
+      switch (action) {
+        case 'new-project':
+          ui.setPortalViewOpen(true)
+          break
+        case 'open-project':
+          void handleGlobalOpenProject()
+          break
+        case 'save-project':
+          void project.saveProjectToDisk()
+          break
+        case 'compile':
+          project.compileProject()
+          ui.setBottomActiveTab('compile')
+          break
+        case 'toggle-monitoring':
+          runtime.toggleMonitoring()
+          break
+        case 'cross-reference':
+          ui.setBottomActiveTab('crossref')
+          break
+        case 'toggle-left-dock':
+          ui.toggleLeftDock()
+          break
+        case 'toggle-right-dock':
+          ui.toggleRightDock()
+          break
+        case 'toggle-bottom-dock':
+          ui.toggleBottomDock()
+          break
+        case 'toggle-split-view':
+          ui.toggleSplitView()
+          break
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [setBottomActiveTab])
+  }, [])
 
   useEffect(() => {
     AiModelRouter.getInstance().hydrateSecrets().catch((err) => console.warn('Could not load stored API keys:', err))

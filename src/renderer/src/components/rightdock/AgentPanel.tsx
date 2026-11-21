@@ -20,6 +20,8 @@ import { useUIStore } from '../../stores/useUIStore'
 import { useProjectStore } from '../../stores/useProjectStore'
 import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
+import { useHardwareStore } from '../../stores/useHardwareStore'
+import { formatCpuChipLabel } from '../../utils/cpuChipLabel'
 import { AiModelRouter, AgentExecutionResponse, sanitizeUserPrompt } from '../../services/ai/AiModelRouter'
 import { PlcAgentTools, StagedFileChange } from '../../services/ai/PlcAgentTools'
 import { CoilDiagnosticEngine, CoilDiagnosticReport } from '../../services/ai/CoilDiagnosticEngine'
@@ -134,6 +136,8 @@ export const AgentPanel: React.FC = () => {
   const { metadata, cpuState } = useProjectStore()
   const { totalCollisions } = useTagStore()
   const { ladBlocks, sclBlocks } = useBlockStore()
+  const hardwareConfig = useHardwareStore((s) => s.config)
+  const cpuChipLabel = formatCpuChipLabel(hardwareConfig, metadata?.targetCpu)
 
   const [inputPrompt, setInputPrompt] = useState('')
   const [isSettingsOpen, setSettingsOpen] = useState(false)
@@ -451,9 +455,13 @@ export const AgentPanel: React.FC = () => {
         {/* Live Context Chips & Actions */}
         <div className="flex flex-wrap items-center justify-between gap-1">
           <div className="flex flex-wrap gap-1">
-            <span className="px-1.5 py-0.5 rounded-none text-[10px] font-mono bg-industrial-900 border border-industrial-800 text-industrial-300 flex items-center gap-1">
+            <span
+              data-testid="agent-cpu-chip"
+              title={`Active Target CPU: ${cpuChipLabel}`}
+              className="px-1.5 py-0.5 rounded-none text-[10px] font-mono bg-industrial-900 border border-industrial-800 text-industrial-300 flex items-center gap-1"
+            >
               <Cpu className="w-2.5 h-2.5 text-cyan-400" />
-              <span>{metadata?.targetCpu ? 'S7-1200' : 'Virtual S7'}</span>
+              <span>{cpuChipLabel}</span>
             </span>
             <span className="px-1.5 py-0.5 rounded-none text-[10px] font-mono bg-industrial-900 border border-industrial-800 text-industrial-300">
               CPU: {cpuState}

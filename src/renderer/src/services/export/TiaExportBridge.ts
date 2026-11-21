@@ -4,7 +4,7 @@ import { useBlockStore } from '../../stores/useBlockStore'
 import { useProjectStore } from '../../stores/useProjectStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
 import { ProjectLoadPayload } from '@shared/types/ipc'
-import { buildTiaBundle, TiaBundle } from '@shared/tia/bundle'
+import { buildTiaBundle, TiaBundle, TiaBundleOptions } from '@shared/tia/bundle'
 import { mergeTiaImport, TiaMergeResult } from '@shared/tia/merge'
 import { readTiaFolder, TiaImportFile } from '@shared/tia/readers'
 
@@ -12,6 +12,7 @@ export interface TiaExportSummary {
   sclFilesCount: number
   dbFilesCount: number
   udtFilesCount: number
+  ladTranspiledCount: number
   skippedBlocksCount: number
   totalTagsExported: number
 }
@@ -37,9 +38,9 @@ export class TiaExportBridge {
     }
   }
 
-  public static generateBundle(): TiaExportBundle {
+  public static generateBundle(options?: TiaBundleOptions): TiaExportBundle {
     const payload = this.currentProject()
-    const bundle = buildTiaBundle(payload)
+    const bundle = buildTiaBundle(payload, options)
     const count = (type: string): number => bundle.files.filter((f) => f.type === type).length
     return {
       ...bundle,
@@ -48,6 +49,7 @@ export class TiaExportBridge {
         sclFilesCount: count('scl'),
         dbFilesCount: count('db'),
         udtFilesCount: count('udt'),
+        ladTranspiledCount: bundle.manifest.transpiledLad?.length || 0,
         skippedBlocksCount: bundle.manifest.skipped.length,
         totalTagsExported: payload.tagTables.reduce((sum, table) => sum + (table.tags || []).filter((t) => t.address).length, 0)
       }

@@ -241,7 +241,7 @@ NW 1 "Main": SERIES( PARALLEL( NO(Start), NO(Main_K1) ), NO(Stop), COIL(Main_K1)
 NW 2 "Star time": SERIES( NO(Main_K1), TON(T_Star, PT=T#5s) )
 NW 3 "Dead time": SERIES( NO(T_Star.Q), TON(T_Dead, PT=T#500ms) )
 NW 4 "Star": SERIES( NO(Main_K1), NC(T_Star.Q), NC(Delta_K3), COIL(Star_K2) )
-NW 5 "Delta": SERIES( NO(T_Dead.Q), NC(Star_K2), COIL(Delta_K3) )`,
+NW 5 "Delta": SERIES( NO(Main_K1), NO(T_Dead.Q), NC(Star_K2), COIL(Delta_K3) )`,
     test: {
       steps: [
         { atMs: 0, set: { Stop: true } },

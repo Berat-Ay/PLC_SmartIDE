@@ -1,8 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { ElectronApi, FileChangeEventPayload, ProjectLoadPayload } from '../shared/types/ipc'
+import { CreateProjectRequest, ElectronApi, FileChangeEventPayload, ProjectLoadPayload } from '../shared/types/ipc'
 
 const electronApi: ElectronApi = {
   selectProjectDirectory: () => ipcRenderer.invoke('dialog:selectProjectDirectory'),
+  selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory'),
+  createProject: (options: CreateProjectRequest) => ipcRenderer.invoke('project:create', options),
   openProject: (projectDir: string) => ipcRenderer.invoke('project:open', projectDir),
   saveProjectFile: (projectDir: string, relativePath: string, content: string) =>
     ipcRenderer.invoke('project:saveFile', projectDir, relativePath, content),
