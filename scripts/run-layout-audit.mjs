@@ -426,7 +426,7 @@ await resize([1440, 900])
 await ui(() => {
   const s = window.plcTestContext.useUIStore.getState()
   if (!s.isSplitView) s.toggleSplitView()
-  s.setSplitTab('audit-all')
+  window.plcTestContext.useUIStore.setState({ splitTabId: 'audit-all' })
 })
 await eachSize('split-view')
 await ui(() => window.plcTestContext.useUIStore.getState().toggleSplitView())

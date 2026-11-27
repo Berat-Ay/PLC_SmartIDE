@@ -9,7 +9,7 @@ import {
 } from '@shared/types/blocks'
 import { UdtDefinition, UdtMember } from '@shared/types/types'
 import { FbVariableLookup, S7OffsetCalculator } from '../services/S7OffsetCalculator'
-import { useCrossRefStore } from './useCrossRefStore'
+import { generateId } from '../utils/id'
 
 function createFbLookup(ladBlocks: LadBlockDefinition[], sclBlocks: SclBlockDefinition[]): FbVariableLookup {
   return (name: string) => {
@@ -112,21 +112,18 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   // DB operations
   addDataBlock: (db) => {
     set((state) => ({ dataBlocks: [...state.dataBlocks, db] }))
-    useCrossRefStore.getState().reindex()
   },
 
   updateDataBlock: (fileName, updates) => {
     set((state) => ({
       dataBlocks: state.dataBlocks.map((db) => (db.fileName === fileName ? { ...db, ...updates } : db))
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   deleteDataBlock: (fileName) => {
     set((state) => ({
       dataBlocks: state.dataBlocks.filter((db) => db.fileName !== fileName)
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   toggleDbOptimizedAccess: (fileName) => {
@@ -158,7 +155,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
     const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     const newVar: BlockVariable = {
-      id: `v_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: generateId('v'),
       name: initial?.name || `Var_${Math.floor(Math.random() * 900 + 100)}`,
       dataType: initial?.dataType || 'BOOL',
       defaultValue: initial?.defaultValue || '',
@@ -177,8 +174,6 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         return { ...db, variables }
       })
     })
-
-    useCrossRefStore.getState().reindex()
   },
 
   updateDbVariable: (fileName, varId, updates) => {
@@ -196,8 +191,6 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         return { ...db, variables }
       })
     })
-
-    useCrossRefStore.getState().reindex()
   },
 
   deleteDbVariable: (fileName, varId) => {
@@ -215,28 +208,23 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         return { ...db, variables }
       })
     })
-
-    useCrossRefStore.getState().reindex()
   },
 
   // UDT operations
   addUdt: (udt) => {
     set((state) => ({ udts: [...state.udts, udt] }))
-    useCrossRefStore.getState().reindex()
   },
 
   updateUdt: (id, updates) => {
     set((state) => ({
       udts: state.udts.map((u) => (u.id === id ? { ...u, ...updates } : u))
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   deleteUdt: (id) => {
     set((state) => ({
       udts: state.udts.filter((u) => u.id !== id)
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   addUdtMember: (udtId, initial) => {
@@ -245,7 +233,7 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
     const fbLookup = createFbLookup(ladBlocks, sclBlocks)
 
     const newMember: UdtMember = {
-      id: `m_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: generateId('m'),
       name: initial?.name || `Member_${Math.floor(Math.random() * 900 + 100)}`,
       dataType: initial?.dataType || 'BOOL',
       defaultValue: initial?.defaultValue || '',
@@ -275,8 +263,6 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         }
       })
     })
-
-    useCrossRefStore.getState().reindex()
   },
 
   updateUdtMember: (udtId, memberId, updates) => {
@@ -307,8 +293,6 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         }
       })
     })
-
-    useCrossRefStore.getState().reindex()
   },
 
   deleteUdtMember: (udtId, memberId) => {
@@ -339,33 +323,27 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         }
       })
     })
-
-    useCrossRefStore.getState().reindex()
   },
 
   // Code Block operations
   addLadBlock: (block) => {
     set((state) => ({ ladBlocks: [...state.ladBlocks, block] }))
-    useCrossRefStore.getState().reindex()
   },
 
   updateLadBlock: (fileName, updates) => {
     set((state) => ({
       ladBlocks: state.ladBlocks.map((b) => (b.fileName === fileName ? { ...b, ...updates } : b))
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   deleteLadBlock: (fileName) => {
     set((state) => ({
       ladBlocks: state.ladBlocks.filter((b) => b.fileName !== fileName)
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   addSclBlock: (block) => {
     set((state) => ({ sclBlocks: [...state.sclBlocks, normalizeSclBlock(block)] }))
-    useCrossRefStore.getState().reindex()
   },
 
   updateSclBlock: (fileName, updates) => {
@@ -379,14 +357,12 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
         return normalizeSclBlock({ ...b, ...updates, code: nextCode })
       })
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   deleteSclBlock: (fileName) => {
     set((state) => ({
       sclBlocks: state.sclBlocks.filter((b) => b.fileName !== fileName)
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   // Interface variable operations
@@ -408,12 +384,11 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       ladBlocks: state.ladBlocks.map(updateBlock),
       sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? syncInterfaceToSource(updateBlock(b)) : b))
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   addBlockInterfaceVariable: (fileName, section, initial) => {
     const newVar: BlockVariable = {
-      id: `v_if_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: generateId('v_if'),
       name: initial?.name || `Var_${Math.floor(Math.random() * 900 + 100)}`,
       dataType: initial?.dataType || 'BOOL',
       defaultValue: initial?.defaultValue || '',
@@ -438,7 +413,6 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       ladBlocks: state.ladBlocks.map(addVar),
       sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? syncInterfaceToSource(addVar(b)) : b))
     }))
-    useCrossRefStore.getState().reindex()
   },
 
   removeBlockInterfaceVariable: (fileName, section, varId) => {
@@ -458,6 +432,5 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       ladBlocks: state.ladBlocks.map(removeVar),
       sclBlocks: state.sclBlocks.map((b) => (b.fileName === fileName ? syncInterfaceToSource(removeVar(b)) : b))
     }))
-    useCrossRefStore.getState().reindex()
   }
 }))

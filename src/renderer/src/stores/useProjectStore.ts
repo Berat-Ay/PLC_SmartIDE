@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { ProjectMetadata, CpuOperatingState } from '@shared/types/project'
 import { ProjectLoadPayload } from '@shared/types/ipc'
 import { buildInitialProjectPayload } from '@shared/project/createProjectPayload'
+import { ALL_CPU_PROFILES, getCpuProfile } from '@shared/constants/cpuProfiles'
+import { getDefaultCpuConfig } from '@shared/constants/hardwareDefaults'
 import { DemoProjectSeeder } from '../services/DemoProjectSeeder'
 import { CompileEngine, CompileResult } from '../services/CompileEngine'
 import { useHardwareStore } from './useHardwareStore'
@@ -9,6 +11,21 @@ import { useTagStore } from './useTagStore'
 import { useBlockStore } from './useBlockStore'
 import { useCrossRefStore } from './useCrossRefStore'
 import { useUIStore } from './useUIStore'
+import { makeTabId } from '../utils/tabIds'
+import { flushProjectCoordinator, initProjectCoordinator } from './projectCoordinator'
+
+initProjectCoordinator()
+
+type ProjectLifecycleHooks = {
+  onBeforeProjectSwitch?: (prevPath: string | null, nextPath: string) => void
+  onCloseProject?: () => void
+}
+
+const lifecycleHooks: ProjectLifecycleHooks = {}
+
+export function registerProjectLifecycleHooks(hooks: ProjectLifecycleHooks): void {
+  Object.assign(lifecycleHooks, hooks)
+}
 
 export interface CreateProjectOptions {
   name: string
@@ -54,11 +71,18 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   noteLocalWrite: () => set({ lastLocalWriteAt: Date.now() }),
 
   setProject: (payload: ProjectLoadPayload) => {
+    const prevPath = get().projectPath
+    const switchedProject = Boolean(prevPath && prevPath !== payload.projectPath)
+    if (switchedProject) {
+      lifecycleHooks.onBeforeProjectSwitch?.(prevPath, payload.projectPath)
+    }
+
     set({
       metadata: payload.metadata,
       projectPath: payload.projectPath,
       isLoaded: true,
       isDirty: false,
+      lastCompileResult: switchedProject ? null : get().lastCompileResult,
       loadErrors: payload.loadErrors || [],
       simulationScripts: payload.simulationScripts || []
     })
@@ -73,9 +97,8 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       sclBlocks: payload.sclBlocks
     })
 
-    // Run overlap analysis and rebuild cross-reference index
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
+    // Run overlap analysis and rebuild cross-reference index synchronously on project load
+    flushProjectCoordinator(false)
 
     if (payload.loadErrors && payload.loadErrors.length > 0) {
       get().compileProject()
@@ -91,15 +114,18 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       ? payload.ladBlocks[0]?.fileName || 'OB1_Main.lad.json'
       : payload.sclBlocks[0]?.fileName || 'OB1_Main.scl'
 
+    const tabType = isLad ? 'lad' : 'scl'
+    const tabId = makeTabId(tabType, activeFileName)
+
     useUIStore.getState().setTabs([
       {
-        id: activeFileName,
+        id: tabId,
         title: 'OB1_Main',
-        type: isLad ? 'lad' : 'scl',
+        type: tabType,
         targetId: activeFileName
       }
     ])
-    useUIStore.getState().setActiveTab(activeFileName)
+    useUIStore.getState().setActiveTab(tabId)
     useUIStore.getState().setPortalViewOpen(false)
   },
 
@@ -121,12 +147,22 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   },
 
   closeProject: () => {
+    lifecycleHooks.onCloseProject?.()
     set({
       metadata: null,
       projectPath: null,
       isLoaded: false,
-      isDirty: false
+      isDirty: false,
+      cpuState: 'STOP',
+      lastCompileResult: null,
+      loadErrors: [],
+      simulationScripts: []
     })
+    useHardwareStore.getState().setConfig(getDefaultCpuConfig())
+    useTagStore.getState().setTagTables([])
+    useBlockStore.getState().setBlocks({ udts: [], dataBlocks: [], ladBlocks: [], sclBlocks: [] })
+    flushProjectCoordinator(false)
+    useCrossRefStore.getState().setQuery('')
     useUIStore.getState().setTabs([])
     useUIStore.getState().setActiveTab(null)
     useUIStore.getState().setPortalViewOpen(true)
@@ -175,9 +211,8 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   },
 
   compileProject: () => {
-    // Re-run overlap analysis and cross-reference index
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
+    // Ensure overlap analysis and cross-reference index reflect latest edits
+    flushProjectCoordinator(false)
 
     const result = CompileEngine.runFullProjectCompilation()
     for (const loadError of get().loadErrors) {
@@ -195,3 +230,34 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     return result
   }
 }))
+
+// Keep project metadata targetCpu & firmwareVersion synchronized when hardware profile changes
+useHardwareStore.subscribe((state, prev) => {
+  if (state.config.general === prev.config.general) return
+  const meta = useProjectStore.getState().metadata
+  if (!meta) return
+  const profile =
+    (state.config.general.profileId
+      ? ALL_CPU_PROFILES.find((p) => p.id === state.config.general.profileId)
+      : undefined) || getCpuProfile(state.config.general.targetCpu || state.config.general.cpuName)
+  const nextTarget: ProjectMetadata['targetCpu'] =
+    state.config.general.targetCpu === 'Virtual S7-1200' ||
+    state.config.general.targetCpu === 'Virtual S7-1500' ||
+    state.config.general.targetCpu === 'Virtual S7-300'
+      ? state.config.general.targetCpu
+      : profile
+        ? profile.family === 'S7-1200'
+          ? 'Virtual S7-1200'
+          : 'Virtual S7-1500'
+        : meta.targetCpu
+  const nextFw = profile?.firmwareVersion || meta.firmwareVersion
+  if (meta.targetCpu !== nextTarget || meta.firmwareVersion !== nextFw) {
+    useProjectStore.setState({
+      metadata: {
+        ...meta,
+        targetCpu: nextTarget,
+        firmwareVersion: nextFw
+      }
+    })
+  }
+})

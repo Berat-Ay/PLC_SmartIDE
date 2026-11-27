@@ -22,6 +22,8 @@ export interface SclExecutionContext {
   setVar: (symbol: string, value: unknown, quoted?: boolean) => void
   /** Declared S7 type of a symbol, used to tell integer division from REAL division. */
   typeOf?: (symbol: string, quoted?: boolean) => string | undefined
+  /** Declared return type of an FC call. */
+  returnTypeOf?: (name: string, quoted: boolean) => string | undefined
   /** Runs a user block or an instance call. handled=false falls through to built-in functions. */
   callBlock?: (call: SclBlockCall) => { handled: boolean; returnValue?: unknown }
   /** True when callBlock would run this name. Arguments are only evaluated once it is known. */
@@ -32,6 +34,8 @@ export interface SclExecutionContext {
   callFunction?: (name: string, args: Record<string, unknown>) => unknown
   /** Key of a timer or counter instance within the running block. */
   resolveInstanceKey?: (name: string, quoted: boolean) => string
+  /** Instance-scoped edge trigger state map owned by CPU memory. */
+  edgeStates?: Map<string, boolean>
   lineValues?: Record<number, string | number> // lineNumber -> display value for online monitoring
   onError?: (message: string) => void
 }
@@ -41,7 +45,7 @@ const MAX_LOOP_ITERATIONS = 1_000_000
 const PARSE_CACHE_LIMIT = 2000
 
 type ExecResult = 'NORMAL' | 'EXIT' | 'CONTINUE' | 'RETURN'
-type StaticType = 'real' | 'int' | 'bool' | undefined
+type StaticType = 'real' | 'int' | 'bool' | 'string' | undefined
 
 interface ParsedProgram {
   statements: SclStatement[]
@@ -185,7 +189,11 @@ export class SclInterpreter {
       case 'for': {
         const start = Number(this.evaluateNode(stmt.startExpr, context)) || 0
         const end = Number(this.evaluateNode(stmt.endExpr, context)) || 0
-        const step = stmt.stepExpr ? Number(this.evaluateNode(stmt.stepExpr, context)) || 1 : 1
+        const rawStep = stmt.stepExpr ? Number(this.evaluateNode(stmt.stepExpr, context)) : 1
+        if (stmt.stepExpr && (!Number.isFinite(rawStep) || rawStep === 0)) {
+          throw new Error(`Line ${stmt.line}: FOR loop BY step cannot be zero`)
+        }
+        const step = rawStep
 
         for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
           this.countIteration(guard, stmt.line)
@@ -271,36 +279,66 @@ export class SclInterpreter {
     return out
   }
 
+  private static classifyS7Type(typeName: string | undefined): StaticType {
+    if (!typeName) return undefined
+    const t = typeName.toUpperCase()
+    if (/^W?STRING(?:\s*\[|$)/.test(t)) return 'string'
+    if (t === 'REAL' || t === 'LREAL') return 'real'
+    if (t === 'BOOL') return 'bool'
+    return 'int'
+  }
+
   private static staticType(expr: SclExpression, context: SclExecutionContext): StaticType {
     switch (expr.kind) {
       case 'literal':
         if (typeof expr.value === 'boolean') return 'bool'
+        if (typeof expr.value === 'string' && !expr.isTime) return 'string'
         if (expr.isTime) return 'int'
         if (typeof expr.value !== 'number') return undefined
         return /[.eE]/.test(expr.raw) ? 'real' : 'int'
       case 'variable': {
-        const t = context.typeOf?.(expr.name, expr.quoted)?.toUpperCase()
-        if (!t) return undefined
-        if (t === 'REAL' || t === 'LREAL') return 'real'
-        return t === 'BOOL' ? 'bool' : 'int'
+        const expanded = this.expandIndices(expr.name, context)
+        const t = context.typeOf?.(expanded, expr.quoted)
+        return this.classifyS7Type(t)
       }
       case 'unary':
         return this.staticType(expr.expr, context)
       case 'binary': {
-        if (['AND', 'OR', 'XOR'].includes(expr.op.toUpperCase())) return this.staticType(expr.left, context)
-        if (['=', '<>', '<', '>', '<=', '>='].includes(expr.op)) return 'bool'
+        const op = expr.op.toUpperCase()
+        if (['AND', 'OR', 'XOR'].includes(op)) return this.staticType(expr.left, context)
+        if (['=', '<>', '<', '>', '<=', '>='].includes(op)) return 'bool'
         const l = this.staticType(expr.left, context)
         const r = this.staticType(expr.right, context)
+        if (op === '+' && (l === 'string' || r === 'string')) return 'string'
         if (l === 'real' || r === 'real') return 'real'
         return l === 'int' && r === 'int' ? 'int' : undefined
       }
       case 'call_expr': {
         const upper = expr.callee.toUpperCase()
-        const conv = upper.match(/_TO_([A-Z]+)$/)
-        if (conv) return conv[1] === 'REAL' || conv[1] === 'LREAL' ? 'real' : conv[1] === 'BOOL' ? 'bool' : 'int'
-        if (['ROUND', 'TRUNC', 'CEIL', 'FLOOR'].includes(upper)) return 'int'
-        if (['SQRT', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'EXP', 'LN', 'NORM_X', 'SQR'].includes(upper)) return 'real'
-        return undefined
+        const conv = upper.match(/_TO_([A-Z0-9_]+)$/)
+        if (conv) return this.classifyS7Type(conv[1])
+        if (['ROUND', 'TRUNC', 'CEIL', 'FLOOR', 'SHL', 'SHR', 'ROL', 'ROR'].includes(upper)) return 'int'
+        if (['SQRT', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'EXP', 'LN', 'NORM_X', 'SCALE_X', 'SQR'].includes(upper)) {
+          return 'real'
+        }
+        if (['MIN', 'MAX', 'LIMIT'].includes(upper)) {
+          const types = Object.values(expr.args).map((a) => this.staticType(a, context))
+          if (types.includes('real')) return 'real'
+          if (types.includes('int')) return 'int'
+          return undefined
+        }
+        if (upper === 'SEL' || upper === 'MUX') {
+          const dataArgs = Object.entries(expr.args)
+            .filter(([k]) => !['G', 'K', 'arg_0'].includes(k))
+            .map(([, v]) => this.staticType(v, context))
+          if (dataArgs.includes('real')) return 'real'
+          if (dataArgs.includes('string')) return 'string'
+          if (dataArgs.includes('int')) return 'int'
+          if (dataArgs.includes('bool')) return 'bool'
+          return undefined
+        }
+        const fcRet = context.returnTypeOf?.(this.expandIndices(expr.callee, context), !!expr.calleeQuoted)
+        return this.classifyS7Type(fcRet)
       }
     }
   }
@@ -318,7 +356,16 @@ export class SclInterpreter {
       case 'unary': {
         const val = this.evaluateNode(expr.expr, context)
         if (expr.op === 'NOT') {
-          if (typeof val === 'number' && this.staticType(expr.expr, context) === 'int') return ~val
+          if (typeof val === 'number' && this.staticType(expr.expr, context) === 'int') {
+            const declared =
+              expr.expr.kind === 'variable'
+                ? context.typeOf?.(this.expandIndices(expr.expr.name, context), expr.expr.quoted)?.toUpperCase()
+                : undefined
+            if (declared === 'BYTE' || declared === 'USINT') return ~val & 0xff
+            if (declared === 'WORD' || declared === 'UINT') return ~val & 0xffff
+            if (declared === 'DWORD' || declared === 'UDINT') return (~val) >>> 0
+            return ~val
+          }
           return !val
         }
         if (expr.op === '-') return -(Number(val) || 0)
@@ -334,16 +381,26 @@ export class SclInterpreter {
   }
 
   private static evaluateBinary(expr: Extract<SclExpression, { kind: 'binary' }>, context: SclExecutionContext): unknown {
-    const left = this.evaluateNode(expr.left, context)
-    const right = this.evaluateNode(expr.right, context)
     const op = expr.op.toUpperCase()
+    const leftStatic = this.staticType(expr.left, context)
+    const left = this.evaluateNode(expr.left, context)
+
+    // Short-circuit pure boolean AND / OR before evaluating RHS
+    if (op === 'AND' && leftStatic !== 'int' && typeof left === 'boolean' && !left) {
+      return false
+    }
+    if (op === 'OR' && leftStatic !== 'int' && typeof left === 'boolean' && left) {
+      return true
+    }
+
+    const right = this.evaluateNode(expr.right, context)
 
     switch (op) {
       case 'AND':
       case 'OR':
       case 'XOR': {
         // Bit operations on words stay numeric; anything else is logic
-        if (typeof left === 'number' && typeof right === 'number' && this.staticType(expr.left, context) === 'int') {
+        if (typeof left === 'number' && typeof right === 'number' && leftStatic === 'int') {
           if (op === 'AND') return (left & right) >>> 0
           if (op === 'OR') return (left | right) >>> 0
           return (left ^ right) >>> 0
@@ -357,14 +414,25 @@ export class SclInterpreter {
       case '<>':
         return this.comparable(left) !== this.comparable(right)
       case '<':
-        return Number(left) < Number(right)
+        return typeof left === 'string' || typeof right === 'string'
+          ? String(left ?? '') < String(right ?? '')
+          : Number(left) < Number(right)
       case '>':
-        return Number(left) > Number(right)
+        return typeof left === 'string' || typeof right === 'string'
+          ? String(left ?? '') > String(right ?? '')
+          : Number(left) > Number(right)
       case '<=':
-        return Number(left) <= Number(right)
+        return typeof left === 'string' || typeof right === 'string'
+          ? String(left ?? '') <= String(right ?? '')
+          : Number(left) <= Number(right)
       case '>=':
-        return Number(left) >= Number(right)
+        return typeof left === 'string' || typeof right === 'string'
+          ? String(left ?? '') >= String(right ?? '')
+          : Number(left) >= Number(right)
       case '+':
+        if (typeof left === 'string' || typeof right === 'string') {
+          return String(left ?? '') + String(right ?? '')
+        }
         return (Number(left) || 0) + (Number(right) || 0)
       case '-':
         return (Number(left) || 0) - (Number(right) || 0)
@@ -375,10 +443,9 @@ export class SclInterpreter {
       case '/': {
         const l = Number(left) || 0
         const r = Number(right) || 0
-        const lt = this.staticType(expr.left, context)
         const rt = this.staticType(expr.right, context)
-        if (lt === 'int' && rt === 'int') return r !== 0 ? Math.trunc(l / r) : 0
-        if (lt === 'real' || rt === 'real') return l / r
+        if (leftStatic === 'int' && rt === 'int') return r !== 0 ? Math.trunc(l / r) : 0
+        if (leftStatic === 'real' || rt === 'real') return l / r
         return r !== 0 ? l / r : 0
       }
       case 'MOD': {
@@ -453,21 +520,27 @@ export class SclInterpreter {
 
     if (upper === 'R_TRIG' || upper === 'F_TRIG') {
       // Without an instance the state belongs to this call site: this line of this block, or of this FB instance
-      const clk = !!this.evaluateNode(this.argExpr(args, 'CLK', 0) as SclExpression, context)
+      const clkExpr = this.argExpr(args, 'CLK', 0)
+      const clk = clkExpr ? !!this.evaluateNode(clkExpr, context) : false
       const key = `${context.instancePrefix?.() || ''}${upper}@${line}`
-      const state = this.edgeTriggerStates.get(key) || { prevClk: false }
-      const q = upper === 'R_TRIG' ? clk && !state.prevClk : !clk && state.prevClk
-      state.prevClk = clk
-      this.edgeTriggerStates.set(key, state)
+      const prevClk = context.edgeStates
+        ? context.edgeStates.get(key) ?? false
+        : (this.edgeTriggerStates.get(key)?.prevClk ?? false)
+      const q = upper === 'R_TRIG' ? clk && !prevClk : !clk && prevClk
+      if (context.edgeStates) {
+        context.edgeStates.set(key, clk)
+      } else {
+        this.edgeTriggerStates.set(key, { prevClk: clk })
+      }
       const qVar = this.argExpr(args, 'Q', 1)
-      if (qVar && qVar.kind === 'variable') context.setVar(qVar.name, q, qVar.quoted)
+      if (qVar && qVar.kind === 'variable') context.setVar(this.expandIndices(qVar.name, context), q, qVar.quoted)
       return
     }
 
     if (upper === 'NORM_X' || upper === 'SCALE_X') {
       const out = this.evaluateFunctionCall(name, quoted, args, line, context)
       const outVar = this.argExpr(args, 'OUT', 3)
-      if (outVar && outVar.kind === 'variable') context.setVar(outVar.name, out, outVar.quoted)
+      if (outVar && outVar.kind === 'variable') context.setVar(this.expandIndices(outVar.name, context), out, outVar.quoted)
       return
     }
 
@@ -529,8 +602,10 @@ export class SclInterpreter {
         return Math.abs(single())
       case 'SQRT':
         return Math.sqrt(Math.max(0, single()))
-      case 'SQR':
-        return single() * single()
+      case 'SQR': {
+        const v = single()
+        return v * v
+      }
       case 'SIN':
         return Math.sin(single())
       case 'COS':
@@ -573,7 +648,7 @@ export class SclInterpreter {
         return chosen ? this.evaluateNode(chosen, context) : 0
       }
       case 'MUX': {
-        const k = num('K', 0)
+        const k = Math.trunc(num('K', 0))
         const chosen = this.argExpr(args, `IN${k}`, k + 1)
         return chosen ? this.evaluateNode(chosen, context) : 0
       }
@@ -594,17 +669,37 @@ export class SclInterpreter {
       case 'ROL':
       case 'ROR': {
         const inExpr = this.argExpr(args, 'IN', 0)
-        const declared = inExpr?.kind === 'variable' ? context.typeOf?.(inExpr.name, inExpr.quoted)?.toUpperCase() : undefined
+        const expandedIn = inExpr?.kind === 'variable' ? this.expandIndices(inExpr.name, context) : undefined
+        const inQuoted = inExpr?.kind === 'variable' ? inExpr.quoted : undefined
+        const declared = expandedIn ? context.typeOf?.(expandedIn, inQuoted)?.toUpperCase() : undefined
         const width = BIT_WIDTHS[declared || ''] || 32
         const mask = width === 32 ? 0xffffffff : (1 << width) - 1
-        const n = num('N', 1)
-        const value = (num('IN', 0) & mask) >>> 0
-        if (upper === 'SHL') return n >= width ? 0 : ((value << n) & mask) >>> 0
-        if (upper === 'SHR') return n >= width ? 0 : (value >>> n) >>> 0
+        const n = Math.trunc(num('N', 1))
+        const rawIn = Math.trunc(num('IN', 0))
+        const isSigned = declared === 'SINT' || declared === 'INT' || declared === 'DINT'
+
+        if (n <= 0) {
+          return isSigned ? wrapInteger(rawIn, declared!) : (rawIn & mask) >>> 0
+        }
+        if (upper === 'SHL') {
+          const shifted = n >= width ? 0 : (rawIn << n) & mask
+          return isSigned ? wrapInteger(shifted, declared!) : shifted >>> 0
+        }
+        if (upper === 'SHR') {
+          if (isSigned) {
+            const wrapped = wrapInteger(rawIn, declared!)
+            const signExtended = (wrapped << (32 - width)) >> (32 - width)
+            if (n >= width) return signExtended < 0 ? -1 : 0
+            return wrapInteger(signExtended >> n, declared!)
+          }
+          const unsignedVal = (rawIn & mask) >>> 0
+          return n >= width ? 0 : (unsignedVal >>> n) >>> 0
+        }
+        const unsignedVal = (rawIn & mask) >>> 0
         const s = n % width
-        if (s === 0) return value
+        if (s === 0) return unsignedVal
         const left = upper === 'ROL' ? s : width - s
-        return (((value << left) | (value >>> (width - left))) & mask) >>> 0
+        return (((unsignedVal << left) | (unsignedVal >>> (width - left))) & mask) >>> 0
       }
     }
 
@@ -656,6 +751,7 @@ export class SclInterpreter {
     let caseCount = 0
     let forCount = 0
     let whileCount = 0
+    let repeatCount = 0
 
     for (const t of tokens) {
       if (t.type === 'KEYWORD') {
@@ -667,6 +763,8 @@ export class SclInterpreter {
         else if (t.value === 'END_FOR') forCount--
         else if (t.value === 'WHILE') whileCount++
         else if (t.value === 'END_WHILE') whileCount--
+        else if (t.value === 'REPEAT') repeatCount++
+        else if (t.value === 'END_REPEAT') repeatCount--
       }
     }
 
@@ -674,6 +772,7 @@ export class SclInterpreter {
     if (caseCount > 0) blockErrors.push(`Missing 'END_CASE' for ${caseCount} open CASE block(s)`)
     if (forCount > 0) blockErrors.push(`Missing 'END_FOR' for ${forCount} open FOR loop(s)`)
     if (whileCount > 0) blockErrors.push(`Missing 'END_WHILE' for ${whileCount} open WHILE loop(s)`)
+    if (repeatCount > 0) blockErrors.push(`Missing 'END_REPEAT' for ${repeatCount} open REPEAT loop(s)`)
 
     const allErrors = [...parser.errors, ...blockErrors]
     return {

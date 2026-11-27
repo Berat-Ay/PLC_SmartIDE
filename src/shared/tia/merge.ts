@@ -66,8 +66,15 @@ export function mergeTiaImport(current: TiaProjectContents, imported: TiaImportR
 
   // Replacing a LAD block with text would destroy its networks, so the user has to decide that by hand.
   const ladNames = new Set(current.ladBlocks.map((b) => key(b.name)))
+  const existingSclByName = new Map(current.sclBlocks.map((b) => [key(b.name), b]))
   const sclBlocks = imported.sclBlocks.filter((block) => {
-    if (!ladNames.has(key(block.name))) return true
+    if (!ladNames.has(key(block.name))) {
+      const existingScl = existingSclByName.get(key(block.name))
+      if (existingScl && existingScl.blockType !== block.blockType) {
+        result.warnings.push(`${block.name}: imported ${block.blockType} replaces existing ${existingScl.blockType}.`)
+      }
+      return true
+    }
     result.skipped.push(`${block.name}: a LAD block with this name exists in the project.`)
     return false
   })

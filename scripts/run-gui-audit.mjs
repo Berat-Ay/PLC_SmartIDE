@@ -81,25 +81,37 @@ async function runGuiAudit() {
     await window.addInitScript(defineAuditStart)
     await window.evaluate(defineAuditStart)
 
-    // The agent needs a real model, so these scenarios answer Gemini requests inside the renderer.
+    // The agent needs a real model, so these scenarios answer Gemini requests inside the main process.
     // They test the path from the panel to the project. They say nothing about what a model would answer.
-    const useFakeGemini = (reply) =>
-      window.evaluate((body) => {
-        if (!window.__realFetch) window.__realFetch = window.fetch
-        window.fetch = async (url, init) => {
-          if (!String(url).includes('generativelanguage.googleapis.com')) return window.__realFetch(url, init)
+    const useFakeGemini = async (reply) => {
+      await electronApp.evaluate((_mods, body) => {
+        if (!globalThis.__realFetch) globalThis.__realFetch = globalThis.fetch
+        globalThis.fetch = async (url, init) => {
+          if (!String(url).includes('generativelanguage.googleapis.com')) return globalThis.__realFetch(url, init)
           return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
           })
         }
-        window.plcTestContext.AiModelRouter.getInstance().updateConfig({ provider: 'gemini', geminiApiKey: 'audit-fake-key' })
       }, reply)
-    const removeFakeGemini = () =>
-      window.evaluate(() => {
-        if (window.__realFetch) window.fetch = window.__realFetch
-        window.plcTestContext.AiModelRouter.getInstance().updateConfig({ provider: 'gemini', geminiApiKey: '' })
+      await window.evaluate(async () => {
+        await window.electronApi.setSecret('geminiApiKey', 'audit-fake-key')
+        const router = window.plcTestContext.AiModelRouter.getInstance()
+        await router.hydrateSecrets()
+        router.updateConfig({ provider: 'gemini' })
       })
+    }
+    const removeFakeGemini = async () => {
+      await electronApp.evaluate(() => {
+        if (globalThis.__realFetch) globalThis.fetch = globalThis.__realFetch
+      })
+      await window.evaluate(async () => {
+        await window.electronApi.setSecret('geminiApiKey', '')
+        const router = window.plcTestContext.AiModelRouter.getInstance()
+        await router.hydrateSecrets()
+        router.updateConfig({ provider: 'gemini', geminiApiKey: '' })
+      })
+    }
     const hasTag = (name) =>
       window.waitForFunction(
         (tagName) => window.plcTestContext.useTagStore.getState().tagTables.some((t) => t.tags.some((x) => x.name === tagName)),
@@ -795,6 +807,10 @@ async function runGuiAudit() {
     if (countBlockDeletes > 0) {
       console.log('  -> Deleting first secondary block from tree...')
       await blockDeleteBtns.first().click({ force: true })
+      const confirmBtn = window.locator('[data-testid="confirm-modal"] [data-testid="confirm-modal-confirm"]')
+      if (await confirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await confirmBtn.click()
+      }
       await window.waitForTimeout(300)
       const countAfter = await window.locator('[data-testid="tree-delete-block"]').count()
       console.log(`  -> Deletable blocks remaining: ${countAfter} (expected ${countBlockDeletes - 1})`)
@@ -3283,10 +3299,19 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
       optimizedAccess: true,
       variables: []
     }
+    await electronApp.evaluate(({ dialog }, dir) => {
+      const orig = dialog.showOpenDialog.bind(dialog)
+      dialog.showOpenDialog = async (...args) => {
+        dialog.showOpenDialog = orig
+        return { canceled: false, filePaths: [dir] }
+      }
+    }, trashProjectDir)
     const previousProjectPath = await window.evaluate(
       async ({ dir, block }) => {
         const { useBlockStore, useProjectStore } = window.plcTestContext
         const previous = useProjectStore.getState().projectPath
+        const selected = await window.electronApi.selectProjectDirectory()
+        if (!selected) throw new Error('Expected dialog selection for trashProjectDir')
         await window.electronApi.openProject(dir)
         await window.electronApi.saveProjectFile(dir, `blocks/${block.fileName}`, JSON.stringify(block, null, 2))
         useProjectStore.setState({ projectPath: dir })
@@ -3307,25 +3332,26 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
     await trashRow.hover()
 
     // Cancel keeps everything
-    let confirmText = ''
-    window.once('dialog', (dialog) => {
-      confirmText = dialog.message()
-      dialog.dismiss()
-    })
+    const confirmModal = window.locator('[data-testid="confirm-modal"]')
     await trashButton.click()
-    await window.waitForTimeout(500)
+    await confirmModal.waitFor({ state: 'visible', timeout: 5000 })
+    const confirmText = await window.locator('[data-testid="confirm-modal-message"]').innerText()
     if (!confirmText.includes('DB99_AuditTrash') || !confirmText.includes('.trash')) {
       throw new Error(`The delete question did not name the block and .trash: ${confirmText}`)
     }
+    await window.locator('[data-testid="confirm-modal-cancel"]').click()
+    await confirmModal.waitFor({ state: 'hidden', timeout: 5000 })
     if (!(await blockInStore()) || !fs.existsSync(liveFile)) {
       throw new Error('Cancelling the delete question still removed the block or its file')
     }
     console.log('  ✅ PASS: Cancel keeps the block and its file')
 
     // Accept moves the file and removes the block
-    window.once('dialog', (dialog) => dialog.accept())
     await trashRow.hover()
     await trashButton.click()
+    await confirmModal.waitFor({ state: 'visible', timeout: 5000 })
+    await window.locator('[data-testid="confirm-modal-confirm"]').click()
+    await confirmModal.waitFor({ state: 'hidden', timeout: 5000 })
     await window.waitForFunction(
       (name) => !window.plcTestContext.useBlockStore.getState().dataBlocks.some((b) => b.name === name),
       trashBlock.name,
@@ -3340,6 +3366,28 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
     if (await blockInStore()) throw new Error('The file watcher brought the deleted block back')
     console.log('  ✅ PASS: Accept removes the block and moves its file to .trash')
 
+    // Regression check: deleting a block via modal keeps Agent chat input focusable and editable via real mouse + keyboard
+    const agentTabAfterTrash = window.locator('[data-testid="right-dock-tab-agent"]')
+    if (await agentTabAfterTrash.isVisible().catch(() => false)) {
+      await agentTabAfterTrash.click()
+    }
+    const agentPromptAfterTrash = window.locator('[data-testid="agent-input-prompt"]')
+    await agentPromptAfterTrash.waitFor({ state: 'visible', timeout: 5000 })
+    const userSelectAfterTrash = await agentPromptAfterTrash.evaluate((el) => getComputedStyle(el).userSelect)
+    if (userSelectAfterTrash !== 'text') {
+      throw new Error(`Expected agent-input-prompt userSelect="text", got "${userSelectAfterTrash}"`)
+    }
+    const promptBox = await agentPromptAfterTrash.boundingBox()
+    if (!promptBox) throw new Error('agent-input-prompt boundingBox missing after block delete')
+    await window.mouse.click(promptBox.x + promptBox.width / 2, promptBox.y + promptBox.height / 2)
+    await window.keyboard.type('test focus ok', { delay: 10 })
+    const typedVal = await agentPromptAfterTrash.inputValue()
+    if (typedVal !== 'test focus ok') {
+      throw new Error(`Expected real keyboard typing into agent-input-prompt to produce "test focus ok", got "${typedVal}"`)
+    }
+    await agentPromptAfterTrash.fill('')
+    console.log('  ✅ PASS: Agent chat input remains focusable and typable via mouse + keyboard after block delete')
+
     await window.evaluate((previous) => window.plcTestContext.useProjectStore.setState({ projectPath: previous }), previousProjectPath)
     fs.rmSync(trashProjectDir, { recursive: true, force: true })
 
@@ -3349,32 +3397,101 @@ NW 1 "Motor Start/Stop": SERIES( PARALLEL( NO(Start_Btn), NO(Motor_Run) ), NC(St
     const secretsFile = path.join(auditUserData, 'secrets.json')
     const concurrentResult = await window.evaluate(async () => {
       const api = window.electronApi
+      if (typeof api.getSecret !== 'undefined') {
+        throw new Error('Plaintext getSecret must NOT be exposed to the renderer')
+      }
       await Promise.all([api.setSecret('geminiApiKey', 'audit-gemini-value'), api.setSecret('openaiApiKey', '')])
       await Promise.all(
         Array.from({ length: 20 }, (_, i) => api.setSecret(i % 2 ? 'openaiApiKey' : 'geminiApiKey', `audit-value-${i}`))
       )
-      return { gemini: await api.getSecret('geminiApiKey'), openai: await api.getSecret('openaiApiKey') }
+      return await api.getSecretStatus()
     })
-    if (concurrentResult.gemini !== 'audit-value-18' || concurrentResult.openai !== 'audit-value-19') {
-      throw new Error(`Keys saved at the same time were lost: ${JSON.stringify(concurrentResult)}`)
+    if (!concurrentResult.geminiApiKey || !concurrentResult.openaiApiKey) {
+      throw new Error(`Secret status missing after concurrent saves: ${JSON.stringify(concurrentResult)}`)
     }
-    JSON.parse(fs.readFileSync(secretsFile, 'utf-8'))
-    console.log('  ✅ PASS: Saves at the same time keep both keys and a valid file')
+    const rawSecretsAfterConcurrent = JSON.parse(fs.readFileSync(secretsFile, 'utf-8'))
+    const decryptedBoth = await electronApp.evaluate(({ safeStorage }, raw) => {
+      return {
+        gemini: raw.geminiApiKey ? safeStorage.decryptString(Buffer.from(raw.geminiApiKey, 'base64')) : null,
+        openai: raw.openaiApiKey ? safeStorage.decryptString(Buffer.from(raw.openaiApiKey, 'base64')) : null
+      }
+    }, rawSecretsAfterConcurrent)
+    if (decryptedBoth.gemini !== 'audit-value-18' || decryptedBoth.openai !== 'audit-value-19') {
+      throw new Error(`Keys saved at the same time were lost: ${JSON.stringify(decryptedBoth)}`)
+    }
+    console.log('  ✅ PASS: Saves at the same time keep both keys, valid file, and zero plaintext exposure')
 
     // The damaged shape this bug left behind on a real machine
     fs.writeFileSync(secretsFile, '{}geminiApiKey":"damaged"}', 'utf-8')
     const repairResult = await window.evaluate(async () => {
       const api = window.electronApi
-      const afterDamage = await api.getSecret('geminiApiKey')
+      const afterDamage = await api.getSecretStatus()
       await api.setSecret('geminiApiKey', 'audit-after-damage')
-      return { afterDamage, saved: await api.getSecret('geminiApiKey') }
+      return { afterDamage, saved: await api.getSecretStatus() }
     })
-    if (repairResult.afterDamage !== null || repairResult.saved !== 'audit-after-damage') {
-      throw new Error(`A damaged key file blocked saving: ${JSON.stringify(repairResult)}`)
+    const rawSecretsAfterRepair = JSON.parse(fs.readFileSync(secretsFile, 'utf-8'))
+    const decryptedRepaired = await electronApp.evaluate(({ safeStorage }, raw) => {
+      return raw.geminiApiKey ? safeStorage.decryptString(Buffer.from(raw.geminiApiKey, 'base64')) : null
+    }, rawSecretsAfterRepair)
+    if (repairResult.afterDamage.geminiApiKey !== false || !repairResult.saved.geminiApiKey || decryptedRepaired !== 'audit-after-damage') {
+      throw new Error(`A damaged key file blocked saving: ${JSON.stringify({ repairResult, decryptedRepaired })}`)
     }
     await window.evaluate(() => window.electronApi.setSecret('geminiApiKey', ''))
     await window.evaluate(() => window.electronApi.setSecret('openaiApiKey', ''))
     console.log('  ✅ PASS: A damaged key file no longer blocks saving a key again')
+
+    console.log('\n===============================================================')
+    console.log(' SCENARIO 31: Isolated .sim.js Sandbox & 50ms Loop Watchdog')
+    console.log('===============================================================')
+    const simResult = await window.evaluate(async () => {
+      const simStore = window.plcTestContext.useSimulationStore.getState()
+      const runtimeEngine = window.plcTestContext.useRuntimeStore.getState().engine
+      const initialCode = simStore.scenarioCode
+
+      const validRes = await simStore.applyScenarioScript(
+        "export default function definePlantSimulation(physics, runtime, dt) { physics.tankLevelRaw = 12345; runtime.setBit('I', 0, 2, true); }"
+      )
+      const frame = document.querySelector('[data-testid="sim-scenario-sandbox-frame"]')
+      const sandboxAttr = frame ? frame.getAttribute('sandbox') : null
+
+      // Step once to initiate sandbox tick, wait briefly, then step again to apply patch
+      simStore.physics.step(0.01, runtimeEngine)
+      await new Promise((r) => setTimeout(r, 60))
+      simStore.physics.step(0.01, runtimeEngine)
+      const levelAfterValid = simStore.physics.tankLevelRaw
+
+      const syntaxRes = await simStore.applyScenarioScript(
+        'export default function definePlantSimulation(physics, runtime, dt) { const x = ; }'
+      )
+
+      const loopCompileRes = await simStore.applyScenarioScript(
+        'export default function definePlantSimulation() { while (true) {} }'
+      )
+      simStore.physics.step(0.01, runtimeEngine)
+      let loopError = null
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 40))
+        loopError = window.plcTestContext.useSimulationStore.getState().scenarioError
+        if (loopError) break
+      }
+
+      // Restore default scenario cleanly
+      await simStore.applyScenarioScript(initialCode)
+      return { validRes, sandboxAttr, levelAfterValid, syntaxRes, loopCompileRes, loopError }
+    })
+    if (!simResult.validRes?.ok || simResult.sandboxAttr !== 'allow-scripts') {
+      throw new Error(`Sandbox iframe failed to compile valid script: ${JSON.stringify(simResult)}`)
+    }
+    if (simResult.levelAfterValid !== 12345) {
+      throw new Error(`Sandbox valid tick patch was not applied: ${JSON.stringify(simResult)}`)
+    }
+    if (simResult.syntaxRes?.ok !== false || !simResult.syntaxRes?.error) {
+      throw new Error(`Sandbox did not report syntax error: ${JSON.stringify(simResult)}`)
+    }
+    if (!simResult.loopCompileRes?.ok || !simResult.loopError) {
+      throw new Error(`Sandbox 50ms watchdog did not terminate infinite loop: ${JSON.stringify(simResult)}`)
+    }
+    console.log(`  ✅ PASS: rungline-sim:// sandbox verified (sandbox="${simResult.sandboxAttr}", watchdog="${simResult.loopError}")`)
 
     auditResults.passed = true
     const reportPath = path.join(artifactsDir, 'gui_audit_report.json')

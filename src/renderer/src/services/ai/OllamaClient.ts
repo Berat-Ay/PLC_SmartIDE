@@ -1,122 +1,201 @@
-/** Asks a local Ollama server for Compact Ladder DSL. It does not run the agent loop: its circuit is applied as it is */
+/** Asks a local Ollama server via /api/chat (with /api/generate fallback when /api/chat route is unavailable). */
 
-import { LadderDslCompiler } from '../compiler/LadderDslCompiler'
-import { AgentExecutionResponse, AiCircuitSynthesisPayload, AiConfig, AiTier } from './aiTypes'
-import { buildOllamaInstruction } from './AgentInstruction'
-import { applyCircuitPayload } from './ApplyCircuit'
-import { defaultCircuitMode, dslOptions } from './ProjectContext'
+import { AgentCancelledError, AiConfig, AiTier, GeminiContent } from './aiTypes'
+import { isStrictGeminiTextModel } from './aiConfig'
+import { toChatMessages } from './aiClientUtils'
+import { aiHttp } from './aiHttp'
+import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
 
-export async function callOllamaApi(
-  prompt: string,
-  tier: AiTier,
-  mode: 'auto-apply' | 'diff-view',
-  config: AiConfig,
+export interface OllamaRequestOptions {
+  prompt: string
+  tier: AiTier
+  mode: 'auto-apply' | 'diff-view'
+  systemInstruction: string
   signal?: AbortSignal
-): Promise<AgentExecutionResponse> {
-  const endpoint = (config.ollamaEndpoint || 'http://localhost:11434').replace(/\/$/, '')
-  const model = config.selectedModelId || 'qwen2.5-coder'
+  config: AiConfig
+  timeoutMs: number
+  /** Endpoint + model pairs that refused or hung in JSON mode. Shared across turns */
+  noJsonMode?: Set<string>
+}
 
-  const { text: systemInstructionText, consultedRuleNames } = buildOllamaInstruction(prompt)
-
-  const controller = new AbortController()
-  let timedOut = false
-  const timeoutId = setTimeout(() => {
-    timedOut = true
-    controller.abort()
-  }, 25000)
-
-  const onExternalAbort = () => {
-    clearTimeout(timeoutId)
-    controller.abort()
-  }
-
-  if (signal) {
-    if (signal.aborted) {
-      clearTimeout(timeoutId)
-      throw new Error('Synthesis cancelled by user.')
-    }
-    signal.addEventListener('abort', onExternalAbort)
-  }
-
+function parseOllamaError(body: string): string {
   try {
-    const response = await fetch(`${endpoint}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        system: systemInstructionText,
-        prompt,
-        stream: false
-      })
-    })
+    const parsed = JSON.parse(body) as { error?: string }
+    if (typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error.trim()
+  } catch {
+    // not JSON
+  }
+  return body.slice(0, 300)
+}
 
-    if (!response.ok) {
-      throw new Error(`Ollama API HTTP Error: ${response.status} ${response.statusText}`)
+/** Resolves the configured Ollama model without falling back to Gemini model IDs. */
+export function resolveOllamaModel(config: AiConfig): string {
+  const dedicated = (config.ollamaModel || '').trim()
+  if (dedicated) return dedicated
+  const legacySelected = (config.selectedModelId || '').trim()
+  if (legacySelected && !isStrictGeminiTextModel(legacySelected)) return legacySelected
+  return 'qwen2.5-coder:7b'
+}
+
+/**
+ * Sends multi-turn conversation history to a local Ollama server (/api/chat, with automatic
+ * fallback to /api/generate when /api/chat returns route 404, or retry without JSON mode on 400/timeout/empty).
+ */
+export function createOllamaRequester(
+  options: OllamaRequestOptions
+): (contents: GeminiContent[]) => Promise<string> {
+  const { prompt, tier, mode, systemInstruction, signal, config, timeoutMs, noJsonMode } = options
+  const endpoint = (config.ollamaEndpoint || 'http://localhost:11434').replace(/\/+$/, '')
+  const model = resolveOllamaModel(config)
+
+  BlackBoxLogger.getInstance().log('AI_REQUEST', `Ollama API request (${model})`, {
+    prompt,
+    model,
+    endpoint,
+    tier,
+    mode
+  })
+
+  const jsonModeKey = `ollama:${endpoint}|${model}`
+  let jsonMode = !(noJsonMode?.has(jsonModeKey))
+  let useGenerateFallback = false
+
+  const dropJsonMode = (why: string): void => {
+    BlackBoxLogger.getInstance().log(
+      'AI_FALLBACK_OR_RETRY',
+      `Ollama ${model} ${why}. Retrying without format:'json'`,
+      { endpoint, model }
+    )
+    jsonMode = false
+    noJsonMode?.add(jsonModeKey)
+  }
+
+  const requestModel = async (contents: GeminiContent[], allowJsonRetry = true): Promise<string> => {
+    if (signal?.aborted) {
+      throw new AgentCancelledError()
+    }
+    const startMs = Date.now()
+
+    const sendChat = () => {
+      const messages = toChatMessages(systemInstruction, contents)
+      return aiHttp(`${endpoint}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages,
+          stream: false,
+          ...(jsonMode ? { format: 'json' } : {}),
+          options: { temperature: 0.1 }
+        }),
+        timeoutMs,
+        signal,
+        allowPrivateNetwork: config.allowPrivateNetwork
+      })
     }
 
-    const data = await response.json()
-    const rawText = data.response || ''
+    const sendGenerate = () => {
+      const transcript = contents
+        .map((c) => `${c.role === 'model' ? 'ASSISTANT' : 'USER'}:\n${c.parts.map((p) => p.text).join('\n')}`)
+        .join('\n\n')
+      return aiHttp(`${endpoint}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          system: systemInstruction,
+          prompt: transcript,
+          stream: false,
+          ...(jsonMode ? { format: 'json' } : {}),
+          options: { temperature: 0.1 }
+        }),
+        timeoutMs,
+        signal,
+        allowPrivateNetwork: config.allowPrivateNetwork
+      })
+    }
 
-    // 1. Try Ladder DSL compilation first
-    if (
-      rawText.includes('# NETWORK DEFINITIONS') ||
-      rawText.includes('NW ') ||
-      rawText.includes('SERIES(') ||
-      rawText.includes('# TAG DECLARATIONS') ||
-      rawText.includes('TAG ')
-    ) {
-      const cleanDsl = rawText
-        .replace(/^```[a-zA-Z0-9_-]*\r?\n/gm, '')
-        .replace(/```$/gm, '')
-        .trim()
+    let res = useGenerateFallback ? await sendGenerate() : await sendChat()
 
-      const dslResult = LadderDslCompiler.compileLadderDslToAst(cleanDsl, dslOptions())
-      if (dslResult.success && dslResult.networks.length > 0) {
-        const circuitPayload: AiCircuitSynthesisPayload = {
-          explanation: dslResult.explanation || 'Synthesized Ladder Logic via Local Ollama Model.',
-          operationMode: defaultCircuitMode(),
-          tagsToUpsert: dslResult.tags.map((t) => ({
-            name: t.name,
-            dataType: t.dataType as any,
-            address: t.address,
-            comment: t.comment
-          })),
-          networks: dslResult.networks
-        }
-        const result = applyCircuitPayload(circuitPayload, mode)
-        return {
-          replyText: result.summaryText,
-          tier,
-          providerUsed: 'ollama',
-          toolCallsExecuted: [],
-          toolResults: [],
-          ragRulesConsulted: consultedRuleNames,
-          stagedChangeset: result.stagedChangeset
-        }
+    if (res.error === 'cancelled' || signal?.aborted) {
+      throw new AgentCancelledError()
+    }
+
+    if (!useGenerateFallback && res.status === 404) {
+      const errDetail = parseOllamaError(res.body)
+      if (/model\b.*not found/i.test(errDetail)) {
+        throw new Error(`Ollama model '${model}' is not installed (${errDetail}). Pull it with 'ollama pull ${model}'.`)
+      }
+      BlackBoxLogger.getInstance().log(
+        'AI_FALLBACK_OR_RETRY',
+        `Ollama /api/chat returned 404 for ${model}; falling back to /api/generate`,
+        { endpoint, model }
+      )
+      useGenerateFallback = true
+      res = await sendGenerate()
+      if (res.error === 'cancelled' || signal?.aborted) {
+        throw new AgentCancelledError()
       }
     }
 
-    return {
-      replyText: rawText || 'Ollama model produced empty response.',
-      tier,
-      providerUsed: 'ollama',
-      toolCallsExecuted: [],
-      toolResults: [],
-      ragRulesConsulted: consultedRuleNames
+    if (res.status === 400 && jsonMode && !signal?.aborted) {
+      dropJsonMode(`refused JSON format (HTTP 400: ${res.body.slice(0, 200)})`)
+      res = useGenerateFallback ? await sendGenerate() : await sendChat()
     }
-  } catch (err: unknown) {
-    if (timedOut) {
-      throw new Error('Ollama API call timed out after 25 seconds.')
+
+    if (res.error === 'cancelled' || signal?.aborted) {
+      throw new AgentCancelledError()
     }
-    if (signal?.aborted || (err as { name?: string })?.name === 'AbortError') {
-      throw new Error('Synthesis cancelled by user.')
+    if (res.error === 'timeout' && jsonMode && allowJsonRetry) {
+      dropJsonMode(`timed out after ${Math.round(timeoutMs / 1000)} s in JSON mode`)
+      return requestModel(contents, false)
     }
-    throw err
-  } finally {
-    clearTimeout(timeoutId)
-    if (signal) {
-      signal.removeEventListener('abort', onExternalAbort)
+    if (res.error === 'timeout') {
+      throw new Error(`Ollama model ${model} at ${endpoint} did not answer in ${Math.round(timeoutMs / 1000)} s.`)
     }
+    if (res.error) {
+      throw new Error(`Could not reach Ollama at ${endpoint}: ${res.message}`)
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`Ollama HTTP ${res.status}: ${parseOllamaError(res.body) || res.statusText}`)
+    }
+
+    let rawText = ''
+    let hasThinkingOnly = false
+    try {
+      const data = JSON.parse(res.body) as {
+        message?: { content?: string; thinking?: string }
+        response?: string
+        thinking?: string
+      }
+      rawText =
+        typeof data.message?.content === 'string'
+          ? data.message.content
+          : typeof data.response === 'string'
+            ? data.response
+            : ''
+      hasThinkingOnly =
+        !rawText.trim() &&
+        Boolean((typeof data.message?.thinking === 'string' && data.message.thinking.trim()) || (typeof data.thinking === 'string' && data.thinking.trim()))
+    } catch {
+      throw new Error(`Ollama at ${endpoint} answered with invalid JSON: ${res.body.slice(0, 200)}`)
+    }
+
+    if (!rawText.trim() && jsonMode && allowJsonRetry) {
+      dropJsonMode(hasThinkingOnly ? 'returned thinking tokens without answer text in JSON mode' : 'returned empty text in JSON mode')
+      return requestModel(contents, false)
+    }
+    if (!rawText.trim()) {
+      throw new Error(`Ollama model ${model} answered without any text.`)
+    }
+
+    BlackBoxLogger.getInstance().log(
+      'AI_RAW_RESPONSE',
+      `Ollama API response from ${model} (${Date.now() - startMs}ms, ${rawText.length} chars)`,
+      { model, rawSnippet: rawText.substring(0, 500), rawFull: rawText }
+    )
+    return rawText
   }
+
+  return (contents) => requestModel(contents, true)
 }

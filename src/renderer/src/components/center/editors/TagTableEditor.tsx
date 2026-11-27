@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   AlertTriangle,
   Wand2,
@@ -35,13 +36,42 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
     deleteTag,
     autoAssignSafeAddress,
     resolveAllOverlaps
-  } = useTagStore()
-  const { markDirty } = useProjectStore()
-  const { isMonitoring, state: runtimeState, engine, forceValue, liveTagValues } = useRuntimeStore()
+  } = useTagStore(
+    useShallow((s) => ({
+      tagTables: s.tagTables,
+      collisions: s.collisions,
+      selectedTagId: s.selectedTagId,
+      selectTag: s.selectTag,
+      addTag: s.addTag,
+      updateTag: s.updateTag,
+      deleteTag: s.deleteTag,
+      autoAssignSafeAddress: s.autoAssignSafeAddress,
+      resolveAllOverlaps: s.resolveAllOverlaps
+    }))
+  )
+  const markDirty = useProjectStore((s) => s.markDirty)
+  const { isMonitoring, runtimeState, engine, forceValue, liveTagValues, forceOverrides } = useRuntimeStore(
+    useShallow((s) => ({
+      isMonitoring: s.isMonitoring,
+      runtimeState: s.state,
+      engine: s.engine,
+      forceValue: s.forceValue,
+      liveTagValues: s.liveTagValues,
+      forceOverrides: s.forceOverrides
+    }))
+  )
   const showMonitoring = isMonitoring && runtimeState === 'RUN'
 
   const isAllTags = !tableId
   const activeTable = tagTables.find((t) => t.id === tableId)
+
+  if (!isAllTags && !activeTable) {
+    return (
+      <div className="h-full flex items-center justify-center text-industrial-500 italic text-xs">
+        Tag Table not found: {tableId}
+      </div>
+    )
+  }
 
   // Collect tags to display
   const tagsToDisplay: Array<{ tag: TagDefinition; sourceTableId: string; sourceTableName: string }> = []
@@ -90,17 +120,15 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
     currentDataType: string
   ) => {
     const norm = normalizeS7Address(rawVal)
-    if (norm.isValid) {
-      updateTag(srcTableId, tagId, { address: norm.formatted })
-      if (
-        norm.dataTypeDefault &&
-        (currentDataType === 'BOOL' || currentDataType === 'BYTE' || currentDataType === 'INT' || currentDataType === 'DINT')
-      ) {
-        updateTag(srcTableId, tagId, { dataType: norm.dataTypeDefault })
-      }
-    } else {
-      updateTag(srcTableId, tagId, { address: norm.formatted })
+    const patch: Partial<TagDefinition> = { address: norm.formatted }
+    if (
+      norm.isValid &&
+      norm.dataTypeDefault &&
+      (currentDataType === 'BOOL' || currentDataType === 'BYTE' || currentDataType === 'INT' || currentDataType === 'DINT')
+    ) {
+      patch.dataType = norm.dataTypeDefault
     }
+    updateTag(srcTableId, tagId, patch)
     markDirty(true)
   }
 
@@ -126,7 +154,10 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
           {visibleCollisionsCount > 0 ? (
             <button
               data-testid="resolve-overlaps-btn"
-              onClick={resolveAllOverlaps}
+              onClick={() => {
+                resolveAllOverlaps()
+                markDirty(true)
+              }}
               title="Automatically find safe non-overlapping addresses for all colliding tags"
               className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-500 rounded shadow transition-all animate-pulse"
             >
@@ -286,9 +317,22 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
                         (tag.address ? engine.getVariable(tag.address) : undefined) ??
                         (tag.name ? engine.getVariable(tag.name) : undefined)
                       const isBool = tag.dataType === 'BOOL' || typeof liveVal === 'boolean'
+                      const forceKey = tag.address || tag.name
+                      const isForced =
+                        (tag.address && (forceOverrides.has(tag.address) || forceOverrides.has(tag.address.toUpperCase()))) ||
+                        forceOverrides.has(tag.name) ||
+                        forceOverrides.has(tag.name.toUpperCase())
                       return (
                         <td className="py-1 px-3 whitespace-nowrap">
-                          <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                          <div className="flex items-center gap-1 font-mono text-[11px]">
+                            {isForced && (
+                              <span
+                                title="Forced over PLC logic"
+                                className="px-1 py-0.5 bg-amber-950 text-amber-300 border border-amber-700 text-[9px] font-bold rounded-none"
+                              >
+                                F
+                              </span>
+                            )}
                             <span
                               data-testid={`tag-monitor-val-${tag.name}`}
                               className={`px-1.5 py-0.5 rounded-none font-bold ${
@@ -307,10 +351,7 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
                                 e.stopPropagation()
                                 if (isBool) {
                                   const nextVal = !Boolean(liveVal)
-                                  forceValue(tag.address, nextVal, true)
-                                  forceValue(tag.name, nextVal, true)
-                                  engine.setVariable(tag.address, nextVal)
-                                  engine.setVariable(tag.name, nextVal)
+                                  forceValue(forceKey, nextVal, true)
                                 } else {
                                   setModifyTarget({
                                     sourceTableId,
@@ -324,6 +365,20 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
                             >
                               Modify
                             </button>
+                            {isForced && (
+                              <button
+                                data-testid={`tag-unforce-btn-${tag.name}`}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  if (tag.address) forceValue(tag.address, undefined, false)
+                                  forceValue(tag.name, undefined, false)
+                                }}
+                                title="Release force override"
+                                className="px-1.5 py-0.5 rounded-none bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-700 text-[9px] font-sans cursor-pointer whitespace-nowrap"
+                              >
+                                Unforce
+                              </button>
+                            )}
                           </div>
                         </td>
                       )
@@ -356,6 +411,7 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
                             onClick={(e) => {
                               e.stopPropagation()
                               autoAssignSafeAddress(tag.id)
+                              markDirty(true)
                             }}
                             title="Auto-Assign Next Safe Address"
                             className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold text-white bg-amber-600 hover:bg-amber-500 rounded transition-colors whitespace-nowrap cursor-pointer"
@@ -408,10 +464,7 @@ export const TagTableEditor: React.FC<TagTableEditorProps> = ({ tableId }) => {
           const res = parseOnlineValue(val, modifyTarget.tag.dataType)
           if (!res.ok) return
           const { tag } = modifyTarget
-          forceValue(tag.address, res.value, true)
-          forceValue(tag.name, res.value, true)
-          engine.setVariable(tag.address, res.value)
-          engine.setVariable(tag.name, res.value)
+          forceValue(tag.address || tag.name, res.value, true)
           setModifyTarget(null)
         }}
       />

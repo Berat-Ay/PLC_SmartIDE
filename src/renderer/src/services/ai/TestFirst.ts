@@ -104,8 +104,17 @@ export function validateTestProposal(
   if (problems.length > 0) return { tags, problems }
 
   // Unusual but possibly right: asked once, accepted when the model sends the same again
-  const expected = new Set(test.steps.flatMap((s) => Object.keys(s.expect || {})).map((n) => clean(n).toLowerCase()))
-  const unchecked = tags.filter((t) => /^%Q/i.test(t.address) && !expected.has(t.name.toLowerCase())).map((t) => t.name)
+  const expectedNames = new Set(test.steps.flatMap((s) => Object.keys(s.expect || {})).map((n) => clean(n).toLowerCase()))
+  const expectedAddrs = new Set(
+    test.steps
+      .flatMap((s) => Object.keys(s.expect || {}))
+      .map((n) => addressOf(n))
+      .filter((a): a is string => Boolean(a))
+      .map((a) => a.toUpperCase())
+  )
+  const unchecked = tags
+    .filter((t) => /^%Q/i.test(t.address) && !expectedNames.has(t.name.toLowerCase()) && !expectedAddrs.has(t.address.toUpperCase()))
+    .map((t) => t.name)
   if (unchecked.length > 0 && !askedOnce.has('unchecked outputs')) {
     askedOnce.add('unchecked outputs')
     return {
@@ -115,7 +124,10 @@ export function validateTestProposal(
       ]
     }
   }
-  const used = new Set(tags.map((t) => t.address.toUpperCase()))
+  const used = new Set([
+    ...tags.map((t) => t.address.toUpperCase()),
+    ...existingTags.map((t) => normalizeS7Address(t.address).address.toUpperCase()).filter(Boolean)
+  ])
   const missingIo = userIo.filter((a) => !used.has(a.toUpperCase()))
   if (missingIo.length > 0 && !askedOnce.has('user io')) {
     askedOnce.add('user io')

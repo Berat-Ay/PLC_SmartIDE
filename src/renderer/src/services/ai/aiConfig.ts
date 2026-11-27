@@ -50,9 +50,12 @@ export const defaultAiConfig: AiConfig = {
   language: 'auto',
   openaiModel: '',
   openaiModels: [],
+  ollamaModel: 'qwen2.5-coder:7b',
+  ollamaModels: [],
   requestTimeoutSec: 180,
   testFirst: false,
-  acceptanceGate: 'report'
+  acceptanceGate: 'report',
+  allowPrivateNetwork: false
 }
 
 // Newer versions first. At one version: flash, then pro (slow), then flash-lite (weakest); a release before its preview
@@ -109,6 +112,24 @@ export function loadStoredAiConfig(): AiConfig {
       const parsed = { ...defaultAiConfig, ...JSON.parse(saved) }
       // Settings saved by older versions may name the removed offline engine
       if (!parsed.provider || parsed.provider === 'offline_local') parsed.provider = 'gemini'
+      // Migrate legacy configs that stored Ollama models in Gemini's selectedModelId/availableModels
+      if (!Array.isArray(parsed.ollamaModels)) parsed.ollamaModels = []
+      if (parsed.provider === 'ollama') {
+        if (!parsed.ollamaModel && parsed.selectedModelId && !isStrictGeminiTextModel(parsed.selectedModelId)) {
+          parsed.ollamaModel = parsed.selectedModelId
+        }
+        if (parsed.ollamaModels.length === 0 && Array.isArray(parsed.availableModels)) {
+          const nonGemini = parsed.availableModels.filter((m: { id: string }) => !isStrictGeminiTextModel(m.id))
+          if (nonGemini.length > 0) {
+            parsed.ollamaModels = nonGemini
+            parsed.availableModels = defaultAiConfig.availableModels
+          }
+        }
+        if (!isStrictGeminiTextModel(parsed.selectedModelId)) {
+          parsed.selectedModelId = defaultAiConfig.selectedModelId
+        }
+      }
+      if (!parsed.ollamaModel) parsed.ollamaModel = defaultAiConfig.ollamaModel
       // Sanitize selectedModelId and availableModels: purge retired 1.5 and invalid 3.8
       if (parsed.provider === 'gemini') {
         if (

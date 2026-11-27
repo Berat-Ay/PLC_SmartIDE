@@ -186,7 +186,7 @@ export function transpileLadToScl(
 
   const ensureGlobalInstanceDb = (
     rawName: string,
-    kind: 'TON' | 'TOF' | 'TP' | 'CTU' | 'CTD' | 'CTUD' | 'R_TRIG' | 'F_TRIG'
+    kind: 'TON' | 'TOF' | 'TP' | 'TONR' | 'CTU' | 'CTD' | 'CTUD' | 'R_TRIG' | 'F_TRIG'
   ): string => {
     const clean = rawName.replace(/^["']|["']$/g, '').trim() || 'T1'
     if (localNames.has(clean.toLowerCase())) {
@@ -331,7 +331,11 @@ export function transpileLadToScl(
               rlo = andExpr(rlo, `${instRef}.Q`)
             } else {
               const safeBlk = block.name.replace(/[^A-Za-z0-9_]/g, '_')
-              const instDbName = `DB_${safeBlk}_Edge${edgeCounter}`
+              let instDbName = `DB_${safeBlk}_Edge${edgeCounter}`
+              let edgeSuffix = 2
+              while (existingDbs.has(instDbName.toLowerCase())) {
+                instDbName = `DB_${safeBlk}_Edge${edgeCounter}_${edgeSuffix++}`
+              }
               const instRef = ensureGlobalInstanceDb(instDbName, trigKind)
               statements.push(`${indent}${instRef}(CLK := ${op});`)
               rlo = andExpr(rlo, `${instRef}.Q`)
@@ -399,13 +403,20 @@ export function transpileLadToScl(
         const callTarget = instRef.startsWith('#') ? instRef : `${instRef}.${t.timerType}`
         const ptExpr = formatTimePreset(t.ptOperand, netNum)
 
-        const args = [`IN := ${rlo}`, `PT := ${ptExpr}`]
+        const args = [`IN := ${rlo}`]
+        if (t.timerType === 'TONR') {
+          args.push(`R := ${t.rOperand && t.rOperand.trim() ? formatOperand(t.rOperand, netNum) : 'FALSE'}`)
+        }
+        args.push(`PT := ${ptExpr}`)
+        const isPinPlaceholder = (op: string, namesRe: RegExp): boolean =>
+          namesRe.test(op) && !localNames.has(op.replace(/"/g, '').toLowerCase())
+
         const qOp = (t.qOperand || '').trim()
-        if (qOp && !/^(Q|ET)$/i.test(qOp)) {
+        if (qOp && !isPinPlaceholder(qOp, /^(Q|ET)$/i)) {
           args.push(`Q => ${formatOperand(qOp, netNum)}`)
         }
         const etOp = (t.etOperand || '').trim()
-        if (etOp && !/^(Q|ET)$/i.test(etOp) && !/^(LTIME|TIME|LT|T)#/i.test(etOp)) {
+        if (etOp && !isPinPlaceholder(etOp, /^(Q|ET)$/i) && !/^(LTIME|TIME|LT|T)#/i.test(etOp)) {
           args.push(`ET => ${formatOperand(etOp, netNum)}`)
         }
         statements.push(`${indent}${callTarget}(${args.join(', ')});`)
@@ -416,6 +427,9 @@ export function transpileLadToScl(
         const instRef = ensureGlobalInstanceDb(rawInst, c.counterType)
         const callTarget = instRef.startsWith('#') ? instRef : `${instRef}.${c.counterType}`
 
+        const isCounterPlaceholder = (op: string): boolean =>
+          /^(Q|QU|QD|CV)$/i.test(op) && !localNames.has(op.replace(/"/g, '').toLowerCase())
+
         const pvRaw = c.pvOperand !== undefined ? String(c.pvOperand).trim() : ''
         const pvExpr = pvRaw !== '' ? formatOperand(pvRaw, netNum) : '10'
         const rExpr = c.rLdOperand && c.rLdOperand.trim() ? formatOperand(c.rLdOperand, netNum) : 'FALSE'
@@ -425,33 +439,36 @@ export function transpileLadToScl(
             ? andExpr(rlo, formatOperand(c.cuOperand, netNum))
             : rlo
         const cdExpr =
-          c.cdOperand && c.cdOperand.trim()
-            ? formatOperand(c.cdOperand, netNum)
-            : c.counterType === 'CTD'
-              ? rlo
+          c.counterType === 'CTD'
+            ? c.cdOperand && c.cdOperand.trim()
+              ? andExpr(rlo, formatOperand(c.cdOperand, netNum))
+              : rlo
+            : c.cdOperand && c.cdOperand.trim()
+              ? formatOperand(c.cdOperand, netNum)
               : 'FALSE'
 
         const args: string[] = []
         if (c.counterType === 'CTU') {
           args.push(`CU := ${cuExpr}`, `R := ${rExpr}`, `PV := ${pvExpr}`)
           const qOp = (c.qOperand || '').trim()
-          if (qOp && !/^(Q|QU|QD|CV)$/i.test(qOp)) {
+          if (qOp && !isCounterPlaceholder(qOp)) {
             args.push(`Q => ${formatOperand(qOp, netNum)}`)
           }
           const cvOp = (c.cvOperand || '').trim()
-          if (cvOp && !/^(Q|QU|QD|CV)$/i.test(cvOp)) {
+          if (cvOp && !isCounterPlaceholder(cvOp)) {
             args.push(`CV => ${formatOperand(cvOp, netNum)}`)
           }
           statements.push(`${indent}${callTarget}(${args.join(', ')});`)
           rlo = `${instRef}.Q`
         } else if (c.counterType === 'CTD') {
-          args.push(`CD := ${cdExpr}`, `LD := ${rExpr}`, `PV := ${pvExpr}`)
+          const ctdLdExpr = c.ldOperand && c.ldOperand.trim() ? formatOperand(c.ldOperand, netNum) : rExpr
+          args.push(`CD := ${cdExpr}`, `LD := ${ctdLdExpr}`, `PV := ${pvExpr}`)
           const qOp = (c.qOperand || '').trim()
-          if (qOp && !/^(Q|QU|QD|CV)$/i.test(qOp)) {
+          if (qOp && !isCounterPlaceholder(qOp)) {
             args.push(`Q => ${formatOperand(qOp, netNum)}`)
           }
           const cvOp = (c.cvOperand || '').trim()
-          if (cvOp && !/^(Q|QU|QD|CV)$/i.test(cvOp)) {
+          if (cvOp && !isCounterPlaceholder(cvOp)) {
             args.push(`CV => ${formatOperand(cvOp, netNum)}`)
           }
           statements.push(`${indent}${callTarget}(${args.join(', ')});`)
@@ -465,15 +482,15 @@ export function transpileLadToScl(
             `PV := ${pvExpr}`
           )
           const quOp = (c.quOperand || c.qOperand || '').trim()
-          if (quOp && !/^(Q|QU|QD|CV)$/i.test(quOp)) {
+          if (quOp && !isCounterPlaceholder(quOp)) {
             args.push(`QU => ${formatOperand(quOp, netNum)}`)
           }
           const qdOp = (c.qdOperand || '').trim()
-          if (qdOp && !/^(Q|QU|QD|CV)$/i.test(qdOp)) {
+          if (qdOp && !isCounterPlaceholder(qdOp)) {
             args.push(`QD => ${formatOperand(qdOp, netNum)}`)
           }
           const cvOp = (c.cvOperand || '').trim()
-          if (cvOp && !/^(Q|QU|QD|CV)$/i.test(cvOp)) {
+          if (cvOp && !isCounterPlaceholder(cvOp)) {
             args.push(`CV => ${formatOperand(cvOp, netNum)}`)
           }
           statements.push(`${indent}${callTarget}(${args.join(', ')});`)

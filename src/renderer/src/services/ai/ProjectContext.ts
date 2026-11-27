@@ -8,6 +8,7 @@ import { TagDefinition } from '@shared/types/tags'
 import { ProjectLoadPayload } from '@shared/types/ipc'
 import { DslCompilerOptions } from '../compiler/LadderDslCompiler'
 import { AiCircuitSynthesisPayload } from './aiTypes'
+import { walkLadderNodes } from './aiClientUtils'
 
 /** Merker bytes the configured CPU writes itself. */
 export function reservedMerkerBytes(): number[] {
@@ -26,15 +27,76 @@ export function reservedMerkerBytes(): number[] {
 export function tagsKeptWhenReplacingOb1(): TagDefinition[] {
   const { tagTables } = useTagStore.getState()
   const blocks = useBlockStore.getState()
-  const otherProgramText = [
-    JSON.stringify(blocks.ladBlocks.filter((b) => !(b.blockType === 'OB' && b.blockNumber === 1) && b.name !== 'OB1_Main')),
-    ...blocks.sclBlocks.map((b) => b.code)
-  ]
-    .join('\n')
-    .toLowerCase()
+  const referencedIdentifiers = new Set<string>()
+  const addRef = (raw?: string): void => {
+    if (!raw) return
+    const cleaned = raw.replace(/"/g, '').trim().toLowerCase()
+    if (cleaned) referencedIdentifiers.add(cleaned)
+    for (const token of raw.matchAll(/[\p{L}_][\p{L}\p{N}_]*/gu)) {
+      referencedIdentifiers.add(token[0].toLowerCase())
+    }
+    for (const addr of raw.matchAll(/%[IQM][BWD]?\d+(?:\.\d+)?/gi)) {
+      referencedIdentifiers.add(addr[0].toLowerCase())
+    }
+  }
+
+  for (const lad of blocks.ladBlocks) {
+    if ((lad.blockType === 'OB' && lad.blockNumber === 1) || lad.name === 'OB1_Main') continue
+    for (const net of lad.networks || []) {
+      if (net.isSclNetwork && net.sclCode) {
+        addRef(net.sclCode)
+        continue
+      }
+      walkLadderNodes(net.nodes, (n) => {
+        if (n.kind === 'contact') {
+          addRef(n.operand)
+          addRef(n.address)
+          addRef(n.symbolName)
+          addRef(n.edgeTag)
+        } else if (n.kind === 'coil') {
+          addRef(n.operand)
+          addRef(n.address)
+          addRef(n.symbolName)
+        } else if (n.kind === 'timer') {
+          addRef(n.inOperand)
+          addRef(n.ptOperand)
+          addRef(n.qOperand)
+          addRef(n.etOperand)
+        } else if (n.kind === 'counter') {
+          addRef(n.cuOperand)
+          addRef(n.cdOperand)
+          addRef(n.cuCdOperand)
+          addRef(n.rLdOperand)
+          addRef(n.pvOperand)
+          addRef(n.qOperand)
+          addRef(n.quOperand)
+          addRef(n.qdOperand)
+          addRef(n.cvOperand)
+        } else if (n.kind === 'comparator') {
+          addRef(n.op1)
+          addRef(n.op2)
+        } else if (n.kind === 'math') {
+          addRef(n.in1)
+          addRef(n.in2)
+          addRef(n.out)
+          addRef(n.value)
+          addRef(n.min)
+          addRef(n.max)
+        }
+      })
+    }
+  }
+
+  for (const scl of blocks.sclBlocks) {
+    addRef(scl.code)
+  }
+
   return tagTables.flatMap((table, index) =>
     table.tags.filter(
-      (t) => index > 0 || otherProgramText.includes(t.name.toLowerCase()) || otherProgramText.includes(t.address.toLowerCase())
+      (t) =>
+        index > 0 ||
+        referencedIdentifiers.has(t.name.trim().toLowerCase()) ||
+        (t.address ? referencedIdentifiers.has(t.address.trim().toLowerCase()) : false)
     )
   )
 }

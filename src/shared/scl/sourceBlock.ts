@@ -46,18 +46,168 @@ export function emptyInterface(): BlockInterface {
   return { input: [], output: [], inOut: [], static: [], temp: [], constant: [] }
 }
 
-function stripTrailingComment(line: string): { code: string; comment?: string } {
+function stripLineComments(
+  line: string,
+  inBlockComment: boolean
+): { code: string; comment?: string; inBlockComment: boolean } {
+  let code = ''
   let inSingle = false
   let inDouble = false
-  for (let i = 0; i < line.length - 1; i++) {
+  let block = inBlockComment
+  let i = 0
+
+  while (i < line.length) {
     const c = line[i]
-    if (c === "'" && !inDouble) inSingle = !inSingle
-    else if (c === '"' && !inSingle) inDouble = !inDouble
-    else if (c === '/' && line[i + 1] === '/' && !inSingle && !inDouble) {
-      return { code: line.slice(0, i), comment: line.slice(i + 2).trim() }
+    const next = line[i + 1]
+
+    if (block) {
+      if (c === '*' && next === ')') {
+        block = false
+        i += 2
+      } else {
+        i++
+      }
+      continue
+    }
+
+    if (inSingle) {
+      if (c === '$' && i + 1 < line.length) {
+        code += line.slice(i, i + 2)
+        i += 2
+        continue
+      }
+      code += c
+      if (c === "'") inSingle = false
+      i++
+      continue
+    }
+
+    if (inDouble) {
+      code += c
+      if (c === '"') inDouble = false
+      i++
+      continue
+    }
+
+    if (c === "'" ) {
+      inSingle = true
+      code += c
+      i++
+      continue
+    }
+    if (c === '"') {
+      inDouble = true
+      code += c
+      i++
+      continue
+    }
+    if (c === '(' && next === '*') {
+      block = true
+      i += 2
+      continue
+    }
+    if (c === '/' && next === '/') {
+      return { code, comment: line.slice(i + 2).trim(), inBlockComment: block }
+    }
+
+    code += c
+    i++
+  }
+
+  return { code, inBlockComment: block }
+}
+
+function splitTopLevelNames(namesStr: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let inDouble = false
+  for (let i = 0; i < namesStr.length; i++) {
+    const c = namesStr[i]
+    if (c === '"') inDouble = !inDouble
+    if (c === ',' && !inDouble) {
+      if (cur.trim()) out.push(cur.trim())
+      cur = ''
+    } else {
+      cur += c
     }
   }
-  return { code: line }
+  if (cur.trim()) out.push(cur.trim())
+  return out
+}
+
+function parseVariableDeclarationLine(text: string): { names: string[]; dataType: string; defaultValue?: string } | null {
+  let inSingle = false
+  let inDouble = false
+  let semiIdx = -1
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (inSingle) {
+      if (c === '$' && i + 1 < text.length) {
+        i++
+        continue
+      }
+      if (c === "'") inSingle = false
+      continue
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false
+      continue
+    }
+    if (c === "'") inSingle = true
+    else if (c === '"') inDouble = true
+    else if (c === ';') {
+      semiIdx = i
+      break
+    }
+  }
+  if (semiIdx < 0) return null
+  const body = text.slice(0, semiIdx).trim()
+
+  // Locate first ':' (declaration separator) and optional first ':=' (default value separator) outside quotes/brackets
+  let colonIdx = -1
+  let assignIdx = -1
+  inSingle = false
+  inDouble = false
+  let bracketDepth = 0
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]
+    if (inSingle) {
+      if (c === '$' && i + 1 < body.length) {
+        i++
+        continue
+      }
+      if (c === "'") inSingle = false
+      continue
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false
+      continue
+    }
+    if (c === "'") inSingle = true
+    else if (c === '"') inDouble = true
+    else if (c === '[' || c === '(') bracketDepth++
+    else if ((c === ']' || c === ')') && bracketDepth > 0) bracketDepth--
+    else if (c === ':' && bracketDepth === 0) {
+      if (body[i + 1] === '=') {
+        if (colonIdx >= 0 && assignIdx < 0) {
+          assignIdx = i
+          break
+        }
+      } else if (colonIdx < 0) {
+        colonIdx = i
+      }
+    }
+  }
+
+  if (colonIdx < 0) return null
+  const namesPart = body.slice(0, colonIdx).trim()
+  const typePart = (assignIdx >= 0 ? body.slice(colonIdx + 1, assignIdx) : body.slice(colonIdx + 1)).trim()
+  const defaultPart = assignIdx >= 0 ? body.slice(assignIdx + 2).trim() : undefined
+  if (!namesPart || !typePart) return null
+
+  const names = splitTopLevelNames(namesPart)
+  if (names.length === 0) return null
+  return { names, dataType: typePart, defaultValue: defaultPart || undefined }
 }
 
 let idCounter = 0
@@ -84,37 +234,48 @@ function readDeclarations(
   start: number,
   isEnd: (trimmedUpper: string) => boolean,
   retain: boolean,
-  errors: string[]
-): { vars: BlockVariable[]; next: number } {
+  errors: string[],
+  initialBlockComment = false
+): { vars: BlockVariable[]; next: number; inBlockComment: boolean } {
   const vars: BlockVariable[] = []
   let i = start
+  let inBlockComment = initialBlockComment
   while (i < lines.length) {
-    const { code, comment } = stripTrailingComment(lines[i])
-    const text = code.trim()
+    const stripped = stripLineComments(lines[i], inBlockComment)
+    inBlockComment = stripped.inBlockComment
+    const comment = stripped.comment
+    const text = stripped.code.trim()
     i++
     if (!text) continue
-    if (isEnd(text.toUpperCase())) return { vars, next: i }
+    if (isEnd(text.toUpperCase())) return { vars, next: i, inBlockComment }
 
-    const cleaned = text.replace(/\{[^}]*\}/g, ' ')
-    const structMatch = cleaned.match(/^("[^"]+"|[^\s:]+)\s*:\s*struct\s*$/i)
+    const cleaned = text.replace(/\{[^}]*\}/g, ' ').trim()
+    const structMatch = cleaned.match(/^((?:"[^"]+"|[^\s:,]+)(?:\s*,\s*(?:"[^"]+"|[^\s:,]+))*)\s*:\s*((?:array\s*\[.+?\]\s*of\s+)?struct)\s*$/i)
     if (structMatch) {
-      const inner = readDeclarations(lines, i, (u) => /^END_STRUCT\s*;?$/.test(u), retain, errors)
-      const v = makeVariable(structMatch[1].replace(/^"|"$/g, ''), 'Struct', undefined, comment, retain)
-      v.members = inner.vars
-      vars.push(v)
+      const inner = readDeclarations(lines, i, (u) => /^END_STRUCT\s*;?$/.test(u), retain, errors, inBlockComment)
+      inBlockComment = inner.inBlockComment
+      for (const rawName of splitTopLevelNames(structMatch[1])) {
+        const cleanName = rawName.replace(/^"|"$/g, '')
+        const v = makeVariable(cleanName, structMatch[2].trim(), undefined, comment, retain)
+        v.members = inner.vars.map((m) => ({ ...m, id: nextId(m.name) }))
+        vars.push(v)
+      }
       i = inner.next
       continue
     }
 
-    const m = cleaned.match(/^("[^"]+"|[^\s:]+)\s*:\s*(.+?)\s*(?::=\s*(.+?))?\s*;\s*$/)
-    if (!m) {
+    const parsedDecl = parseVariableDeclarationLine(cleaned)
+    if (!parsedDecl) {
       errors.push(`Line ${i}: Cannot read declaration '${text}'`)
       continue
     }
-    vars.push(makeVariable(m[1].replace(/^"|"$/g, ''), m[2].trim(), m[3]?.trim(), comment, retain))
+    for (const rawName of parsedDecl.names) {
+      const cleanName = rawName.replace(/^"|"$/g, '')
+      vars.push(makeVariable(cleanName, parsedDecl.dataType, parsedDecl.defaultValue, comment, retain))
+    }
   }
   errors.push(`Line ${i}: Declaration section is not closed`)
-  return { vars, next: i }
+  return { vars, next: i, inBlockComment }
 }
 
 /** Parses an SCL, DB or UDT source. A fragment without a block header is returned as body only. */
@@ -156,10 +317,12 @@ export function parseSourceBlock(source: string): ParsedSourceBlock {
   const iface = result.interface
   let i = headerLine + 1
   let bodyStart = -1
+  let headerBlockComment = false
 
   while (i < lines.length) {
-    const { code } = stripTrailingComment(lines[i])
-    const text = code.trim()
+    const stripped = stripLineComments(lines[i], headerBlockComment)
+    headerBlockComment = stripped.inBlockComment
+    const text = stripped.code.trim()
     const upper = text.toUpperCase()
     const lineIndex = i
     i++
@@ -202,31 +365,34 @@ export function parseSourceBlock(source: string): ParsedSourceBlock {
     }
 
     if (result.kind === 'UDT' && /^STRUCT\b/.test(upper)) {
-      const decl = readDeclarations(lines, i, (u) => /^END_STRUCT\s*;?$/.test(u), false, result.errors)
+      const decl = readDeclarations(lines, i, (u) => /^END_STRUCT\s*;?$/.test(u), false, result.errors, headerBlockComment)
+      headerBlockComment = decl.inBlockComment
       iface.static.push(...decl.vars)
       i = decl.next
       continue
     }
 
     if (result.kind === 'DB' && /^STRUCT\b/.test(upper)) {
-      const decl = readDeclarations(lines, i, (u) => /^END_STRUCT\s*;?$/.test(u), false, result.errors)
+      const decl = readDeclarations(lines, i, (u) => /^END_STRUCT\s*;?$/.test(u), false, result.errors, headerBlockComment)
+      headerBlockComment = decl.inBlockComment
       iface.static.push(...decl.vars)
       i = decl.next
       continue
     }
 
-    const varMatch = upper.match(/^VAR(_INPUT|_OUTPUT|_IN_OUT|_TEMP|_STAT)?(\s+\w+)?\s*$/)
+    const varMatch = upper.match(/^VAR(_INPUT|_OUTPUT|_IN_OUT|_TEMP|_STAT|_CONSTANT)?(\s+\w+)?\s*$/)
     if (varMatch) {
       const qualifier = (varMatch[2] || '').trim()
       const retain = qualifier === 'RETAIN'
-      const decl = readDeclarations(lines, i, (u) => /^END_VAR\s*;?$/.test(u), retain, result.errors)
+      const decl = readDeclarations(lines, i, (u) => /^END_VAR\s*;?$/.test(u), retain, result.errors, headerBlockComment)
+      headerBlockComment = decl.inBlockComment
       i = decl.next
       const section = varMatch[1]
       if (section === '_INPUT') iface.input.push(...decl.vars)
       else if (section === '_OUTPUT') iface.output.push(...decl.vars)
       else if (section === '_IN_OUT') iface.inOut.push(...decl.vars)
       else if (section === '_TEMP') iface.temp.push(...decl.vars)
-      else if (qualifier === 'CONSTANT') iface.constant.push(...decl.vars)
+      else if (section === '_CONSTANT' || qualifier === 'CONSTANT') iface.constant.push(...decl.vars)
       else iface.static.push(...decl.vars)
       continue
     }

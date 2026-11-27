@@ -38,3 +38,6 @@ artifacts/
 # Benchmark results and diagnostic dumps: raw model output, kept local
 bench-results/
 dumps/
+
+# Local graphify knowledge graph
+graphify-out/

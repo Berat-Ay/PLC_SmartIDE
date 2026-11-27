@@ -6,6 +6,9 @@ import {
   Download
 } from 'lucide-react'
 import { useRuntimeStore } from '../../stores/useRuntimeStore'
+import { buildTraceCsv, escapeCsvCell } from '../../utils/csv'
+
+export { buildTraceCsv, escapeCsvCell }
 
 export interface TraceChannel {
   id: string
@@ -15,6 +18,8 @@ export interface TraceChannel {
   color: string
   enabled: boolean
 }
+
+let activeTraceRecorders = 0
 
 export type TriggerMode = 'FREE_RUN' | 'RISING_EDGE' | 'OB82_FAULT'
 export type TriggerState = 'RUNNING' | 'ARMED' | 'TRIGGERED' | 'STOPPED'
@@ -36,7 +41,8 @@ const DEFAULT_CHANNELS: TraceChannel[] = [
 ]
 
 export const TraceOscilloscope: React.FC = () => {
-  const { currentSnapshot, engine } = useRuntimeStore()
+  const currentSnapshot = useRuntimeStore((s) => s.currentSnapshot)
+  const engine = useRuntimeStore((s) => s.engine)
 
   // Trace channels state
   const [channels, setChannels] = useState<TraceChannel[]>(DEFAULT_CHANNELS)
@@ -56,16 +62,28 @@ export const TraceOscilloscope: React.FC = () => {
   const lastTriggerBitValRef = useRef<boolean>(false)
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const drawTraceRef = useRef<() => void>(() => {})
 
-  // Keep engine informed when trace recording is active so full 100 Hz snapshots retain data
+  // Keep engine informed when at least one TraceOscilloscope instance is recording
   useEffect(() => {
-    engine.setTraceRecordingActive(triggerState === 'RUNNING' || triggerState === 'ARMED')
-    return () => {
+    const isActive = triggerState === 'RUNNING' || triggerState === 'ARMED'
+    if (isActive) {
+      activeTraceRecorders++
+      engine.setTraceRecordingActive(true)
+    } else if (activeTraceRecorders === 0) {
       engine.setTraceRecordingActive(false)
+    }
+    return () => {
+      if (isActive) {
+        activeTraceRecorders = Math.max(0, activeTraceRecorders - 1)
+        if (activeTraceRecorders === 0) {
+          engine.setTraceRecordingActive(false)
+        }
+      }
     }
   }, [engine, triggerState])
 
-  // The drawing buffer follows the element's size, or the plot and its labels get stretched and blurred
+  // Resize observer keeps canvas crisp and redraws on size change
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return undefined
@@ -73,6 +91,7 @@ export const TraceOscilloscope: React.FC = () => {
       if (canvas.clientWidth > 0 && canvas.clientHeight > 0) {
         canvas.width = canvas.clientWidth
         canvas.height = canvas.clientHeight
+        drawTraceRef.current()
       }
     }
     fit()
@@ -81,73 +100,73 @@ export const TraceOscilloscope: React.FC = () => {
     return () => observer.disconnect()
   }, [])
 
-  // Drain all newly recorded 100 Hz ring-buffer frames since the last rendered cycle
+  // Window cursor drag listeners so dragging outside canvas bounds doesn't get stuck
   useEffect(() => {
-    if (!currentSnapshot || triggerState === 'STOPPED') return
-
-    if (currentSnapshot.cycleNumber < lastCycleRef.current) {
-      lastCycleRef.current = 0
+    if (!activeCursorDrag) return
+    const handleWindowMove = (e: MouseEvent) => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      if (!rect.width) return
+      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+      if (activeCursorDrag === 'A') setCursorA(frac)
+      else setCursorB(frac)
     }
+    const handleWindowUp = () => setActiveCursorDrag(null)
+    window.addEventListener('mousemove', handleWindowMove)
+    window.addEventListener('mouseup', handleWindowUp)
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMove)
+      window.removeEventListener('mouseup', handleWindowUp)
+    }
+  }, [activeCursorDrag])
 
-    const newFrames = engine.getHistorySince(lastCycleRef.current)
-    if (newFrames.length === 0) return
-
-    let nextTriggerState: TriggerState | null = null
-    for (const snap of newFrames) {
-      const vals: Record<string, number | boolean> = {}
-      channels.forEach((ch) => {
-        const val = engine.getVariableFromSnapshot(snap, ch.address)
-        if (ch.type === 'BOOL') {
-          vals[ch.id] = !!val
-        } else {
-          vals[ch.id] = typeof val === 'number' ? val : Number(val) || 0
-        }
-      })
-
-      samplesRef.current.push({
-        timestamp: snap.timestamp,
-        cycle: snap.cycleNumber,
-        triggeringOb: snap.triggeringOb,
-        values: vals
-      })
-
-      if (triggerState === 'ARMED' && nextTriggerState === null) {
-        if (triggerMode === 'RISING_EDGE') {
-          const curBit = !!vals[triggerChannelId]
-          if (!lastTriggerBitValRef.current && curBit) {
-            nextTriggerState = 'TRIGGERED'
-          }
-          lastTriggerBitValRef.current = curBit
-        } else if (triggerMode === 'OB82_FAULT' && snap.triggeringOb === 82) {
-          nextTriggerState = 'TRIGGERED'
-        }
+  // Drain newly recorded frames and redraw on demand (zero idle 60 FPS loop when paused/empty)
+  useEffect(() => {
+    if (currentSnapshot && triggerState !== 'STOPPED') {
+      if (currentSnapshot.cycleNumber < lastCycleRef.current) {
+        lastCycleRef.current = 0
       }
 
-      lastCycleRef.current = snap.cycleNumber
+      const newFrames = engine.getHistorySince(lastCycleRef.current)
+      let nextTriggerState: TriggerState | null = null
+      for (const snap of newFrames) {
+        const vals: Record<string, number | boolean> = {}
+        channels.forEach((ch) => {
+          const val = engine.getVariableFromSnapshot(snap, ch.address)
+          vals[ch.id] = ch.type === 'BOOL' ? !!val : typeof val === 'number' ? val : Number(val) || 0
+        })
+
+        samplesRef.current.push({
+          timestamp: snap.timestamp,
+          cycle: snap.cycleNumber,
+          triggeringOb: snap.triggeringOb,
+          values: vals
+        })
+
+        if (triggerState === 'ARMED' && nextTriggerState === null) {
+          if (triggerMode === 'RISING_EDGE') {
+            const curBit = !!vals[triggerChannelId]
+            if (!lastTriggerBitValRef.current && curBit) {
+              nextTriggerState = 'TRIGGERED'
+            }
+            lastTriggerBitValRef.current = curBit
+          } else if (triggerMode === 'OB82_FAULT' && snap.triggeringOb === 82) {
+            nextTriggerState = 'TRIGGERED'
+          }
+        }
+
+        lastCycleRef.current = snap.cycleNumber
+      }
+
+      if (nextTriggerState) setTriggerState(nextTriggerState)
+
+      if (samplesRef.current.length > 4000) {
+        samplesRef.current.splice(0, samplesRef.current.length - 4000)
+      }
     }
-
-    if (nextTriggerState) {
-      setTriggerState(nextTriggerState)
-    }
-
-    // Limit buffer to 4,000 samples (~40s at 10ms)
-    if (samplesRef.current.length > 4000) {
-      samplesRef.current.splice(0, samplesRef.current.length - 4000)
-    }
-  }, [currentSnapshot, triggerState, channels, triggerMode, triggerChannelId, engine])
-
-  // Continuous 60 FPS Canvas Drawing Loop
-  useEffect(() => {
-    let animId: number
-
-    const render = () => {
-      drawTrace()
-      animId = requestAnimationFrame(render)
-    }
-
-    animId = requestAnimationFrame(render)
-    return () => cancelAnimationFrame(animId)
-  }, [timebaseMs, cursorA, cursorB, channels, triggerState])
+    drawTraceRef.current()
+  }, [currentSnapshot, timebaseMs, cursorA, cursorB, channels, triggerState, triggerMode, triggerChannelId, engine])
 
   const drawTrace = () => {
     const canvas = canvasRef.current
@@ -321,6 +340,7 @@ export const TraceOscilloscope: React.FC = () => {
     ctx.font = 'bold 10px monospace'
     ctx.fillText('B', xB - 3, 13)
   }
+  drawTraceRef.current = drawTrace
 
   // Handle cursor dragging
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -364,25 +384,23 @@ export const TraceOscilloscope: React.FC = () => {
   const deltaT = Math.abs(cursorB - cursorA) * timebaseMs
   const freqHz = deltaT > 0 ? (1000 / deltaT).toFixed(2) : '0'
 
-  // Export Trace CSV
+  // Export Trace CSV via Blob URL (safe for special characters & 4,000+ samples)
   const exportCsv = () => {
     const samples = samplesRef.current
     if (samples.length === 0) return
 
     const headers = ['timestamp_ms', 'cycle', 'triggeringOb', ...channels.map((c) => c.name)]
-    const rows = samples.map((s) => {
-      const vals = channels.map((c) => s.values[c.id])
-      return [s.timestamp, s.cycle, s.triggeringOb, ...vals].join(',')
-    })
-
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n')
-    const encodedUri = encodeURI(csvContent)
+    const rows = samples.map((s) => [s.timestamp, s.cycle, s.triggeringOb, ...channels.map((c) => s.values[c.id])])
+    const csvText = buildTraceCsv(headers, rows)
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
-    link.setAttribute('href', encodedUri)
+    link.setAttribute('href', url)
     link.setAttribute('download', `S7_Trace_Export_${Date.now()}.csv`)
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+    URL.revokeObjectURL(url)
   }
 
   return (
@@ -412,6 +430,9 @@ export const TraceOscilloscope: React.FC = () => {
           <button
             onClick={() => {
               samplesRef.current = []
+              lastCycleRef.current = 0
+              lastTriggerBitValRef.current = false
+              drawTraceRef.current()
             }}
             className="flex items-center gap-1 px-2.5 py-1 rounded bg-industrial-800 hover:bg-industrial-700 text-industrial-300 transition-all"
             title="Clear Trace Buffer"

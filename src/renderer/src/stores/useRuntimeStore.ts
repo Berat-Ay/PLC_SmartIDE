@@ -5,14 +5,18 @@ import {
   RuntimeWorkerMetrics
 } from '@shared/types/runtime'
 import { PlcRuntimeEngine } from '../runtime/PlcRuntimeEngine'
-import { useProjectStore } from './useProjectStore'
+import { PlcRuntimeWorkerClient } from '../runtime/PlcRuntimeWorkerClient'
+import { registerProjectLifecycleHooks, useProjectStore } from './useProjectStore'
 import { useHardwareStore } from './useHardwareStore'
 import { useTagStore } from './useTagStore'
 import { useBlockStore } from './useBlockStore'
 import { useUIStore } from './useUIStore'
+import { registerWorkerSyncHook } from './projectCoordinator'
 
 interface RuntimeStoreState {
   engine: PlcRuntimeEngine
+  runtimeMode: 'worker' | 'main-thread'
+  workerEnabled: boolean
   state: RuntimeOperatingState
   isMonitoring: boolean // [MONITOR ON/OFF]
   metrics: RuntimeWorkerMetrics
@@ -30,6 +34,7 @@ interface RuntimeStoreState {
   reset: () => void
   toggleMonitoring: () => void
   setMonitoring: (monitor: boolean) => void
+  setWorkerEnabled: (enabled: boolean) => void
   forceValue: (addressOrSymbol: string, value: unknown, active: boolean) => void
   freezeScan: () => void
   resumeLive: () => void
@@ -37,6 +42,7 @@ interface RuntimeStoreState {
   stepCycle: (delta: number) => void
   jumpToLastEdge: (symbolOrAddress: string) => void
   injectFault: (channel?: string) => void
+  clearFault: (channel?: string) => void
   syncProjectToEngine: () => void
 }
 
@@ -59,14 +65,94 @@ defaultEngine.setLiveProjectProvider({
   udts: () => useBlockStore.getState().udts
 })
 
+const workerClient = new PlcRuntimeWorkerClient()
+
+export const syncLiveStateToWorker = (): void => {
+  if (!workerClient.isRunning()) return
+  const blocks = useBlockStore.getState()
+  workerClient.post({
+    type: 'syncLiveProject',
+    tagTables: useTagStore.getState().tagTables,
+    ladBlocks: blocks.ladBlocks,
+    sclBlocks: blocks.sclBlocks,
+    dataBlocks: blocks.dataBlocks,
+    udts: blocks.udts,
+    hardware: useHardwareStore.getState().config
+  })
+}
+
+registerWorkerSyncHook(syncLiveStateToWorker)
+
 export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
+  const attachExternalSink = (): void => {
+    defaultEngine.setExternalWriteSink((cmd) => {
+      if (!workerClient.isRunning()) return
+      if (cmd.kind === 'setVariable') {
+        workerClient.post({ type: 'setVariable', symbolOrAddress: cmd.symbolOrAddress, value: cmd.value })
+      } else if (cmd.kind === 'setBit') {
+        workerClient.post({ type: 'setBit', area: cmd.area, byte: cmd.byte, bit: cmd.bit, value: cmd.value })
+      } else if (cmd.kind === 'setByte') {
+        workerClient.post({ type: 'setByte', area: cmd.area, byte: cmd.byte, value: cmd.value })
+      } else if (cmd.kind === 'setWord') {
+        workerClient.post({ type: 'setWord', area: cmd.area, byte: cmd.byte, value: cmd.value })
+      } else if (cmd.kind === 'setDWord') {
+        workerClient.post({ type: 'setDWord', area: cmd.area, byte: cmd.byte, value: cmd.value })
+      } else if (cmd.kind === 'setForcedValue') {
+        workerClient.post({ type: 'setForcedValue', addressOrSymbol: cmd.addressOrSymbol, value: cmd.value, active: cmd.active })
+      } else if (cmd.kind === 'setTraceRecording') {
+        workerClient.post({ type: 'setTraceRecording', active: cmd.active })
+      } else if (cmd.kind === 'injectHardwareFault') {
+        workerClient.post({ type: 'injectFault', channel: cmd.channel })
+      } else if (cmd.kind === 'clearHardwareFault') {
+        workerClient.post({ type: 'clearFault', channel: cmd.channel })
+      }
+    })
+  }
+
+  workerClient.setOnStateChange((state) => {
+    set({ state })
+    useProjectStore.getState().setCpuState(state === 'RUN' ? 'RUN' : state === 'ERROR' ? 'ERROR' : 'STOP')
+  })
+
+  workerClient.setOnSnapshotBatch((batch) => {
+    defaultEngine.ingestWorkerFrame(
+      batch.snapshot,
+      batch.historyDelta,
+      batch.metrics,
+      batch.timerStates,
+      batch.counterStates,
+      batch.dbBytes
+    )
+    const { timeTravelActive, isMonitoring } = get()
+    const liveTagValues = isMonitoring ? batch.liveTagValues : get().liveTagValues
+    if (!timeTravelActive) {
+      set({ currentSnapshot: batch.snapshot, metrics: batch.metrics, liveTagValues })
+    } else {
+      set({ metrics: batch.metrics, liveTagValues })
+    }
+  })
+
+  workerClient.setOnError((message) => {
+    console.error('[PLC Runtime Worker] Worker failed:', message)
+    workerClient.dispose()
+    defaultEngine.setExternalWriteSink(undefined)
+    set((s) => ({
+      runtimeMode: 'main-thread',
+      state: 'ERROR',
+      metrics: { ...s.metrics, state: 'ERROR' }
+    }))
+    useProjectStore.getState().setCpuState('ERROR')
+  })
+
   defaultEngine.setOnStateChange((state) => {
+    if (get().runtimeMode === 'worker' && workerClient.isRunning()) return
     set({ state })
     // Also sync to project store CPU badge
     useProjectStore.getState().setCpuState(state === 'RUN' ? 'RUN' : state === 'ERROR' ? 'ERROR' : 'STOP')
   })
 
   defaultEngine.setOnSnapshot((snapshot, metrics) => {
+    if (get().runtimeMode === 'worker' && workerClient.isRunning()) return
     const { timeTravelActive, isMonitoring } = get()
     const liveTagValues = isMonitoring ? defaultEngine.getLiveTagValues() : get().liveTagValues
     if (!timeTravelActive) {
@@ -79,6 +165,8 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
 
   return {
     engine: defaultEngine,
+    runtimeMode: 'main-thread',
+    workerEnabled: workerClient.isAvailable(),
     state: 'STOP',
     isMonitoring: false,
     metrics: initialMetrics,
@@ -89,16 +177,28 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
     scrubbedIndex: 0,
     forceOverrides: new Map(),
 
+    setWorkerEnabled: (workerEnabled) => {
+      if (!workerEnabled && workerClient.isRunning()) {
+        workerClient.post({ type: 'stop' })
+        workerClient.dispose()
+        defaultEngine.setExternalWriteSink(undefined)
+        set({ workerEnabled: false, runtimeMode: 'main-thread' })
+      } else {
+        set({ workerEnabled })
+      }
+    },
+
     syncProjectToEngine: () => {
-      const { engine } = get()
-      const metadata = useProjectStore.getState().metadata
+      const { engine, runtimeMode } = get()
+      const projectState = useProjectStore.getState()
+      const metadata = projectState.metadata
       const hardware = useHardwareStore.getState().config
       const tagTables = useTagStore.getState().tagTables
       const { udts, dataBlocks, ladBlocks, sclBlocks } = useBlockStore.getState()
 
       if (metadata) {
-        engine.loadProject({
-          projectPath: metadata.projectPath || '',
+        const payload = {
+          projectPath: projectState.projectPath || metadata.projectPath || '',
           metadata,
           hardware,
           tagTables,
@@ -106,7 +206,11 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
           dataBlocks,
           ladBlocks,
           sclBlocks
-        })
+        }
+        engine.loadProject(payload)
+        if (runtimeMode === 'worker' && workerClient.isRunning()) {
+          workerClient.post({ type: 'loadProject', payload })
+        }
       }
     },
 
@@ -120,28 +224,70 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
         return false
       }
 
+      if (get().workerEnabled && workerClient.ensureStarted()) {
+        attachExternalSink()
+        const projectState = useProjectStore.getState()
+        const metadata = projectState.metadata!
+        const blocks = useBlockStore.getState()
+        const payload = {
+          projectPath: projectState.projectPath || metadata.projectPath || '',
+          metadata,
+          hardware: useHardwareStore.getState().config,
+          tagTables: useTagStore.getState().tagTables,
+          udts: blocks.udts,
+          dataBlocks: blocks.dataBlocks,
+          ladBlocks: blocks.ladBlocks,
+          sclBlocks: blocks.sclBlocks
+        }
+        get().engine.loadProject(payload)
+        workerClient.post({ type: 'loadProject', payload })
+        workerClient.post({ type: 'setMonitoring', enabled: get().isMonitoring })
+        workerClient.post({ type: 'setTraceRecording', active: get().engine.isTraceRecordingActive() })
+        workerClient.post({ type: 'start' })
+        set({ runtimeMode: 'worker', state: 'RUN', timeTravelActive: false, scrubbedSnapshot: null })
+        useProjectStore.getState().setCpuState('RUN')
+        return true
+      }
+
       get().syncProjectToEngine()
       get().engine.start()
       const running = get().engine.getState()
-      set({ state: running, timeTravelActive: false, scrubbedSnapshot: null })
+      set({ runtimeMode: 'main-thread', state: running, timeTravelActive: false, scrubbedSnapshot: null })
       useProjectStore.getState().setCpuState(running === 'RUN' ? 'RUN' : running === 'ERROR' ? 'ERROR' : 'STOP')
       return running === 'RUN'
     },
 
     stop: () => {
+      if (get().runtimeMode === 'worker' && workerClient.isRunning()) {
+        workerClient.post({ type: 'stop' })
+      }
       get().engine.stop()
       set({ state: 'STOP' })
       useProjectStore.getState().setCpuState('STOP')
     },
 
     reset: () => {
+      if (get().runtimeMode === 'worker' && workerClient.isRunning()) {
+        workerClient.post({ type: 'reset' })
+      }
       get().engine.reset()
-      set({ timeTravelActive: false, scrubbedSnapshot: null, scrubbedIndex: 0, liveTagValues: {} })
+      set({
+        state: 'STOP',
+        timeTravelActive: false,
+        scrubbedSnapshot: null,
+        scrubbedIndex: 0,
+        liveTagValues: {},
+        forceOverrides: new Map()
+      })
+      useProjectStore.getState().setCpuState('STOP')
     },
 
     toggleMonitoring: () => {
       const next = !get().isMonitoring
       get().engine.setMonitoringEnabled(next)
+      if (get().runtimeMode === 'worker' && workerClient.isRunning()) {
+        workerClient.post({ type: 'setMonitoring', enabled: next })
+      }
       set({
         isMonitoring: next,
         liveTagValues: next ? get().engine.getLiveTagValues() : {}
@@ -150,6 +296,9 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
 
     setMonitoring: (isMonitoring) => {
       get().engine.setMonitoringEnabled(isMonitoring)
+      if (get().runtimeMode === 'worker' && workerClient.isRunning()) {
+        workerClient.post({ type: 'setMonitoring', enabled: isMonitoring })
+      }
       set({
         isMonitoring,
         liveTagValues: isMonitoring ? get().engine.getLiveTagValues() : {}
@@ -224,8 +373,33 @@ export const useRuntimeStore = create<RuntimeStoreState>((set, get) => {
     },
 
     injectFault: (channel = '%IW64') => {
-      get().engine.injectHardwareFault(channel)
+      if (get().runtimeMode === 'worker' && workerClient.isRunning()) {
+        workerClient.post({ type: 'injectFault', channel })
+      } else {
+        get().engine.injectHardwareFault(channel)
+      }
+    },
+
+    clearFault: (channel = '%IW64') => {
+      if (get().runtimeMode === 'worker' && workerClient.isRunning()) {
+        workerClient.post({ type: 'clearFault', channel })
+      } else {
+        get().engine.clearHardwareFault(channel)
+      }
     }
+  }
+})
+
+registerProjectLifecycleHooks({
+  onBeforeProjectSwitch: () => {
+    const rt = useRuntimeStore.getState()
+    rt.stop()
+    rt.reset()
+  },
+  onCloseProject: () => {
+    const rt = useRuntimeStore.getState()
+    rt.stop()
+    rt.reset()
   }
 })
 

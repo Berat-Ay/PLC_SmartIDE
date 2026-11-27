@@ -11,7 +11,8 @@ import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
 import { AcceptanceGate, AcceptanceSummary, formatAcceptanceLine, matchScenario, Scenario } from '../scenarios/ScenarioAcceptance'
 import { SCENARIOS } from '../scenarios/scenarios'
 import { approvedTagsMoved, approvedTestRequest, formatTestForUser, ProposedTag, TEST_FIRST_REQUEST, validateTestProposal } from './TestFirst'
-import { AddressMove, AgentExecutionResponse, AiCircuitSynthesisPayload, AiProvider, AiTier, GeminiContent } from './aiTypes'
+import { AddressMove, AgentExecutionResponse, AiCircuitSynthesisPayload, AiProvider, AiTier, GeminiContent, isAgentAbortError } from './aiTypes'
+import { extractBitAddresses } from './aiClientUtils'
 import { READ_ONLY_TOOLS } from './AgentInstruction'
 import { extractValidJsonBlock, interpretModelReply } from './ModelReply'
 import { checkCircuitBehavior, judgeAcceptance } from './BehaviorCheck'
@@ -20,6 +21,7 @@ import { RESERVED_BYTE_OCCUPANT } from './GeneratedCircuit'
 
 const MAX_AGENT_ROUNDS = 6
 const MAX_TEST_ROUNDS = 3
+const MAX_READ_ROUNDS = 4
 
 /** Test first: write the test (or correct it), or write the circuit to an approved test */
 export type TurnPlan =
@@ -46,25 +48,60 @@ export interface AgentTurnContext {
   requestModel: (contents: GeminiContent[]) => Promise<string>
   provider: AiProvider
   acceptanceGate: AcceptanceGate
+  signal?: AbortSignal
   /** Test first: the model wrote a test that can be shown for the user's approval */
   onTestProposed: (pending: PendingTest) => void
-}
-
-/** I/O bit addresses written in the user's request, as %I0.0 / %Q1.2 */
-function ioAddressesInPrompt(prompt: string): string[] {
-  const found = new Set<string>()
-  for (const m of prompt.matchAll(/(^|[^A-Za-z0-9_.%])%?([IQ])(\d{1,3})\.([0-7])(?![0-9])/gi)) {
-    found.add(`%${m[2].toUpperCase()}${Number(m[3])}.${m[4]}`)
-  }
-  return Array.from(found)
 }
 
 function countExpectations(test: BehaviorTest): number {
   return test.steps.reduce((sum, step) => sum + Object.keys(step.expect || {}).length, 0)
 }
 
-function signalAborted(err: unknown): boolean {
-  return (err as { name?: string })?.name === 'AbortError' || String(err).includes('cancelled')
+/** Merges multiple staged changes to the same path (e.g. manage_plc_tags + circuit both editing default_tags) */
+export function coalesceStagedChangeset(
+  staged: NonNullable<AgentExecutionResponse['stagedChangeset']>
+): NonNullable<AgentExecutionResponse['stagedChangeset']> {
+  const result: NonNullable<AgentExecutionResponse['stagedChangeset']> = []
+  const byPath = new Map<string, number>()
+
+  for (const item of staged) {
+    const normPath = item.path.startsWith('/') ? item.path : `/${item.path}`
+    const existingIdx = byPath.get(normPath)
+    if (existingIdx === undefined) {
+      byPath.set(normPath, result.length)
+      result.push({ ...item, path: normPath })
+      continue
+    }
+
+    const prev = result[existingIdx]
+    if (item.fileType === 'tag') {
+      try {
+        const prevParsed = JSON.parse(prev.afterContent) as { id?: string; tags?: Array<Record<string, unknown>> }
+        const nextParsed = JSON.parse(item.afterContent) as { id?: string; tags?: Array<Record<string, unknown>> }
+        if (prevParsed && Array.isArray(prevParsed.tags) && nextParsed && Array.isArray(nextParsed.tags)) {
+          const mergedTags = [...prevParsed.tags]
+          for (const t of nextParsed.tags) {
+            const tName = typeof t.name === 'string' ? t.name.toLowerCase() : ''
+            const idx = mergedTags.findIndex(
+              (m) => (t.id && m.id === t.id) || (tName && typeof m.name === 'string' && m.name.toLowerCase() === tName)
+            )
+            if (idx !== -1) mergedTags[idx] = { ...mergedTags[idx], ...t }
+            else mergedTags.push(t)
+          }
+          result[existingIdx] = {
+            ...prev,
+            title: `${prev.title} + ${item.title}`,
+            afterContent: JSON.stringify({ ...prevParsed, ...nextParsed, tags: mergedTags }, null, 2)
+          }
+          continue
+        }
+      } catch {
+        // Fallback to overwriting with latest
+      }
+    }
+    result[existingIdx] = { ...item, path: normPath, beforeContent: prev.beforeContent }
+  }
+  return result
 }
 
 /**
@@ -87,7 +124,7 @@ export async function runTestStage(
       ]
     : [{ role: 'user', parts: [{ text: `CURRENT PROJECT:\n${tools.describeProjectForModel()}\n\nUSER REQUEST:\n${prompt}\n\n${TEST_FIRST_REQUEST}` }] }]
   const existingTags = useTagStore.getState().tagTables.flatMap((t) => t.tags)
-  const userIo = ioAddressesInPrompt(prompt)
+  const userIo = Array.from(extractBitAddresses(prompt, 'IQ'))
   const askedOnce = new Set<string>()
   const executed: AgentToolCall[] = []
   const toolResults: AgentToolResult[] = []
@@ -103,7 +140,9 @@ export async function runTestStage(
     ...fields
   })
 
-  for (let round = 0; round < MAX_TEST_ROUNDS; round++) {
+  let repairRounds = 0
+  let readRounds = 0
+  while (repairRounds < MAX_TEST_ROUNDS && repairRounds + readRounds < MAX_TEST_ROUNDS + MAX_READ_ROUNDS) {
     rawText = await requestModel(contents)
     contents.push({ role: 'model', parts: [{ text: rawText }] })
     const extracted = extractValidJsonBlock(rawText)
@@ -120,11 +159,12 @@ export async function runTestStage(
       const changingTools = calls.length - reads.length
       const hasCircuit =
         (typeof parsed.dsl === 'string' && parsed.dsl.trim() !== '') || (Array.isArray(parsed.networks) && parsed.networks.length > 0)
-      if (reads.length > 0 && parsed.verification === undefined && !hasCircuit) {
-        const result = await tools.executeToolBatch(reads, mode)
+      if (reads.length > 0 && parsed.verification === undefined && !hasCircuit && readRounds < MAX_READ_ROUNDS) {
+        const result = await tools.executeToolBatch(reads, mode, { skipSnapshot: true })
         executed.push(...reads)
         toolResults.push(...result.results)
         contents.push({ role: 'user', parts: [{ text: `TOOL RESULTS:\n${JSON.stringify(result.results)}` }] })
+        readRounds++
         continue
       }
       if (parsed.verification === undefined && !hasCircuit && changingTools === 0) {
@@ -151,7 +191,8 @@ export async function runTestStage(
         })
       }
     }
-    BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Test proposal rejected, round ${round + 1}`, { problems })
+    repairRounds++
+    BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Test proposal rejected, round ${repairRounds}`, { problems })
     contents.push({ role: 'user', parts: [{ text: `The test was not accepted:\n${problems.join('\n')}` }] })
   }
 
@@ -215,7 +256,7 @@ export async function runAgentLoop(
       : `**Acceptance test not run:** The request looks like more than one built-in scenario (${scenarioMatch.ambiguous.map((s) => s.id).join(', ')}).`
     : ''
   let acceptance: AcceptanceSummary | undefined
-  const userIo = ioAddressesInPrompt(prompt)
+  const userIo = Array.from(extractBitAddresses(prompt, 'IQ'))
   const userIoNotUsed = (): string[] => {
     const used = new Set(
       useTagStore
@@ -224,6 +265,11 @@ export async function runAgentLoop(
         .map((t) => `%${(t.address || '').replace(/[\s%]/g, '').toUpperCase()}`)
     )
     return userIo.filter((a) => !used.has(a))
+  }
+  const userAsked = (warning: string): boolean => {
+    const used = warning.match(/uses %([IQM]\d+\.\d+)/i)
+    if (!used) return false
+    return new RegExp(`(^|[^A-Za-z0-9_.])%?${used[1].replace('.', '\\.')}(?![0-9])`, 'i').test(prompt)
   }
   const reportBefore = tools.runCompilerVerification()
   const errorsBefore = new Set(reportBefore.errors)
@@ -269,7 +315,9 @@ export async function runAgentLoop(
     ...fields
   })
 
-  for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
+  let round = 0
+  let readRounds = 0
+  while (round < MAX_AGENT_ROUNDS && round + readRounds < MAX_AGENT_ROUNDS + MAX_READ_ROUNDS) {
     rawText = await requestModel(contents)
     contents.push({ role: 'model', parts: [{ text: rawText }] })
     const reply = interpretModelReply(rawText, !!approved)
@@ -296,7 +344,8 @@ export async function runAgentLoop(
 
     if (reply.problems.length > 0) {
       lastProblems = reply.problems
-      BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Agent reply rejected before applying, round ${round + 1}`, {
+      round++
+      BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Agent reply rejected before applying, round ${round}`, {
         problems: reply.problems
       })
       contents.push({ role: 'user', parts: [{ text: `Nothing was applied.\n${reply.problems.join('\n')}` }] })
@@ -312,12 +361,19 @@ export async function runAgentLoop(
       : ''
     const changesProject = writes.length > 0 || reply.circuit !== undefined
 
-    // Only reads: answer them and let the model go on
+    // Only reads: answer them without spending circuit repair rounds (bounded by MAX_READ_ROUNDS)
     if (reply.toolCalls.length > 0 && !changesProject) {
-      const reads = await tools.executeToolBatch(reply.toolCalls, mode)
+      if (readRounds >= MAX_READ_ROUNDS) {
+        round++
+        lastProblems = ['Read tool round limit reached; send the circuit or answer now.']
+        contents.push({ role: 'user', parts: [{ text: lastProblems[0] }] })
+        continue
+      }
+      const reads = await tools.executeToolBatch(reply.toolCalls, mode, { skipSnapshot: true })
       executed.push(...reply.toolCalls)
       toolResults.push(...reads.results)
       contents.push({ role: 'user', parts: [{ text: `TOOL RESULTS:\n${JSON.stringify(reads.results)}` }] })
+      readRounds++
       continue
     }
 
@@ -330,10 +386,15 @@ export async function runAgentLoop(
     const problems: string[] = []
     const lines: string[] = []
     const staged: NonNullable<AgentExecutionResponse['stagedChangeset']> = []
+    const protectedTagNames = new Set<string>([
+      ...(approved?.tags || []).map((t) => t.name.toLowerCase()),
+      ...(behaviorTest?.steps || []).flatMap((s) => Object.keys(s.expect || {}).map((k) => k.replace(/"/g, '').trim().toLowerCase()))
+    ])
+    let effectiveCircuit = reply.circuit
     if (mode === 'auto-apply') tools.holdDiskWrites()
     try {
       if (reply.toolCalls.length > 0) {
-        const batch = await tools.executeToolBatch(reply.toolCalls, mode)
+        const batch = await tools.executeToolBatch(reply.toolCalls, mode, { skipSnapshot: true })
         executed.push(...reply.toolCalls)
         toolResults.push(...batch.results)
         staged.push(...(batch.stagedChangeset || []))
@@ -344,8 +405,9 @@ export async function runAgentLoop(
       }
       appliedMoves = []
       if (reply.circuit && problems.length === 0) {
-        const applied = applyCircuitPayload(reply.circuit, mode)
+        const applied = applyCircuitPayload(reply.circuit, mode, { skipSnapshot: true, protectedTagNames })
         appliedMoves = applied.addressMoves
+        effectiveCircuit = applied.effectiveCircuit
         lines.unshift(applied.summaryText)
         staged.push(...(applied.stagedChangeset || []))
       } else if (!reply.circuit && reply.explanation) {
@@ -355,29 +417,66 @@ export async function runAgentLoop(
       if (mode === 'diff-view' && problems.length === 0) {
         // Try the staged circuit on the project for a moment. New tools are not applied yet, so it cannot run with them
         let behaviorNote = ''
+        let trialUserIoNote = ''
+        let trialAddressNote = ''
         if (reply.circuit && writes.length === 0) {
           tools.holdDiskWrites()
-          appliedMoves = applyCircuitPayload(reply.circuit, 'auto-apply', { trialRun: true }).addressMoves
+          const trialApplied = applyCircuitPayload(reply.circuit, 'auto-apply', { trialRun: true, protectedTagNames })
+          appliedMoves = trialApplied.addressMoves
+          effectiveCircuit = trialApplied.effectiveCircuit
           const trialReport = tools.runCompilerVerification()
           const trialNewErrors = trialReport.errors.filter((e) => !errorsBefore.has(e))
+          const trialNewAddressWarnings = trialReport.warnings.filter(
+            (w) => (w.includes('[S7-IO-009]') || w.includes('[S7-MEM-001]')) && !warningsBefore.has(w)
+          )
+          const trialWarningsToAsk = trialNewAddressWarnings.filter((w) => !userAsked(w))
+          const trialUserIoMissing = userIoNotUsed()
           if (trialNewErrors.length > 0) {
             tools.discardDiskWrites()
             tools.restoreSnapshot(turnStart)
             problems.push(...trialNewErrors)
+          } else if (trialWarningsToAsk.length > 0 && !askedOnce.has('address warning')) {
+            askedOnce.add('address warning')
+            tools.discardDiskWrites()
+            tools.restoreSnapshot(turnStart)
+            problems.push(
+              ...trialWarningsToAsk,
+              'Use a free address that exists on this CPU. If the user asked for this address, has an expansion module or really wants two tags on one address, send the same answer again.'
+            )
+          } else if (trialUserIoMissing.length > 0 && !askedOnce.has('user io')) {
+            askedOnce.add('user io')
+            tools.discardDiskWrites()
+            tools.restoreSnapshot(turnStart)
+            problems.push(
+              `The user's I/O list names ${trialUserIoMissing.join(', ')}, but no tag uses these addresses. Keep every signal on the address the user gave, even one this CPU lacks: a signal module gives that channel, while a signal moved to M is wired to nothing. If the user really does not need these signals, send the same answer again.`
+            )
           } else {
             const moved = approved ? approvedTagsMoved(approved.tags, useTagStore.getState().tagTables.flatMap((t) => t.tags)) : []
             const behavior = moved.length
               ? { problems: moved, note: '' }
-              : checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
+              : checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, effectiveCircuit, !!approved)
             // The acceptance test runs only on a circuit that passed its own test, as in auto-apply
             const judged = behavior.problems.length === 0 && scenario ? judgeAcceptance(scenario, gate, isTurkish) : undefined
             tools.discardDiskWrites()
             tools.restoreSnapshot(turnStart)
             const failed = [...behavior.problems, ...(judged?.problems || [])]
             problems.push(...failed)
-            if (failed.length > 0) keepBestCandidate(reply.circuit, failed, round + 1, judged?.summary)
+            if (failed.length > 0) keepBestCandidate(effectiveCircuit || reply.circuit, failed, round + 1, judged?.summary)
             if (judged) acceptance = judged.summary
             behaviorNote = [behavior.note, judged?.note].filter(Boolean).join('\n\n')
+            if (trialUserIoMissing.length > 0) {
+              trialUserIoNote = isTurkish
+                ? `**Adres:** Listenizdeki ${trialUserIoMissing.join(', ')} adreslerini hiçbir etiket kullanmıyor. Bu sinyaller devrede yok ya da başka bir adrese (ör. M bitine) taşındı; fiziksel olarak bağlı değiller.`
+                : `**Address:** No tag uses ${trialUserIoMissing.join(', ')} from your I/O list. These signals are missing or were moved to another address (for example an M bit), so they are not wired.`
+            }
+            if (trialNewAddressWarnings.length > 0) {
+              const moduleNote = trialNewAddressWarnings.some(userAsked)
+                ? isTurkish
+                  ? '**Adres:** İstediğiniz adreslerin bazıları bu CPU\'nun kendi kanallarında yok. Gerçek sistemde bir sinyal modülü (SM) gerekir; donanım yapılandırmasına ekleyin.'
+                  : '**Address:** Some addresses you asked for are not channels of this CPU. A real system needs a signal module (SM); add it to the hardware configuration.'
+                : ''
+              trialAddressNote = [moduleNote, trialNewAddressWarnings.map((w) => `- ${w}`).join('\n')].filter(Boolean).join('\n\n')
+            }
           }
         } else if (reply.circuit) {
           behaviorNote = isTurkish
@@ -385,11 +484,23 @@ export async function runAgentLoop(
             : '**Simulation test:** This reply also creates blocks or tags, so it could not run before approval and the behaviour was not verified.'
         }
         if (problems.length === 0) {
+          const coalesced = coalesceStagedChangeset(staged)
           const note = isTurkish
             ? 'Derleyici kontrolü onaydan sonra çalışır.'
             : 'The compiler check runs after you approve the changes.'
-          const parts = [lines.join('\n'), behaviorNote, ambiguousNote, weakerTestNote, neverCalledNote, motionNote, addressMovesNote(reply.addressMoves), `*${note}*`].filter(Boolean)
-          return respond({ replyText: parts.join('\n\n'), stagedChangeset: staged, acceptanceReport: acceptance })
+          const parts = [
+            lines.join('\n'),
+            trialAddressNote,
+            behaviorNote,
+            ambiguousNote,
+            weakerTestNote,
+            neverCalledNote,
+            motionNote,
+            trialUserIoNote,
+            addressMovesNote(reply.addressMoves),
+            `*${note}*`
+          ].filter(Boolean)
+          return respond({ replyText: parts.join('\n\n'), stagedChangeset: coalesced, acceptanceReport: acceptance })
         }
       }
 
@@ -406,11 +517,6 @@ export async function runAgentLoop(
           problems.push(...approvedTagsMoved(approved.tags, useTagStore.getState().tagTables.flatMap((t) => t.tags)))
         }
         // The user's I/O list is the plant's wiring. A channel the CPU lacks then needs a signal module, not a new address
-        const userAsked = (warning: string): boolean => {
-          const used = warning.match(/uses %([IQM]\d+\.\d+)/i)
-          if (!used) return false
-          return new RegExp(`(^|[^A-Za-z0-9_.])%?${used[1].replace('.', '\\.')}(?![0-9])`, 'i').test(prompt)
-        }
         const warningsToAsk = newAddressWarnings.filter((w) => !userAsked(w))
         if (newErrors.length === 0 && warningsToAsk.length > 0 && !askedOnce.has('address warning')) {
           askedOnce.add('address warning')
@@ -434,7 +540,7 @@ export async function runAgentLoop(
           : ''
         let behaviorNote = ''
         if (problems.length === 0 && reply.circuit) {
-          const behavior = checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, reply.circuit, !!approved)
+          const behavior = checkCircuitBehavior(behaviorTest, askedOnce, isTurkish, effectiveCircuit, !!approved)
           // The circuit passed its own test: now the specification's. Under report the model never hears of it
           const judged = behavior.problems.length === 0 && scenario ? judgeAcceptance(scenario, gate, isTurkish) : undefined
           if (judged) acceptance = judged.summary
@@ -446,7 +552,7 @@ export async function runAgentLoop(
             .join('')
           // A reply that also writes blocks or tags cannot be offered as one staged circuit
           if (failed.length > 0 && writes.length === 0) {
-            keepBestCandidate(reply.circuit, failed, round + 1, judged?.summary)
+            keepBestCandidate(effectiveCircuit || reply.circuit, failed, round + 1, judged?.summary)
           }
         }
         if (problems.length === 0) {
@@ -481,7 +587,7 @@ export async function runAgentLoop(
         }
       }
     } catch (err) {
-      if (signalAborted(err)) {
+      if (isAgentAbortError(err, ctx.signal)) {
         tools.discardDiskWrites()
         tools.restoreSnapshot(turnStart)
         throw err
@@ -489,10 +595,11 @@ export async function runAgentLoop(
       problems.push(err instanceof Error ? err.message : String(err))
     }
 
+    round++
     tools.discardDiskWrites()
     tools.restoreSnapshot(turnStart)
     lastProblems = problems
-    BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Agent reply undone, round ${round + 1}`, { problems })
+    BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `Agent reply undone, round ${round}`, { problems })
     contents.push({
       role: 'user',
       parts: [{ text: `Your reply was undone because of these errors. Send the complete corrected answer.\n${problems.join('\n')}` }]
@@ -513,12 +620,12 @@ export async function runAgentLoop(
       const failedSpec = !!candidate.acceptance && candidate.acceptance.failedSpec.length > 0 && gate === 'enforce'
       const intro = isTurkish
         ? failedSpec
-          ? `Model ${MAX_AGENT_ROUNDS} denemede spesifikasyonun kabul testini geçemedi (${formatAcceptanceLine(candidate.acceptance as AcceptanceSummary)}). **Projede değişiklik yapılmadı.**\n\n` +
+          ? `Model ${MAX_AGENT_ROUNDS} denemede spesifikasyonun kabul testini geçemedi (${formatAcceptanceLine(candidate.acceptance as AcceptanceSummary, isTurkish)}). **Projede değişiklik yapılmadı.**\n\n` +
             `${candidate.round}. denemenin devresi derleyiciden ve modelin kendi testinden geçti, kabul testinde kaldı. `
           : `Model ${MAX_AGENT_ROUNDS} denemede kendi simülasyon testini geçemedi. **Projede değişiklik yapılmadı.**\n\n` +
             `${candidate.round}. denemenin devresi derleyiciden hatasız geçti, yalnızca testte kaldı. Hata devrede de olabilir, modelin testinde de. `
         : failedSpec
-          ? `The model did not pass the specification's acceptance test in ${MAX_AGENT_ROUNDS} attempts (${formatAcceptanceLine(candidate.acceptance as AcceptanceSummary)}). **The project was not changed.**\n\n` +
+          ? `The model did not pass the specification's acceptance test in ${MAX_AGENT_ROUNDS} attempts (${formatAcceptanceLine(candidate.acceptance as AcceptanceSummary, isTurkish)}). **The project was not changed.**\n\n` +
             `The circuit of attempt ${candidate.round} compiled and passed the model's own test, but failed the acceptance test. `
           : `The model did not pass its own simulation test in ${MAX_AGENT_ROUNDS} attempts. **The project was not changed.**\n\n` +
             `The circuit of attempt ${candidate.round} compiled without errors and failed only the test. The fault may be in the circuit or in the model's test. `

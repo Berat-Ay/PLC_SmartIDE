@@ -3,6 +3,8 @@ import { TagTable } from '@shared/types/tags'
 import { CpuConfig } from '@shared/types/hardware'
 import { UdtDefinition } from '@shared/types/types'
 import { DataBlockDefinition, LadBlockDefinition, SclBlockDefinition } from '@shared/types/blocks'
+import { SclLexer } from '@shared/scl/lexer'
+import { effectiveInterface } from '@shared/scl/sourceBlock'
 
 export class CrossReferenceEngine {
   private static index = new Map<string, CrossReferenceItem[]>()
@@ -157,6 +159,23 @@ export class CrossReferenceEngine {
         if (ai.name) addRef(ai.name, item)
         if (ai.address) addRef(ai.address, item)
       }
+
+      // AQ channels
+      for (const aq of cpuConfig.analogIO.aqChannels) {
+        const item: CrossReferenceItem = {
+          id: `xref_aq_${aq.channelIndex}`,
+          targetSymbol: aq.name || `AQ Channel ${aq.channelIndex}`,
+          targetAddress: aq.address,
+          sourceObject: 'Device Configuration',
+          sourceObjectId: 'cpu_config',
+          sourceType: 'Hardware',
+          location: `AQ Channel ${aq.channelIndex}`,
+          accessType: 'Declaration',
+          snippet: `${aq.name} [${aq.address}] ${aq.outputType}`
+        }
+        if (aq.name) addRef(aq.name, item)
+        if (aq.address) addRef(aq.address, item)
+      }
     }
 
     // 3. Index UDTs
@@ -270,8 +289,98 @@ export class CrossReferenceEngine {
       checkVars(lad.interface.temp, 'Temp')
       checkVars(lad.interface.constant, 'Constant')
 
+      const indexSclCode = (
+        code: string,
+        blockName: string,
+        blockFileName: string,
+        blockType: CrossReferenceItem['sourceType'],
+        networkNumber?: number
+      ): void => {
+        const { tokens } = SclLexer.tokenize(code)
+        const beginIdx = tokens.findIndex((t) => t.type === 'KEYWORD' && t.value === 'BEGIN')
+        const bodyTokens = beginIdx >= 0 ? tokens.slice(beginIdx + 1) : tokens
+        const codeLines = code.split(/\r?\n/)
+
+        for (let tIdx = 0; tIdx < bodyTokens.length; tIdx++) {
+          const tok = bodyTokens[tIdx]
+          if (tok.type !== 'IDENTIFIER') continue
+
+          let symbol = tok.value
+          let endIdx = tIdx
+          while (
+            endIdx + 2 < bodyTokens.length &&
+            bodyTokens[endIdx + 1].value === '.' &&
+            bodyTokens[endIdx + 2].type === 'IDENTIFIER'
+          ) {
+            symbol += '.' + bodyTokens[endIdx + 2].value
+            endIdx += 2
+          }
+
+          const prevVal = tIdx > 0 ? bodyTokens[tIdx - 1].value : ''
+          const nextVal = endIdx + 1 < bodyTokens.length ? bodyTokens[endIdx + 1].value : ''
+          const accessType: CrossReferenceItem['accessType'] =
+            nextVal === ':=' || prevVal === '=>' ? 'Write' : 'Read'
+          const snippet = (codeLines[tok.line - 1] || symbol).trim()
+          const loc =
+            networkNumber !== undefined
+              ? `Network ${networkNumber} [Line ${tok.line}]`
+              : `Line ${tok.line}`
+
+          const item: CrossReferenceItem = {
+            id: `xref_scl_${blockName}_${tok.line}_${tIdx}`,
+            targetSymbol: symbol,
+            sourceObject: blockName,
+            sourceObjectId: blockFileName,
+            sourceType: blockType,
+            location: loc,
+            accessType,
+            networkNumber,
+            lineNumber: tok.line,
+            snippet
+          }
+          addRef(symbol, item)
+
+          // Also index root container (e.g. "DB1".Val -> DB1) for non-physical DB/struct paths
+          if (!symbol.startsWith('%') && symbol.includes('.')) {
+            const root = symbol.split('.')[0]
+            if (root) addRef(root, item)
+          }
+
+          tIdx = endIdx
+        }
+      }
+
+      const addBoxOperandRef = (
+        rawOp: string | undefined,
+        ladName: string,
+        ladFileName: string,
+        ladType: CrossReferenceItem['sourceType'],
+        netNum: number,
+        nodeId: string,
+        label: string,
+        accessType: CrossReferenceItem['accessType']
+      ): void => {
+        const clean = (rawOp || '').trim().replace(/^"|"$/g, '')
+        if (!clean || clean === '???' || /^(Q|ET|QU|QD|CV)$/i.test(clean)) return
+        if (/^[-+]?\d+(\.\d+)?$/.test(clean) || /^(TRUE|FALSE)$/i.test(clean) || /^(LTIME|TIME|LT|T)#/i.test(clean)) return
+        addRef(clean, {
+          id: `xref_lad_${ladName}_${nodeId}_${label}_${accessType}`,
+          targetSymbol: clean,
+          sourceObject: ladName,
+          sourceObjectId: ladFileName,
+          sourceType: ladType,
+          location: `Network ${netNum} [${label}]`,
+          accessType,
+          networkNumber: netNum,
+          snippet: `Network ${netNum}: ${label} (${clean})`
+        })
+      }
+
       // Networks
       for (const net of lad.networks) {
+        if (net.isSclNetwork && net.sclCode) {
+          indexSclCode(net.sclCode, lad.name, lad.fileName, lad.blockType, net.networkNumber)
+        }
         if (net.elements && net.elements.length > 0) {
           for (const el of net.elements) {
             if (el.kind === 'contact') {
@@ -357,6 +466,28 @@ export class CrossReferenceEngine {
                   networkNumber: net.networkNumber,
                   snippet: `Network ${net.networkNumber}: -( ${n.operand} )-`
                 })
+              } else if (n.kind === 'timer') {
+                addBoxOperandRef(n.instanceDb, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, n.timerType || 'TON', 'Read/Write')
+                addBoxOperandRef(n.ptOperand, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, 'PT', 'Read')
+                addBoxOperandRef(n.rOperand, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, 'R', 'Read')
+                addBoxOperandRef(n.qOperand, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, 'Q', 'Write')
+                addBoxOperandRef(n.etOperand, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, 'ET', 'Write')
+              } else if (n.kind === 'counter') {
+                addBoxOperandRef(n.instanceDb, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, n.counterType || 'CTU', 'Read/Write')
+                for (const [pin, k] of [['CU', 'cuOperand'], ['CD', 'cdOperand'], ['R', 'rLdOperand'], ['LD', 'ldOperand'], ['PV', 'pvOperand']] as const) {
+                  addBoxOperandRef(n[k], lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, pin, 'Read')
+                }
+                for (const [pin, k] of [['Q', 'qOperand'], ['QU', 'quOperand'], ['QD', 'qdOperand'], ['CV', 'cvOperand']] as const) {
+                  addBoxOperandRef(n[k], lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, pin, 'Write')
+                }
+              } else if (n.kind === 'comparator') {
+                addBoxOperandRef(n.op1, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, `${n.comparatorType} IN1`, 'Read')
+                addBoxOperandRef(n.op2, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, `${n.comparatorType} IN2`, 'Read')
+              } else if (n.kind === 'math') {
+                for (const [pin, k] of [['IN1', 'in1'], ['IN2', 'in2'], ['MIN', 'min'], ['MAX', 'max'], ['VALUE', 'value']] as const) {
+                  addBoxOperandRef(n[k], lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, `${n.boxType} ${pin}`, 'Read')
+                }
+                addBoxOperandRef(n.out, lad.name, lad.fileName, lad.blockType, net.networkNumber, n.id, `${n.boxType} OUT`, 'Write')
               } else if (n.kind === 'parallel' && n.branches) {
                 for (const b of n.branches) scanNodes(b)
               }
@@ -369,8 +500,8 @@ export class CrossReferenceEngine {
 
     // 6. Index SCL Blocks
     for (const scl of sclBlocks) {
-      // Interface
-      const checkVars = (vars: typeof scl.interface.input, sectionName: string) => {
+      const iface = effectiveInterface(scl)
+      const checkVars = (vars: typeof iface.input, sectionName: string) => {
         for (const v of vars) {
           addRef(v.name, {
             id: `xref_scl_if_${scl.name}_${v.id}`,
@@ -384,55 +515,59 @@ export class CrossReferenceEngine {
           })
         }
       }
-      checkVars(scl.interface.input, 'Input')
-      checkVars(scl.interface.output, 'Output')
-      checkVars(scl.interface.inOut, 'InOut')
-      checkVars(scl.interface.static, 'Static')
-      checkVars(scl.interface.temp, 'Temp')
+      checkVars(iface.input, 'Input')
+      checkVars(iface.output, 'Output')
+      checkVars(iface.inOut, 'InOut')
+      checkVars(iface.static, 'Static')
+      checkVars(iface.temp, 'Temp')
+      checkVars(iface.constant, 'Constant')
 
-      // Simple regex scan of SCL lines for symbol references
-      const lines = scl.code.split('\n')
-      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-        const line = lines[lineIdx].trim()
-        if (!line || line.startsWith('//') || line.startsWith('(*')) continue
+      // Tokenized SCL statement indexing (ignores comments and strings cleanly, supports %I/%Q/%M and "DB".Member)
+      const { tokens } = SclLexer.tokenize(scl.code || '')
+      const beginIdx = tokens.findIndex((t) => t.type === 'KEYWORD' && t.value === 'BEGIN')
+      const bodyTokens = beginIdx >= 0 ? tokens.slice(beginIdx + 1) : tokens
+      const codeLines = (scl.code || '').split(/\r?\n/)
 
-        // Check assignments: target := expr;
-        const assignMatch = line.match(/^([a-zA-Z0-9_%."]+)\s*:=/i)
-        if (assignMatch) {
-          const lhs = assignMatch[1].replace(/"/g, '')
-          addRef(lhs, {
-            id: `xref_scl_line_${scl.name}_${lineIdx}_w`,
-            targetSymbol: lhs,
-            sourceObject: scl.name,
-            sourceObjectId: scl.fileName,
-            sourceType: scl.blockType,
-            location: `Line ${lineIdx + 1}`,
-            accessType: 'Write',
-            lineNumber: lineIdx + 1,
-            snippet: line
-          })
+      for (let tIdx = 0; tIdx < bodyTokens.length; tIdx++) {
+        const tok = bodyTokens[tIdx]
+        if (tok.type !== 'IDENTIFIER') continue
+
+        let symbol = tok.value
+        let endIdx = tIdx
+        while (
+          endIdx + 2 < bodyTokens.length &&
+          bodyTokens[endIdx + 1].value === '.' &&
+          bodyTokens[endIdx + 2].type === 'IDENTIFIER'
+        ) {
+          symbol += '.' + bodyTokens[endIdx + 2].value
+          endIdx += 2
         }
 
-        // Scan identifiers on the line
-        const identifiers = line.match(/[a-zA-Z_][a-zA-Z0-9_]*/g) || []
-        for (const id of identifiers) {
-          if (['IF', 'THEN', 'ELSE', 'END_IF', 'FOR', 'TO', 'BY', 'DO', 'END_FOR', 'WHILE', 'END_WHILE', 'CASE', 'OF', 'RETURN', 'AND', 'OR', 'NOT', 'TRUE', 'FALSE', 'VAR', 'END_VAR'].includes(id.toUpperCase())) {
-            continue
-          }
-          if (assignMatch && id === assignMatch[1].replace(/"/g, '')) continue
+        const prevVal = tIdx > 0 ? bodyTokens[tIdx - 1].value : ''
+        const nextVal = endIdx + 1 < bodyTokens.length ? bodyTokens[endIdx + 1].value : ''
+        const accessType: CrossReferenceItem['accessType'] =
+          nextVal === ':=' || prevVal === '=>' ? 'Write' : 'Read'
+        const snippet = (codeLines[tok.line - 1] || symbol).trim()
 
-          addRef(id, {
-            id: `xref_scl_line_${scl.name}_${lineIdx}_r_${id}`,
-            targetSymbol: id,
-            sourceObject: scl.name,
-            sourceObjectId: scl.fileName,
-            sourceType: scl.blockType,
-            location: `Line ${lineIdx + 1}`,
-            accessType: 'Read',
-            lineNumber: lineIdx + 1,
-            snippet: line
-          })
+        const item: CrossReferenceItem = {
+          id: `xref_scl_line_${scl.name}_${tok.line}_${tIdx}`,
+          targetSymbol: symbol,
+          sourceObject: scl.name,
+          sourceObjectId: scl.fileName,
+          sourceType: scl.blockType,
+          location: `Line ${tok.line}`,
+          accessType,
+          lineNumber: tok.line,
+          snippet
         }
+        addRef(symbol, item)
+
+        if (!symbol.startsWith('%') && symbol.includes('.')) {
+          const root = symbol.split('.')[0]
+          if (root) addRef(root, item)
+        }
+
+        tIdx = endIdx
       }
     }
 

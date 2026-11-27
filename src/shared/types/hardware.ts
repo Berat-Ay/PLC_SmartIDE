@@ -55,6 +55,7 @@ export interface OrganizationBlockConfig {
 
 export interface CpuConfig {
   general: {
+    profileId?: string
     cpuName: string
     targetCpu?: string
     cycleWatchdogTimeMs: number // default 150

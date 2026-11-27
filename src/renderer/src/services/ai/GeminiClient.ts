@@ -4,8 +4,10 @@
  */
 
 import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
-import { AiConfig, AiTier, GeminiContent } from './aiTypes'
+import { AgentCancelledError, AiConfig, AiTier, GeminiContent } from './aiTypes'
 import { geminiTextModels, sortGeminiModels } from './aiConfig'
+import { abortableSleep } from './aiClientUtils'
+import { aiHttp } from './aiHttp'
 
 /** How often a pinned model is asked again after a busy, rate limited or slow answer */
 const PINNED_MODEL_RETRIES = 6
@@ -27,11 +29,13 @@ export interface GeminiRequestOptions {
   noThinkingConfig: Set<string>
   /** How long one model may take to answer before the next one is tried */
   timeoutMs: number
+  /** True when the key is stored in main-process encrypted storage and should be injected by main aiHttp */
+  useStoredSecret?: boolean
 }
 
 /** A function that sends the conversation to Gemini and returns the text of the answer */
 export function createGeminiRequester(options: GeminiRequestOptions): (contents: GeminiContent[]) => Promise<string> {
-  const { prompt, tier, mode, signal, getConfig, saveConfig, unavailableModels, noThinkingConfig, timeoutMs } = options
+  const { prompt, tier, mode, signal, getConfig, saveConfig, unavailableModels, noThinkingConfig, timeoutMs, useStoredSecret } = options
   const systemInstructionText = options.systemInstruction
   const primaryModel = (
     getConfig().selectedModelId || (tier === 'fast-flash' ? getConfig().fastModel : getConfig().deepModel)
@@ -39,17 +43,19 @@ export function createGeminiRequester(options: GeminiRequestOptions): (contents:
     .trim()
     .replace(/^models\//i, '')
 
-  const candidateModels = getConfig().pinModel ? [primaryModel] : [
-    primaryModel,
-    ...sortGeminiModels(getConfig().availableModels || [])
-      .slice(0, 6)
-      .map((m) => m.id),
-    'gemini-2.5-flash',
-    'gemini-3-flash-preview',
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-pro',
-    'gemini-2.0-flash'
-  ].filter((m, idx, arr) => m && arr.indexOf(m) === idx)
+  const candidateModels = getConfig().pinModel
+    ? [primaryModel]
+    : [
+        primaryModel,
+        ...sortGeminiModels(getConfig().availableModels || [])
+          .slice(0, 6)
+          .map((m) => m.id),
+        'gemini-2.5-flash',
+        'gemini-3-flash-preview',
+        'gemini-2.5-flash-lite',
+        'gemini-2.5-pro',
+        'gemini-2.0-flash'
+      ].filter((m, idx, arr) => m && arr.indexOf(m) === idx)
   // A model that failed in this request is not asked again in its later rounds
   const failedThisTurn = new Set<string>()
 
@@ -62,6 +68,7 @@ export function createGeminiRequester(options: GeminiRequestOptions): (contents:
   })
 
   const cleanKey = (getConfig().geminiApiKey || '').trim()
+  const authSecret = !cleanKey && useStoredSecret ? ('geminiApiKey' as const) : undefined
   let attemptedAutoDiscovery = false
 
   const missingModels: string[] = []
@@ -81,6 +88,7 @@ export function createGeminiRequester(options: GeminiRequestOptions): (contents:
     // A pinned model that is busy, rate limited or slow is asked again after a pause, a few times
     let pinnedRetries = 0
     const waitForPinnedModel = async (status: number, body: string): Promise<boolean> => {
+      if (signal?.aborted) return false
       if (!getConfig().pinModel || pinnedRetries >= PINNED_MODEL_RETRIES) return false
       if (status !== 0 && status !== 429 && status !== 503) return false
       if (status === 429 && /limit:\s*0\b/.test(body)) return false
@@ -95,44 +103,19 @@ export function createGeminiRequester(options: GeminiRequestOptions): (contents:
         status,
         retry: pinnedRetries
       })
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, waitMs)
-        signal?.addEventListener('abort', () => {
-          clearTimeout(timer)
-          resolve()
-        })
-      })
-      return !signal?.aborted
+      return abortableSleep(waitMs, signal)
     }
+
     for (let i = 0; i < queue.length; i++) {
       const modelToTry = queue[i]
-      if (signal?.aborted) throw new Error('Synthesis cancelled by user.')
+      if (signal?.aborted) throw new AgentCancelledError()
 
       const cleanModelId = modelToTry.trim().replace(/^models\//i, '')
       const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelId}:generateContent`
       modelStartMs = Date.now()
 
-      // Fresh 90-second timeout controller per candidate model attempt
-      const modelController = new AbortController()
-      let modelTimedOut = false
-      const modelTimeoutId = setTimeout(() => {
-        modelTimedOut = true
-        modelController.abort()
-      }, timeoutMs)
-
-      const onExternalAbort = () => {
-        modelController.abort()
-      }
-      if (signal) {
-        if (signal.aborted) {
-          clearTimeout(modelTimeoutId)
-          throw new Error('Synthesis cancelled by user.')
-        }
-        signal.addEventListener('abort', onExternalAbort)
-      }
-
       const attemptFetch = async (includeThinkingConfig: boolean) => {
-        const generationConfig: Record<string, any> = {
+        const generationConfig: Record<string, unknown> = {
           temperature: 0.1,
           maxOutputTokens: 8192,
           responseMimeType: 'application/json'
@@ -141,150 +124,159 @@ export function createGeminiRequester(options: GeminiRequestOptions): (contents:
           generationConfig.thinkingConfig = { thinkingBudget: 0 }
         }
 
-        return fetch(requestUrl, {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (cleanKey) headers['x-goog-api-key'] = cleanKey
+
+        return aiHttp(requestUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey },
-          signal: modelController.signal,
+          headers,
           body: JSON.stringify({
             systemInstruction: {
               parts: [{ text: systemInstructionText }]
             },
             contents,
             generationConfig
-          })
+          }),
+          timeoutMs,
+          signal,
+          authSecret
         })
       }
 
-      try {
-        const sendThinking = !noThinkingConfig.has(cleanModelId)
-        let response = await attemptFetch(sendThinking)
+      const sendThinking = !noThinkingConfig.has(cleanModelId)
+      let res = await attemptFetch(sendThinking)
 
-        // If HTTP 400 occurred and thinkingConfig was passed, retry once without thinkingConfig
-        if (response.status === 400 && sendThinking) {
-          const errBody = await response.text()
-          BlackBoxLogger.getInstance().log(
-            'AI_FALLBACK_OR_RETRY',
-            `Candidate model ${cleanModelId} rejected thinkingConfig (HTTP 400). Retrying without thinkingConfig...`,
-            { model: cleanModelId, status: 400, errorBody: errBody }
-          )
-          response = await attemptFetch(false)
-          if (response.ok) noThinkingConfig.add(cleanModelId)
-        }
-
-        if (!response.ok) {
-          const errStatus = response.status
-          const errorBodyText = await response.text()
-          BlackBoxLogger.getInstance().log(
-            'AI_FALLBACK_OR_RETRY',
-            `Candidate model ${cleanModelId} returned HTTP ${errStatus}`,
-            {
-              model: cleanModelId,
-              status: errStatus,
-              url: requestUrl.replace(cleanKey, '***'),
-              errorBody: errorBodyText
-            }
-          )
-
-          if (errStatus === 404) {
-            missingModels.push(cleanModelId)
-            unavailableModels.set(cleanModelId, 'not served (HTTP 404)')
-          } else if (errStatus === 429 && /limit:\s*0\b/.test(errorBodyText)) {
-            // The plan has no quota for this model at all. Waiting will not help
-            unavailableModels.set(cleanModelId, 'no quota on this plan (HTTP 429, limit 0)')
-          } else if (errStatus !== 503 && errStatus !== 429) {
-            // Busy (503) and rate limited (429) pass, so the next round asks this model again
-            failedThisTurn.add(cleanModelId)
-          }
-
-          // Live Self-Healing Model Discovery on HTTP 404
-          if (errStatus === 404 && !attemptedAutoDiscovery && cleanKey) {
-            attemptedAutoDiscovery = true
-            BlackBoxLogger.getInstance().log(
-              'AI_FALLBACK_OR_RETRY',
-              `HTTP 404 encountered for model ${cleanModelId}. Initiating live /v1beta/models auto-discovery...`,
-              { model: cleanModelId }
-            )
-            try {
-              const discRes = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
-                headers: { 'x-goog-api-key': cleanKey },
-                signal: modelController.signal
-              })
-              if (discRes.ok) {
-                const discData = await discRes.json()
-                const sorted = geminiTextModels(discData.models || [])
-                if (sorted.length > 0) {
-                  // Only the list is refreshed. The user's model stays selected: if it is the one that is not
-                  // served, it is replaced below by the model that answers
-                  getConfig().availableModels = sorted
-                  saveConfig()
-
-                  for (const dm of sorted) {
-                    if (getConfig().pinModel) break
-                    if (!candidateModels.includes(dm.id)) {
-                      candidateModels.push(dm.id)
-                      if (!unavailableModels.has(dm.id)) queue.push(dm.id)
-                    }
-                  }
-
-                  BlackBoxLogger.getInstance().log(
-                    'AI_FALLBACK_OR_RETRY',
-                    `Auto-discovery healed models: ${sorted.length} models loaded. Top model: ${sorted[0].id}`,
-                    { topModels: sorted.slice(0, 5).map((m) => m.id) }
-                  )
-                }
-              }
-            } catch (discErr) {
-              console.warn('Live model auto-discovery failed:', discErr)
-            }
-          }
-
-          lastError = new Error(`Gemini API HTTP Error on ${cleanModelId}: ${errStatus} ${errorBodyText}`)
-          if (await waitForPinnedModel(errStatus, errorBodyText)) i--
-          continue
-        }
-
-        const data = await response.json()
-        rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-        if (rawText) {
-          successfulModel = cleanModelId
-          break
-        }
-        failedThisTurn.add(cleanModelId)
-      } catch (fetchErr: unknown) {
-        if (
-          signal?.aborted ||
-          (fetchErr as { name?: string })?.name === 'AbortError' ||
-          String(fetchErr).includes('cancelled')
-        ) {
-          if (modelTimedOut && !signal?.aborted) {
-            // A slow model is no reason to stop: the next one may answer
-            failedThisTurn.add(cleanModelId)
-            lastError = new Error(`Gemini API call to model ${cleanModelId} timed out after ${timeoutMs / 1000} seconds.`)
-            BlackBoxLogger.getInstance().log(
-              'AI_FALLBACK_OR_RETRY',
-              `Candidate model ${cleanModelId} timed out after ${timeoutMs / 1000} s. Trying the next one`,
-              { model: cleanModelId }
-            )
-            if (await waitForPinnedModel(0, '')) {
-              failedThisTurn.delete(cleanModelId)
-              i--
-            }
-            continue
-          }
-          throw fetchErr
-        }
+      // If HTTP 400 occurred and thinkingConfig was passed, retry once without thinkingConfig
+      if (res.status === 400 && sendThinking) {
         BlackBoxLogger.getInstance().log(
           'AI_FALLBACK_OR_RETRY',
-          `Candidate model ${cleanModelId} failed: ${fetchErr}. Retrying next in chain...`,
-          { model: cleanModelId, error: String(fetchErr) }
+          `Candidate model ${cleanModelId} rejected thinkingConfig (HTTP 400). Retrying without thinkingConfig...`,
+          { model: cleanModelId, status: 400, errorBody: res.body }
         )
-        lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr))
-      } finally {
-        clearTimeout(modelTimeoutId)
-        if (signal) {
-          signal.removeEventListener('abort', onExternalAbort)
-        }
+        res = await attemptFetch(false)
+        if (res.status >= 200 && res.status < 300) noThinkingConfig.add(cleanModelId)
       }
+
+      if (res.error === 'cancelled' || signal?.aborted) {
+        throw new AgentCancelledError()
+      }
+
+      if (res.error === 'timeout') {
+        failedThisTurn.add(cleanModelId)
+        lastError = new Error(`Gemini API call to model ${cleanModelId} timed out after ${timeoutMs / 1000} seconds.`)
+        BlackBoxLogger.getInstance().log(
+          'AI_FALLBACK_OR_RETRY',
+          `Candidate model ${cleanModelId} timed out after ${timeoutMs / 1000} s. Trying the next one`,
+          { model: cleanModelId }
+        )
+        if (await waitForPinnedModel(0, '')) {
+          failedThisTurn.delete(cleanModelId)
+          i--
+        }
+        continue
+      }
+
+      if (res.error) {
+        BlackBoxLogger.getInstance().log(
+          'AI_FALLBACK_OR_RETRY',
+          `Candidate model ${cleanModelId} failed: ${res.message}. Retrying next in chain...`,
+          { model: cleanModelId, error: res.message }
+        )
+        lastError = new Error(res.message || 'Network error')
+        continue
+      }
+
+      if (res.status < 200 || res.status >= 300) {
+        const errStatus = res.status
+        const errorBodyText = res.body
+        BlackBoxLogger.getInstance().log(
+          'AI_FALLBACK_OR_RETRY',
+          `Candidate model ${cleanModelId} returned HTTP ${errStatus}`,
+          {
+            model: cleanModelId,
+            status: errStatus,
+            url: requestUrl,
+            errorBody: errorBodyText
+          }
+        )
+
+        if (errStatus === 404) {
+          missingModels.push(cleanModelId)
+          unavailableModels.set(cleanModelId, 'not served (HTTP 404)')
+        } else if (errStatus === 429 && /limit:\s*0\b/.test(errorBodyText)) {
+          // The plan has no quota for this model at all. Waiting will not help
+          unavailableModels.set(cleanModelId, 'no quota on this plan (HTTP 429, limit 0)')
+        } else if (errStatus !== 503 && errStatus !== 429) {
+          // Busy (503) and rate limited (429) pass, so the next round asks this model again
+          failedThisTurn.add(cleanModelId)
+        }
+
+        // Live Self-Healing Model Discovery on HTTP 404
+        if (errStatus === 404 && !attemptedAutoDiscovery && (cleanKey || authSecret)) {
+          attemptedAutoDiscovery = true
+          BlackBoxLogger.getInstance().log(
+            'AI_FALLBACK_OR_RETRY',
+            `HTTP 404 encountered for model ${cleanModelId}. Initiating live /v1beta/models auto-discovery...`,
+            { model: cleanModelId }
+          )
+          try {
+            const discRes = await aiHttp('https://generativelanguage.googleapis.com/v1beta/models', {
+              method: 'GET',
+              headers: cleanKey ? { 'x-goog-api-key': cleanKey } : {},
+              authSecret,
+              timeoutMs: 30000,
+              signal
+            })
+            if (!discRes.error && discRes.status >= 200 && discRes.status < 300) {
+              const discData = JSON.parse(discRes.body)
+              const sorted = geminiTextModels(discData.models || [])
+              if (sorted.length > 0) {
+                getConfig().availableModels = sorted
+                saveConfig()
+
+                for (const dm of sorted) {
+                  if (getConfig().pinModel) break
+                  if (!candidateModels.includes(dm.id)) {
+                    candidateModels.push(dm.id)
+                    if (!unavailableModels.has(dm.id)) queue.push(dm.id)
+                  }
+                }
+
+                BlackBoxLogger.getInstance().log(
+                  'AI_FALLBACK_OR_RETRY',
+                  `Auto-discovery healed models: ${sorted.length} models loaded. Top model: ${sorted[0].id}`,
+                  { topModels: sorted.slice(0, 5).map((m) => m.id) }
+                )
+              }
+            }
+          } catch (discErr) {
+            console.warn('Live model auto-discovery failed:', discErr)
+          }
+        }
+
+        lastError = new Error(`Gemini API HTTP Error on ${cleanModelId}: ${errStatus} ${errorBodyText}`)
+        if (await waitForPinnedModel(errStatus, errorBodyText)) i--
+        continue
+      }
+
+      try {
+        const data = JSON.parse(res.body) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>
+        }
+        const parts = data.candidates?.[0]?.content?.parts || []
+        const answerParts = parts.filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text as string)
+        rawText = answerParts.length > 0 ? answerParts.join('') : parts[0]?.text || ''
+      } catch {
+        lastError = new Error(`Gemini API returned invalid JSON from ${cleanModelId}`)
+        failedThisTurn.add(cleanModelId)
+        continue
+      }
+
+      if (rawText) {
+        successfulModel = cleanModelId
+        break
+      }
+      failedThisTurn.add(cleanModelId)
     }
 
     if (!rawText) {

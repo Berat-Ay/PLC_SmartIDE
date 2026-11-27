@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   ChevronDown,
   ChevronRight,
@@ -20,7 +21,11 @@ import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useProjectStore } from '../../stores/useProjectStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
+import { S7OffsetCalculator } from '../../services/S7OffsetCalculator'
+import { generateId } from '../../utils/id'
+import { makeTabId } from '../../utils/tabIds'
 import { PromptModal } from '../common/PromptModal'
+import { ConfirmModal } from '../common/ConfirmModal'
 
 type RenameTarget =
   | { kind: 'lad'; fileName: string; currentName: string; title: string }
@@ -29,11 +34,34 @@ type RenameTarget =
   | { kind: 'tagTable'; id: string; currentName: string; title: string }
   | { kind: 'udt'; id: string; currentName: string; title: string }
 
+interface PendingTrashAction {
+  label: string
+  folder: 'blocks' | 'types' | 'tags'
+  fileName: string | undefined
+  remove: () => void
+}
+
 export const ProjectTree: React.FC = () => {
-  const { openTab, closeTab, updateTabTitle, setAddBlockModalOpen } = useUIStore()
-  const { markDirty } = useProjectStore()
+  const { openTab, closeTab, updateTabTitle, setAddBlockModalOpen } = useUIStore(
+    useShallow((s) => ({
+      openTab: s.openTab,
+      closeTab: s.closeTab,
+      updateTabTitle: s.updateTabTitle,
+      setAddBlockModalOpen: s.setAddBlockModalOpen
+    }))
+  )
+  const markDirty = useProjectStore((s) => s.markDirty)
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
-  const { tagTables, createTagTable, renameTagTable, deleteTagTable } = useTagStore()
+  const [pendingTrash, setPendingTrash] = useState<PendingTrashAction | null>(null)
+  const [trashErrorMessage, setTrashErrorMessage] = useState<string | null>(null)
+  const { tagTables, createTagTable, renameTagTable, deleteTagTable } = useTagStore(
+    useShallow((s) => ({
+      tagTables: s.tagTables,
+      createTagTable: s.createTagTable,
+      renameTagTable: s.renameTagTable,
+      deleteTagTable: s.deleteTagTable
+    }))
+  )
   const {
     udts,
     dataBlocks,
@@ -48,17 +76,40 @@ export const ProjectTree: React.FC = () => {
     deleteSclBlock,
     updateDataBlock,
     deleteDataBlock
-  } = useBlockStore()
-  const { config } = useHardwareStore()
+  } = useBlockStore(
+    useShallow((s) => ({
+      udts: s.udts,
+      dataBlocks: s.dataBlocks,
+      ladBlocks: s.ladBlocks,
+      sclBlocks: s.sclBlocks,
+      addUdt: s.addUdt,
+      updateUdt: s.updateUdt,
+      deleteUdt: s.deleteUdt,
+      updateLadBlock: s.updateLadBlock,
+      deleteLadBlock: s.deleteLadBlock,
+      updateSclBlock: s.updateSclBlock,
+      deleteSclBlock: s.deleteSclBlock,
+      updateDataBlock: s.updateDataBlock,
+      deleteDataBlock: s.deleteDataBlock
+    }))
+  )
+  const config = useHardwareStore((s) => s.config)
 
   // Asks first. The block leaves the project only after its file has safely moved to .trash.
-  const confirmAndTrash = async (
+  const confirmAndTrash = (
     label: string,
     folder: 'blocks' | 'types' | 'tags',
     fileName: string | undefined,
     remove: () => void
-  ): Promise<void> => {
-    if (!window.confirm(`Delete ${label}?\n\nIts file moves to the .trash folder inside the project.`)) return
+  ): void => {
+    setPendingTrash({ label, folder, fileName, remove })
+  }
+
+  const executePendingTrash = async (): Promise<void> => {
+    const action = pendingTrash
+    setPendingTrash(null)
+    if (!action) return
+    const { label, folder, fileName, remove } = action
     const projectStore = useProjectStore.getState()
     if (window.electronApi && projectStore.projectPath && fileName) {
       try {
@@ -68,12 +119,13 @@ export const ProjectTree: React.FC = () => {
         const message = err instanceof Error ? err.message : String(err)
         // The built-in demo lives only in memory, so it has no file to move
         if (!message.includes('is not an open project')) {
-          window.alert(`${label} was not deleted because its file could not be moved:\n${message}`)
+          setTrashErrorMessage(`${label} was not deleted because its file could not be moved:\n${message}`)
           return
         }
       }
     }
     remove()
+    markDirty(true)
   }
 
   // Node expansion states
@@ -85,7 +137,7 @@ export const ProjectTree: React.FC = () => {
 
   const handleOpenHardware = () => {
     openTab({
-      id: 'tab_hardware_config',
+      id: makeTabId('hardware'),
       title: 'Device Configuration',
       type: 'hardware'
     })
@@ -93,7 +145,7 @@ export const ProjectTree: React.FC = () => {
 
   const handleOpenAllTags = () => {
     openTab({
-      id: 'tab_all_tags',
+      id: makeTabId('allTags'),
       title: 'All PLC Tags',
       type: 'allTags'
     })
@@ -101,7 +153,7 @@ export const ProjectTree: React.FC = () => {
 
   const handleOpenTagTable = (tableId: string, name: string) => {
     openTab({
-      id: `tab_tags_${tableId}`,
+      id: makeTabId('tagTable', tableId),
       title: name,
       type: 'tagTable',
       targetId: tableId
@@ -110,7 +162,7 @@ export const ProjectTree: React.FC = () => {
 
   const handleOpenUdt = (udtId: string, name: string) => {
     openTab({
-      id: `tab_udt_${udtId}`,
+      id: makeTabId('udt', udtId),
       title: name,
       type: 'udt',
       targetId: udtId
@@ -119,7 +171,7 @@ export const ProjectTree: React.FC = () => {
 
   const handleOpenDb = (fileName: string, name: string) => {
     openTab({
-      id: `tab_db_${fileName}`,
+      id: makeTabId('db', fileName),
       title: name,
       type: 'db',
       targetId: fileName
@@ -128,7 +180,7 @@ export const ProjectTree: React.FC = () => {
 
   const handleOpenLad = (fileName: string, name: string) => {
     openTab({
-      id: `tab_lad_${fileName}`,
+      id: makeTabId('lad', fileName),
       title: name,
       type: 'lad',
       targetId: fileName
@@ -137,7 +189,7 @@ export const ProjectTree: React.FC = () => {
 
   const handleOpenScl = (fileName: string, name: string) => {
     openTab({
-      id: `tab_scl_${fileName}`,
+      id: makeTabId('scl', fileName),
       title: name,
       type: 'scl',
       targetId: fileName
@@ -145,24 +197,39 @@ export const ProjectTree: React.FC = () => {
   }
 
   const handleAddUdt = () => {
-    const id = `udt_${Date.now()}`
+    const id = generateId('udt')
     const name = `UDT_${Math.floor(Math.random() * 900 + 100)}`
-    addUdt({
+    const initialMembers = [
+      { id: generateId('m'), name: 'Enable', dataType: 'BOOL', defaultValue: 'FALSE', comment: 'Enable flag' },
+      { id: generateId('m'), name: 'Status', dataType: 'INT', defaultValue: '0', comment: 'Status code' }
+    ]
+    const udtMap = new Map(udts.map((u) => [u.name, u]))
+    const calculated = S7OffsetCalculator.calculateVariableOffsets(
+      initialMembers.map((m) => ({ ...m, retain: false, accessibleFromHMI: true })),
+      udtMap
+    )
+    const members = initialMembers.map((m, idx) => ({
+      ...m,
+      calculatedOffset: calculated[idx]?.calculatedOffset
+    }))
+    const newUdt = {
       id,
       name,
       fileName: `${name}.udt.json`,
       description: 'Custom User Data Type',
-      members: [
-        { id: 'm1', name: 'Enable', dataType: 'BOOL', defaultValue: 'FALSE', comment: 'Enable flag' },
-        { id: 'm2', name: 'Status', dataType: 'INT', defaultValue: '0', comment: 'Status code' }
-      ]
-    })
+      members,
+      calculatedSizeInBytes: 0
+    }
+    newUdt.calculatedSizeInBytes = S7OffsetCalculator.calculateUdtSize(newUdt, udtMap)
+    addUdt(newUdt)
+    markDirty(true)
     handleOpenUdt(id, name)
   }
 
   const handleAddTagTable = () => {
     const name = `io_table_${Math.floor(Math.random() * 90 + 10)}`
     const tbl = createTagTable(name)
+    markDirty(true)
     handleOpenTagTable(tbl.id, tbl.name)
   }
 
@@ -221,7 +288,7 @@ export const ProjectTree: React.FC = () => {
               {ladBlocks
                 .filter((b) => b.blockType === 'OB')
                 .map((b) => {
-                  const isMainOb = b.name === 'Main' || b.name === 'OB1' || b.fileName.includes('OB1') || b.fileName.includes('Main')
+                  const isMainOb = b.blockType === 'OB' && b.blockNumber === 1
                   return (
                     <div
                       key={b.fileName}
@@ -270,7 +337,7 @@ export const ProjectTree: React.FC = () => {
               {sclBlocks
                 .filter((b) => b.blockType === 'OB')
                 .map((b) => {
-                  const isMainOb = b.name === 'Main' || b.name === 'OB1' || b.fileName.includes('OB1') || b.fileName.includes('Main')
+                  const isMainOb = b.blockType === 'OB' && b.blockNumber === 1
                   return (
                     <div
                       key={b.fileName}
@@ -710,14 +777,7 @@ export const ProjectTree: React.FC = () => {
         {/* 6. Simulation & Fault Panel */}
         <div>
           <div
-            onClick={() => {
-              setSimOpen(!simOpen)
-              openTab({
-                id: 'tab_simulation',
-                title: 'Simulation & Fault Panel',
-                type: 'simulation'
-              })
-            }}
+            onClick={() => setSimOpen(!simOpen)}
             className="flex items-center gap-1.5 px-1 py-1 rounded-none text-industrial-400 hover:text-industrial-200 hover:bg-industrial-850 cursor-pointer group"
           >
             {simOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
@@ -729,7 +789,7 @@ export const ProjectTree: React.FC = () => {
               <div
                 onClick={() =>
                   openTab({
-                    id: 'tab_simulation',
+                    id: makeTabId('simulation'),
                     title: 'Simulation & Fault Panel',
                     type: 'simulation'
                   })
@@ -743,7 +803,7 @@ export const ProjectTree: React.FC = () => {
               <div
                 onClick={() =>
                   openTab({
-                    id: 'tab_trace_scope',
+                    id: makeTabId('trace'),
                     title: 'Trace Oscilloscope',
                     type: 'trace'
                   })
@@ -797,6 +857,32 @@ export const ProjectTree: React.FC = () => {
           }
           setRenameTarget(null)
         }}
+      />
+
+      <ConfirmModal
+        isOpen={pendingTrash !== null}
+        title="Confirm Delete"
+        message={
+          pendingTrash
+            ? `Delete ${pendingTrash.label}?\n\nIts file moves to the .trash folder inside the project.`
+            : ''
+        }
+        confirmLabel="Delete"
+        tone="danger"
+        onCancel={() => setPendingTrash(null)}
+        onConfirm={() => {
+          void executePendingTrash()
+        }}
+      />
+
+      <ConfirmModal
+        isOpen={trashErrorMessage !== null}
+        title="Could Not Delete File"
+        message={trashErrorMessage || ''}
+        confirmLabel="OK"
+        alertOnly
+        onCancel={() => setTrashErrorMessage(null)}
+        onConfirm={() => setTrashErrorMessage(null)}
       />
     </div>
   )

@@ -1,60 +1,84 @@
 import chokidar, { FSWatcher } from 'chokidar'
 import * as path from 'path'
-import * as fs from 'fs/promises'
 import { BrowserWindow } from 'electron'
 import { FileChangeEventPayload } from '../shared/types/ipc'
 
+function normalizeDir(dir: string): string {
+  const resolved = path.resolve(dir)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
 export class ProjectWatcher {
   private watcher: FSWatcher | null = null
+  private generation = 0
+  private activeDir: string | null = null
 
-  public startWatching(projectDir: string, getWindow: () => BrowserWindow | null): void {
-    this.stopWatching()
+  public async startWatching(projectDir: string, getWindow: () => BrowserWindow | null): Promise<void> {
+    const norm = normalizeDir(projectDir)
+    if (this.watcher && this.activeDir === norm) {
+      return
+    }
 
-    this.watcher = chokidar.watch(projectDir, {
+    await this.stopWatching()
+    const myGen = ++this.generation
+
+    const newWatcher = chokidar.watch(projectDir, {
       // Tested relative to the project, so a parent folder named 'out' does not hide every file
       ignored: (candidate: string) => {
         const relative = path.relative(projectDir, candidate)
-        return relative.split(path.sep).some((part) => part.startsWith('.') || part === 'node_modules' || part === 'out' || part === 'dist')
+        return relative
+          .split(path.sep)
+          .some(
+            (part) =>
+              part.startsWith('.') ||
+              part.endsWith('.tmp') ||
+              part === 'node_modules' ||
+              part === 'out' ||
+              part === 'dist'
+          )
       },
       persistent: true,
       ignoreInitial: true,
       depth: 3
     })
 
-    const notify = async (eventType: 'add' | 'change' | 'unlink', filePath: string) => {
+    if (myGen !== this.generation) {
+      void newWatcher.close().catch(() => {})
+      return
+    }
+
+    this.watcher = newWatcher
+    this.activeDir = norm
+
+    const notify = (eventType: 'add' | 'change' | 'unlink', filePath: string): void => {
+      if (myGen !== this.generation) return
       const win = getWindow()
       if (!win || win.isDestroyed()) return
 
       const relativePath = path.relative(projectDir, filePath)
-      let content: string | undefined = undefined
-
-      if (eventType !== 'unlink') {
-        try {
-          content = await fs.readFile(filePath, 'utf-8')
-        } catch {
-          // File might be busy
-        }
-      }
-
       const payload: FileChangeEventPayload = {
         projectPath: projectDir,
         relativePath,
-        eventType,
-        content
+        eventType
       }
-
       win.webContents.send('project:fileChanged', payload)
     }
 
-    this.watcher.on('add', (filePath) => notify('add', filePath))
-    this.watcher.on('change', (filePath) => notify('change', filePath))
-    this.watcher.on('unlink', (filePath) => notify('unlink', filePath))
+    newWatcher.on('add', (filePath) => notify('add', filePath))
+    newWatcher.on('change', (filePath) => notify('change', filePath))
+    newWatcher.on('unlink', (filePath) => notify('unlink', filePath))
+    newWatcher.on('error', (err) => {
+      console.warn('[ProjectWatcher] Watcher error:', err)
+    })
   }
 
-  public stopWatching(): void {
-    if (this.watcher) {
-      this.watcher.close().catch(() => {})
-      this.watcher = null
+  public async stopWatching(): Promise<void> {
+    this.generation++
+    this.activeDir = null
+    const existing = this.watcher
+    this.watcher = null
+    if (existing) {
+      await existing.close().catch(() => {})
     }
   }
 }

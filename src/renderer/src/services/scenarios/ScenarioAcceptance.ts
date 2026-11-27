@@ -9,9 +9,10 @@
  * - interpretation: what the specification leaves open, read the way a plant needs it. The user may disagree
  */
 import { ProjectLoadPayload } from '@shared/types/ipc'
-import { LadderNetwork, LadderNode, LadderSeriesNode } from '@shared/types/ladder'
+import { LadderNetwork } from '@shared/types/ladder'
 import { TagDefinition } from '@shared/types/tags'
 import { BehaviorStep, BehaviorTest, runBehaviorTest } from '../ai/CircuitBehaviorTest'
+import { extractBitAddresses, walkLadderNodes } from '../ai/aiClientUtils'
 
 type Value = boolean | number
 
@@ -76,13 +77,9 @@ export interface AcceptanceSummary {
   failedInterpretation: string[]
 }
 
-const addressPattern = /(^|[^A-Za-z0-9_.%])%?([IQM])(\d{1,3})\.([0-7])(?![0-9])/gi
-
 /** Bit addresses written in a text, as %I0.0 / %Q1.2 / %M20.0 */
 export function bitAddressesInText(text: string): Set<string> {
-  const found = new Set<string>()
-  for (const m of text.matchAll(addressPattern)) found.add(`%${m[2].toUpperCase()}${Number(m[3])}.${m[4]}`)
-  return found
+  return extractBitAddresses(text, 'IQM')
 }
 
 /** How much of the request's own I and Q addresses a scenario must account for */
@@ -130,11 +127,13 @@ export function summarizeAcceptance(scenario: Scenario, results: CheckResult[], 
 }
 
 /** One line: spec 9/11 · kalan: reset, idle · yorum 1/3 */
-export function formatAcceptanceLine(s: AcceptanceSummary): string {
-  const left = s.failedSpec.length ? ` · kalan: ${s.failedSpec.join(', ')}` : ''
+export function formatAcceptanceLine(s: AcceptanceSummary, isTurkish = true): string {
+  const failLabel = isTurkish ? 'kalan' : 'failed'
+  const interpLabel = isTurkish ? 'yorum' : 'interpretation'
+  const left = s.failedSpec.length ? ` · ${failLabel}: ${s.failedSpec.join(', ')}` : ''
   const interp = s.interpretationTotal
-    ? ` · yorum ${s.interpretationPassed}/${s.interpretationTotal}` +
-      (s.failedInterpretation.length ? ` (kalan: ${s.failedInterpretation.join(', ')})` : '')
+    ? ` · ${interpLabel} ${s.interpretationPassed}/${s.interpretationTotal}` +
+      (s.failedInterpretation.length ? ` (${failLabel}: ${s.failedInterpretation.join(', ')})` : '')
     : ''
   return `spec ${s.specPassed}/${s.specTotal}${left}${interp}`
 }
@@ -181,13 +180,6 @@ export function testForCheck(scenario: Scenario, checkId: string): BehaviorTest 
 
 const normalize = (address: string): string => `%${address.replace(/[\s%"]/g, '').toUpperCase()}`
 
-function walk(nodes: LadderSeriesNode[] | undefined, visit: (n: LadderNode) => void): void {
-  for (const node of nodes || []) {
-    if (node.kind === 'parallel') node.branches.forEach((b) => walk(b, visit))
-    else visit(node)
-  }
-}
-
 /** Addresses the program reads with a contact and writes with a coil */
 function addressesInProgram(project: ProjectLoadPayload): { read: Set<string>; written: Set<string> } {
   const tags = new Map(project.tagTables.flatMap((t) => t.tags || []).map((t) => [t.name.toLowerCase(), t.address]))
@@ -200,7 +192,7 @@ function addressesInProgram(project: ProjectLoadPayload): { read: Set<string>; w
   const written = new Set<string>()
   for (const block of project.ladBlocks) {
     for (const net of block.networks || []) {
-      walk(net.nodes, (n) => {
+      walkLadderNodes(net.nodes, (n) => {
         if (n.kind === 'contact') read.add(addressOf(n.operand, n.address))
         if (n.kind === 'coil') written.add(addressOf(n.operand, n.address))
         // A counter reads its count-down and reset inputs, and a comparator its operands, without a contact
@@ -212,32 +204,73 @@ function addressesInProgram(project: ProjectLoadPayload): { read: Set<string>; w
   return { read, written }
 }
 
-export function evaluateScenario(scenario: Scenario, project: ProjectLoadPayload): CheckResult[] {
+export function evaluateScenario(scenario: Scenario, project: ProjectLoadPayload, isTurkish = true): CheckResult[] {
   const results: CheckResult[] = []
   const { read, written } = addressesInProgram(project)
   const notRead = scenario.mustRead.map(normalize).filter((a) => !read.has(a))
   const notWritten = scenario.mustWrite.map(normalize).filter((a) => !written.has(a))
+  const tagByAddr = new Map<string, string[]>()
+  for (const table of project.tagTables || []) {
+    for (const t of table.tags || []) {
+      const norm = normalize(t.address || '')
+      if (!norm) continue
+      const list = tagByAddr.get(norm) || []
+      list.push(t.name.toLowerCase())
+      tagByAddr.set(norm, list)
+    }
+  }
   results.push({
-    check: { id: 'reads', kind: 'spec', title: 'Spesifikasyondaki bütün girişler programda okunuyor' },
+    check: {
+      id: 'reads',
+      kind: 'spec',
+      title: isTurkish ? 'Spesifikasyondaki bütün girişler programda okunuyor' : 'All inputs from the specification are read in the program'
+    },
     passed: notRead.length === 0,
-    failures: notRead.length ? [`Hiçbir kontak okumuyor: ${notRead.join(', ')}`] : []
+    failures: notRead.length
+      ? [isTurkish ? `Hiçbir kontak okumuyor: ${notRead.join(', ')}` : `No contact reads: ${notRead.join(', ')}`]
+      : []
   })
   results.push({
-    check: { id: 'writes', kind: 'spec', title: 'Spesifikasyondaki bütün çıkışlar ve M bitleri kendi adresinde yazılıyor' },
+    check: {
+      id: 'writes',
+      kind: 'spec',
+      title: isTurkish
+        ? 'Spesifikasyondaki bütün çıkışlar ve M bitleri kendi adresinde yazılıyor'
+        : 'All outputs and M bits from the specification are written at their addresses'
+    },
     passed: notWritten.length === 0,
-    failures: notWritten.length ? [`Hiçbir bobin yazmıyor: ${notWritten.join(', ')}`] : []
+    failures: notWritten.length
+      ? [isTurkish ? `Hiçbir bobin yazmıyor: ${notWritten.join(', ')}` : `No coil writes: ${notWritten.join(', ')}`]
+      : []
   })
 
   for (const check of scenario.checks) {
     const test = testForCheck(scenario, check.id)
     if (!test) {
-      results.push({ check, passed: false, failures: ['Bu kontrolün zaman çizelgesi yok (senaryo tanımında hata).'] })
+      results.push({
+        check,
+        passed: false,
+        failures: [isTurkish ? 'Bu kontrolün zaman çizelgesi yok (senaryo tanımında hata).' : 'This check has no timeline (invalid scenario definition).']
+      })
       continue
     }
-    const result = runBehaviorTest(test, project)
+    const result = runBehaviorTest(test, project, { extraWatched: check.mustTurnOn })
     const failures = [...result.failures]
+    const seenLower = new Set(result.seenOn.map((s) => s.replace(/"/g, '').trim().toLowerCase()))
+    const seenAddrs = new Set(
+      result.seenOn
+        .map((s) => (/^%?[IQM]/i.test(s.trim()) ? normalize(s) : ''))
+        .filter(Boolean)
+    )
     for (const name of check.mustTurnOn || []) {
-      if (!result.seenOn.includes(name)) failures.push(`${name} hiç 1 olmadı.`)
+      const cleanName = name.replace(/"/g, '').trim()
+      const cleanLower = cleanName.toLowerCase()
+      const normAddr = /^%?[IQM]/i.test(cleanName) ? normalize(cleanName) : ''
+      const linkedTagSeen = normAddr ? (tagByAddr.get(normAddr) || []).some((tn) => seenLower.has(tn)) : false
+      const matched = seenLower.has(cleanLower) || (normAddr ? seenAddrs.has(normAddr) : false) || linkedTagSeen
+      if (!matched) {
+        failures.push(isTurkish ? `${name} hiç 1 olmadı.` : `${name} never turned ON (TRUE).`)
+      }
     }
     results.push({ check, passed: failures.length === 0, failures })
   }

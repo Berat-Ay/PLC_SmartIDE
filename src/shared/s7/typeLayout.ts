@@ -1,9 +1,9 @@
 // S7 data type model: parses type names, computes memory layout and converts values to and from bytes.
 // Layout follows S7 standard access rules; optimized blocks use the same layout internally here,
 // which is not observable because optimized blocks do not allow absolute addressing.
-import { parseS7Time } from './time'
+import { parseS7LTimeNs, parseS7Time } from './time'
 
-export type BuiltinInstanceKind = 'TON' | 'TOF' | 'TP' | 'CTU' | 'CTD' | 'CTUD' | 'R_TRIG' | 'F_TRIG'
+export type BuiltinInstanceKind = 'TON' | 'TOF' | 'TP' | 'TONR' | 'CTU' | 'CTD' | 'CTUD' | 'R_TRIG' | 'F_TRIG'
 
 export interface ElementaryType {
   kind: 'elementary'
@@ -96,9 +96,11 @@ const BUILTIN_INSTANCES: Record<string, BuiltinInstanceKind> = {
   TON: 'TON',
   TOF: 'TOF',
   TP: 'TP',
+  TONR: 'TONR',
   TON_TIME: 'TON',
   TOF_TIME: 'TOF',
   TP_TIME: 'TP',
+  TONR_TIME: 'TONR',
   IEC_TIMER: 'TON',
   CTU: 'CTU',
   CTD: 'CTD',
@@ -149,7 +151,8 @@ export function parseTypeName(
 
   const stringMatch = name.match(/^string(?:\s*\[\s*(\d+)\s*\])?$/i)
   if (stringMatch) {
-    const maxLength = stringMatch[1] ? parseInt(stringMatch[1], 10) : 254
+    const parsedLen = stringMatch[1] ? parseInt(stringMatch[1], 10) : 254
+    const maxLength = Math.max(1, Math.min(254, isNaN(parsedLen) ? 254 : parsedLen))
     return { kind: 'string', maxLength, byteSize: maxLength + 2 }
   }
 
@@ -460,8 +463,31 @@ export function roundHalfEven(n: number): number {
   return floor % 2 === 0 ? floor : floor + 1
 }
 
+const INT64_MIN = -9223372036854775808n
+const INT64_MAX = 9223372036854775807n
+const UINT64_MAX = 18446744073709551615n
+
+function toSafeBigInt(value: unknown, fallbackNum: number, signed: boolean): bigint {
+  let b: bigint
+  if (typeof value === 'bigint') {
+    b = value
+  } else if (!Number.isFinite(fallbackNum)) {
+    b = 0n
+  } else {
+    b = BigInt(Math.trunc(fallbackNum))
+  }
+  if (signed) {
+    if (b < INT64_MIN) return INT64_MIN
+    if (b > INT64_MAX) return INT64_MAX
+    return b
+  }
+  if (b < 0n) return b & UINT64_MAX
+  if (b > UINT64_MAX) return UINT64_MAX
+  return b
+}
+
 function writeElementary(bytes: Uint8Array, view: DataView, name: string, off: number, bit: number, value: unknown): void {
-  const raw = toNumber(value)
+  const raw = typeof value === 'bigint' ? Number(value) : toNumber(value)
   const n = name === 'REAL' || name === 'LREAL' || Number.isInteger(raw) || !isFinite(raw) ? raw : roundHalfEven(raw)
   switch (name) {
     case 'BOOL':
@@ -498,14 +524,26 @@ function writeElementary(bytes: Uint8Array, view: DataView, name: string, off: n
       return
     case 'LWORD':
     case 'ULINT':
-    case 'LINT':
-    case 'LTIME':
-      view.setBigInt64(off, BigInt(Math.trunc(n)), false)
+      view.setBigUint64(off, toSafeBigInt(value, n, false), false)
       return
+    case 'LINT':
+      view.setBigInt64(off, toSafeBigInt(value, n, true), false)
+      return
+    case 'LTIME': {
+      if (typeof value === 'string') {
+        const parsedNs = parseS7LTimeNs(value)
+        if (parsedNs !== null) {
+          view.setBigInt64(off, parsedNs, false)
+          return
+        }
+      }
+      view.setBigInt64(off, toSafeBigInt(value, n, true), false)
+      return
+    }
   }
 }
 
-/** Parses a start value such as TRUE, 4.5, 16#FF or T#5s for the given type. */
+/** Parses a start value such as TRUE, 4.5, 16#FF, INT#-5, 1_000, 'A' or T#5s for the given type. */
 export function parseStartValue(raw: string | undefined, type: S7Type): unknown {
   if (raw === undefined || raw === null) return undefined
   const text = String(raw).trim()
@@ -517,13 +555,44 @@ export function parseStartValue(raw: string | undefined, type: S7Type): unknown 
   const upper = text.toUpperCase()
   if (upper === 'TRUE') return true
   if (upper === 'FALSE') return false
-  if (/^(LTIME|TIME|LT|T)#/i.test(text)) return parseS7Time(text) ?? undefined
+  if (/^(LTIME|TIME|LT|T)#/i.test(text)) {
+    if (type.name === 'LTIME') return parseS7LTimeNs(text) ?? undefined
+    return parseS7Time(text) ?? undefined
+  }
 
-  const stripped = text.replace(/^[A-Z_]+#(?=\d|16#|8#|2#)/i, '')
-  const radix = stripped.match(/^(16|8|2)#([0-9A-Fa-f_]+)$/)
-  if (radix) return parseInt(radix[2].replace(/_/g, ''), parseInt(radix[1], 10))
+  if ((type.name === 'CHAR' || type.name === 'WCHAR') && /^'.*'$/.test(text) && text.length >= 3) {
+    return text.charCodeAt(1)
+  }
+
+  const stripped = text.replace(/^[A-Z0-9_]+#(?=[+-]?(?:\d|16#|8#|2#))/i, '').replace(/_/g, '')
+  const radix = stripped.match(/^([+-]?)(16|8|2)#([0-9A-Fa-f]+)$/)
+  if (radix) {
+    const magnitude = parseInt(radix[3], parseInt(radix[2], 10))
+    return radix[1] === '-' ? -magnitude : magnitude
+  }
   const n = Number(stripped)
   return isNaN(n) ? undefined : n
+}
+
+function applyArrayStartValues(bytes: Uint8Array, view: DataView, arr: ArrayType, offset: number): void {
+  const count = Math.max(0, arr.high - arr.low + 1)
+  if (arr.element.kind === 'struct') {
+    for (let i = 0; i < count; i++) {
+      applyStartValues(bytes, view, arr.element, offset + i * arr.stride)
+    }
+  } else if (arr.element.kind === 'fbInstance') {
+    for (let i = 0; i < count; i++) {
+      applyStartValues(bytes, view, arr.element.layout, offset + i * arr.stride)
+    }
+  } else if (arr.element.kind === 'string') {
+    for (let i = 0; i < count; i++) {
+      writeValue(bytes, view, arr.element, offset + i * arr.stride, 0, '')
+    }
+  } else if (arr.element.kind === 'array') {
+    for (let i = 0; i < count; i++) {
+      applyArrayStartValues(bytes, view, arr.element, offset + i * arr.stride)
+    }
+  }
 }
 
 /** Applies start values recursively; members without one stay zero. */
@@ -537,10 +606,8 @@ export function applyStartValues(bytes: Uint8Array, view: DataView, layout: Stru
     } else if (m.type.kind === 'string') {
       const parsed = parseStartValue(m.defaultValue, m.type)
       writeValue(bytes, view, m.type, offset, 0, parsed ?? '')
-    } else if (m.type.kind === 'array' && m.type.element.kind === 'struct') {
-      for (let i = 0; i <= m.type.high - m.type.low; i++) {
-        applyStartValues(bytes, view, m.type.element, offset + i * m.type.stride)
-      }
+    } else if (m.type.kind === 'array') {
+      applyArrayStartValues(bytes, view, m.type, offset)
     } else if (m.type.kind === 'elementary') {
       const parsed = parseStartValue(m.defaultValue, m.type)
       if (parsed !== undefined) writeValue(bytes, view, m.type, offset, m.bitOffset, parsed)
@@ -549,15 +616,32 @@ export function applyStartValues(bytes: Uint8Array, view: DataView, layout: Stru
 }
 
 /** Clears and re-initializes members without RETAIN, as a CPU does on the STOP to RUN transition. */
-export function reinitNonRetain(bytes: Uint8Array, view: DataView, layout: StructType): void {
+export function reinitNonRetain(bytes: Uint8Array, view: DataView, layout: StructType, base = 0): void {
   for (const m of layout.members) {
     if ((m.source as { retain?: boolean } | undefined)?.retain) continue
-    if (m.type.kind === 'elementary' && m.type.byteSize === 0) {
-      const parsed = parseStartValue(m.defaultValue, m.type)
-      writeValue(bytes, view, m.type, m.byteOffset, m.bitOffset, parsed ?? false)
+    const offset = base + m.byteOffset
+    if (m.type.kind === 'struct') {
+      reinitNonRetain(bytes, view, m.type, offset)
       continue
     }
-    bytes.fill(0, m.byteOffset, m.byteOffset + m.type.byteSize)
-    applyStartValues(bytes, view, { kind: 'struct', members: [m], byName: new Map(), byteSize: layout.byteSize })
+    if (m.type.kind === 'fbInstance') {
+      reinitNonRetain(bytes, view, m.type.layout, offset)
+      continue
+    }
+    if (m.type.kind === 'elementary' && m.type.byteSize === 0) {
+      const parsed = parseStartValue(m.defaultValue, m.type)
+      writeValue(bytes, view, m.type, offset, m.bitOffset, parsed ?? false)
+      continue
+    }
+    bytes.fill(0, offset, offset + m.type.byteSize)
+    if (m.type.kind === 'string') {
+      const parsed = parseStartValue(m.defaultValue, m.type)
+      writeValue(bytes, view, m.type, offset, 0, parsed ?? '')
+    } else if (m.type.kind === 'array') {
+      applyArrayStartValues(bytes, view, m.type, offset)
+    } else if (m.type.kind === 'elementary') {
+      const parsed = parseStartValue(m.defaultValue, m.type)
+      if (parsed !== undefined) writeValue(bytes, view, m.type, offset, m.bitOffset, parsed)
+    }
   }
 }

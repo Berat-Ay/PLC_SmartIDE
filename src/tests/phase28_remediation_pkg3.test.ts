@@ -341,6 +341,10 @@ async function run(): Promise<void> {
     path.join(repoRoot, 'src/renderer/src/components/center/ladder/SvgLadderCanvas.tsx'),
     'utf8'
   )
+  const ladderRenderersSrc = fs.readFileSync(
+    path.join(repoRoot, 'src/renderer/src/components/center/ladder/LadderNodeRenderers.tsx'),
+    'utf8'
+  )
   const ribbonSrc = fs.readFileSync(
     path.join(repoRoot, 'src/renderer/src/components/center/ladder/InstructionRibbon.tsx'),
     'utf8'
@@ -355,11 +359,11 @@ async function run(): Promise<void> {
     svgCanvasSrc.includes("e.shiftKey && e.key === 'F8'") &&
       svgCanvasSrc.includes("e.shiftKey && e.key === 'F7'") &&
       !svgCanvasSrc.includes("else if (e.ctrlKey && (e.key === 'b' || e.key === 'B'))") &&
-      svgCanvasSrc.includes('data-testid={`comparator-op1-${cmp.id}`}') &&
-      svgCanvasSrc.includes('data-testid={`comparator-op2-${cmp.id}`}') &&
-      svgCanvasSrc.includes('data-testid={`comparator-op-${cmp.id}`}') &&
-      svgCanvasSrc.includes('data-testid={`math-pin-${pinKey}-${m.id}`}') &&
-      svgCanvasSrc.includes('data-testid={`math-op-${node.id}`}') &&
+      ladderRenderersSrc.includes('data-testid={`comparator-op1-${cmp.id}`}') &&
+      ladderRenderersSrc.includes('data-testid={`comparator-op2-${cmp.id}`}') &&
+      ladderRenderersSrc.includes('data-testid={`comparator-op-${cmp.id}`}') &&
+      ladderRenderersSrc.includes('data-testid={`math-pin-${pinKey}-${m.id}`}') &&
+      ladderRenderersSrc.includes('data-testid={`math-op-${node.id}`}') &&
       ribbonSrc.includes('Shift+F7') &&
       ribbonSrc.includes('Shift+F8')
   )

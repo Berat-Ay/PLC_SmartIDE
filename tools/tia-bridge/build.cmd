@@ -8,6 +8,6 @@ if not exist "%CSC%" (
   exit /b 1
 )
 if "%~1"=="" (set "OUT=%HERE%TiaBridge.exe") else (set "OUT=%~1")
-"%CSC%" /nologo /optimize+ /platform:x64 /target:exe "/out:%OUT%" /reference:System.Core.dll /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll "%HERE%TiaBridge.cs"
+"%CSC%" /nologo /optimize+ /platform:x64 /target:exe "/out:%OUT%" /reference:System.Core.dll /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll /reference:System.Xml.dll "%HERE%TiaBridge.cs"
 if errorlevel 1 exit /b 1
 echo Built %OUT%

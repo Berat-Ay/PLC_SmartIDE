@@ -17,16 +17,10 @@ import {
   specViolationsForModel,
   summarizeAcceptance
 } from '../scenarios/ScenarioAcceptance'
-import { LadderNetwork, LadderNode, LadderSeriesNode } from '@shared/types/ladder'
+import { LadderNetwork } from '@shared/types/ladder'
 import { AiCircuitSynthesisPayload } from './aiTypes'
 import { projectInStores } from './ProjectContext'
-
-function walkLadder(nodes: LadderSeriesNode[] | undefined, visit: (n: LadderNode) => void): void {
-  for (const node of nodes || []) {
-    if (node.kind === 'parallel') node.branches.forEach((b) => walkLadder(b, visit))
-    else visit(node)
-  }
-}
+import { walkLadderNodes } from './aiClientUtils'
 
 function listNames(names: string[], max = 12): string {
   return names.length > max ? `${names.slice(0, max).join(', ')} (+${names.length - max})` : names.join(', ')
@@ -101,16 +95,23 @@ export function checkCircuitBehavior(
   const checked = new Set(
     test.steps.flatMap((step) => Object.keys(step.expect || {})).map((k) => k.replace(/"/g, '').trim().toLowerCase())
   )
+  const liveTagByName = new Map(
+    useTagStore
+      .getState()
+      .tagTables.flatMap((t) => t.tags)
+      .map((t) => [t.name.toLowerCase(), t])
+  )
   const writtenNames = new Set<string>()
   const untested: string[] = []
   let untestedOutput = false
   for (const net of circuit?.networks || []) {
-    walkLadder(net.nodes, (n) => {
+    walkLadderNodes(net.nodes, (n) => {
       if (n.kind !== 'coil' || !n.operand) return
       const name = n.operand.replace(/"/g, '').trim()
+      const addr = (n.address || liveTagByName.get(name.toLowerCase())?.address || '').trim()
       writtenNames.add(name.toLowerCase())
-      if (checked.has(name.toLowerCase()) || checked.has((n.address || '').trim().toLowerCase())) return
-      if (/^%Q/i.test((n.address || '').trim())) untestedOutput = true
+      if (checked.has(name.toLowerCase()) || (addr && checked.has(addr.toLowerCase()))) return
+      if (/^%Q/i.test(addr)) untestedOutput = true
       if (!untested.includes(name)) untested.push(name)
     })
   }
@@ -169,15 +170,15 @@ export function judgeAcceptance(
   gate: AcceptanceGate,
   isTurkish: boolean
 ): { problems: string[]; summary: AcceptanceSummary; note: string } {
-  const results = evaluateScenario(scenario, projectInStores())
+  const results = evaluateScenario(scenario, projectInStores(), isTurkish)
   const summary = summarizeAcceptance(scenario, results, gate)
-  BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', `Acceptance (${scenario.id}, ${gate}): ${formatAcceptanceLine(summary)}`, {
+  BlackBoxLogger.getInstance().log('AI_PARSE_AND_AST_INJECTION', `Acceptance (${scenario.id}, ${gate}): ${formatAcceptanceLine(summary, isTurkish)}`, {
     failures: results.filter((r) => !r.passed).map((r) => ({ id: r.check.id, kind: r.check.kind, failures: r.failures }))
   })
   const failedTitles = results.filter((r) => !r.passed).map((r) => `- ${r.check.title}${r.check.kind === 'interpretation' ? (isTurkish ? ' [yorum]' : ' [interpretation]') : ''}`)
   const heading = isTurkish
-    ? `**Kabul testi (${scenario.title}):** ${formatAcceptanceLine(summary)}`
-    : `**Acceptance test (${scenario.title}):** ${formatAcceptanceLine(summary)}`
+    ? `**Kabul testi (${scenario.title}):** ${formatAcceptanceLine(summary, isTurkish)}`
+    : `**Acceptance test (${scenario.title}):** ${formatAcceptanceLine(summary, isTurkish)}`
   const how = isTurkish
     ? gate === 'enforce'
       ? 'Kabul testi kapı olarak çalıştı: spesifikasyon hataları modele gönderildi. Bu sonuç modelin kendi başarısı değil, üst sınırdır.'
@@ -195,12 +196,6 @@ export function judgeAcceptance(
  */
 function readsNothingWrites(newNetworks: LadderNetwork[]): string[] {
   const key = (op: string | undefined): string => (op || '').replace(/"/g, '').trim().toLowerCase()
-  const walk = (nodes: LadderSeriesNode[] | undefined, visit: (n: LadderNode) => void): void => {
-    for (const node of nodes || []) {
-      if (node.kind === 'parallel') node.branches.forEach((b) => walk(b, visit))
-      else visit(node)
-    }
-  }
 
   const tags = new Map(useTagStore.getState().tagTables.flatMap((t) => t.tags).map((t) => [t.name.toLowerCase(), t]))
   const constants = new Set<string>()
@@ -222,7 +217,7 @@ function readsNothingWrites(newNetworks: LadderNetwork[]): string[] {
     if (key(address)) written.add(key(address))
   }
   for (const net of ob1?.networks || []) {
-    walk(net.nodes, (n) => {
+    walkLadderNodes(net.nodes, (n) => {
       if (n.kind === 'coil') write(n.operand, n.address)
       else if (n.kind === 'math') write(n.out)
       else if (n.kind === 'timer') [n.instanceDb, n.qOperand, n.etOperand].forEach((o) => write(o))
@@ -248,7 +243,7 @@ function readsNothingWrites(newNetworks: LadderNetwork[]): string[] {
     found.set(k, at.startsWith('%') && at.toLowerCase() !== k ? `${shown} (${at})` : shown)
   }
   for (const net of newNetworks) {
-    walk(net.nodes, (n) => {
+    walkLadderNodes(net.nodes, (n) => {
       if (n.kind === 'contact') read(n.operand, n.address)
       else if (n.kind === 'comparator') [n.op1, n.op2].forEach((o) => read(o))
       else if (n.kind === 'math') [n.in1, n.in2, n.value, n.min, n.max].forEach((o) => read(o))

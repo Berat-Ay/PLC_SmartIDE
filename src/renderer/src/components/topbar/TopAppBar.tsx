@@ -23,6 +23,7 @@ import {
   Zap,
   FileText
 } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
 import { useProjectStore } from '../../stores/useProjectStore'
 import { useUIStore } from '../../stores/useUIStore'
 import { useTagStore } from '../../stores/useTagStore'
@@ -41,25 +42,29 @@ export const TopAppBar: React.FC = () => {
   const [isGuiDebuggerOpen, setGuiDebuggerOpen] = useState(false)
   const menuBarRef = useRef<HTMLDivElement>(null)
 
-  const {
-    metadata,
-    isDirty,
-    saveProjectToDisk,
-    compileProject,
-    loadDemoProject,
-    closeProject
-  } = useProjectStore()
+  const { metadata, isDirty, saveProjectToDisk, compileProject, loadDemoProject, closeProject } = useProjectStore(
+    useShallow((s) => ({
+      metadata: s.metadata,
+      isDirty: s.isDirty,
+      saveProjectToDisk: s.saveProjectToDisk,
+      compileProject: s.compileProject,
+      loadDemoProject: s.loadDemoProject,
+      closeProject: s.closeProject
+    }))
+  )
 
-  const { totalCollisions } = useTagStore()
-  const {
-    state: runtimeState,
-    metrics,
-    isMonitoring,
-    start,
-    stop,
-    reset,
-    toggleMonitoring
-  } = useRuntimeStore()
+  const totalCollisions = useTagStore((s) => s.totalCollisions)
+  const { runtimeState, metrics, isMonitoring, start, stop, reset, toggleMonitoring } = useRuntimeStore(
+    useShallow((s) => ({
+      runtimeState: s.state,
+      metrics: s.metrics,
+      isMonitoring: s.isMonitoring,
+      start: s.start,
+      stop: s.stop,
+      reset: s.reset,
+      toggleMonitoring: s.toggleMonitoring
+    }))
+  )
 
   const {
     leftDockCollapsed,
@@ -72,9 +77,22 @@ export const TopAppBar: React.FC = () => {
     toggleSplitView,
     setBottomActiveTab,
     setPortalViewOpen
-  } = useUIStore()
+  } = useUIStore(
+    useShallow((s) => ({
+      leftDockCollapsed: s.leftDockCollapsed,
+      rightDockCollapsed: s.rightDockCollapsed,
+      bottomDockCollapsed: s.bottomDockCollapsed,
+      isSplitView: s.isSplitView,
+      toggleLeftDock: s.toggleLeftDock,
+      toggleRightDock: s.toggleRightDock,
+      toggleBottomDock: s.toggleBottomDock,
+      toggleSplitView: s.toggleSplitView,
+      setBottomActiveTab: s.setBottomActiveTab,
+      setPortalViewOpen: s.setPortalViewOpen
+    }))
+  )
 
-  const { ladBlocks, updateLadBlock } = useBlockStore()
+  const updateLadBlock = useBlockStore((s) => s.updateLadBlock)
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -90,10 +108,14 @@ export const TopAppBar: React.FC = () => {
   const handleOpenProject = async () => {
     setActiveMenu(null)
     if (window.electronApi) {
-      const selected = await window.electronApi.selectProjectDirectory()
-      if (selected) {
-        const payload = await window.electronApi.openProject(selected)
-        useProjectStore.getState().setProject(payload)
+      try {
+        const selected = await window.electronApi.selectProjectDirectory()
+        if (selected) {
+          const payload = await window.electronApi.openProject(selected)
+          useProjectStore.getState().setProject(payload)
+        }
+      } catch (err) {
+        console.error('Failed to open project:', err)
       }
     } else {
       loadDemoProject()
@@ -108,12 +130,31 @@ export const TopAppBar: React.FC = () => {
 
   const handleAutoMergeAllCoils = () => {
     setActiveMenu(null)
-    const activeLad = ladBlocks[0]
-    if (!activeLad) return
-    const conflicts = DoubleCoilDetector.detectConflicts(activeLad)
-    if (conflicts.length > 0) {
-      const refactored = DoubleCoilDetector.autoRefactorBlock(activeLad, conflicts[0].operand)
-      updateLadBlock(activeLad.fileName, refactored)
+    const { tabs, activeTabId } = useUIStore.getState()
+    const currentTab = tabs.find((t) => t.id === activeTabId)
+    const { ladBlocks } = useBlockStore.getState()
+    const { tagTables } = useTagStore.getState()
+    const activeLad = currentTab?.type === 'lad' ? ladBlocks.find((b) => b.fileName === currentTab.targetId) : undefined
+    const targets = activeLad ? [activeLad] : ladBlocks
+
+    let changedAny = false
+    for (const blk of targets) {
+      let currentBlock = blk
+      const seen = new Set<string>()
+      while (seen.size < 20) {
+        const conflicts = DoubleCoilDetector.detectConflicts(currentBlock, tagTables)
+        const nextConflict = conflicts.find((c) => !seen.has(c.normalizedOperand))
+        if (!nextConflict) break
+        seen.add(nextConflict.normalizedOperand)
+        currentBlock = DoubleCoilDetector.autoRefactorBlock(currentBlock, nextConflict.operand, tagTables)
+        changedAny = true
+      }
+      if (currentBlock !== blk) {
+        updateLadBlock(blk.fileName, currentBlock)
+      }
+    }
+    if (changedAny) {
+      useProjectStore.getState().markDirty(true)
     }
   }
 

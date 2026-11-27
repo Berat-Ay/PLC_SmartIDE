@@ -92,7 +92,7 @@ export function normalizeTechnicalTokens(text: string): string[] {
   const rawTokens = trNormalized.match(/[a-z0-9_]{2,}/g) || []
 
   const stopwords = new Set([
-    've', 'ile', 'veya', 'bir', 'bu', 'da', 'de', 'icin', 'icin', 'the',
+    've', 'ile', 'veya', 'bir', 'bu', 'da', 'de', 'icin', 'the',
     'and', 'or', 'a', 'an', 'to', 'in', 'of', 'for', 'with', 'is', 'at', 'on', 'by'
   ])
 
@@ -326,8 +326,8 @@ export class RagKnowledgeEngine {
   private saveStandards(): void {
     try {
       localStorage.setItem(RAG_STORAGE_KEY, JSON.stringify(this.userStandards))
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('Failed to persist user RAG standards to localStorage:', err)
     }
     this.rebuildVectorIndex()
   }
@@ -405,8 +405,12 @@ ${JSON.stringify(item.pattern.test)}
 Pitfalls:
 - ${item.pattern.pitfalls.join('\n- ')}`
       }
-      const example = item.dslExample ? `\nCircuit:\n${item.dslExample}` : ''
-      return `USER NOTE ${item.name}:\n${userText(item).slice(0, MAX_USER_TEXT_IN_PROMPT)}${example}`
+      const escapeSectionMarkers = (s: string): string =>
+        s.replace(/\[(\/?RELEVANT PATTERNS AND NOTES)\]/gi, '($1)')
+      const safeName = escapeSectionMarkers(item.name)
+      const safeUser = escapeSectionMarkers(userText(item).slice(0, MAX_USER_TEXT_IN_PROMPT))
+      const example = item.dslExample ? `\nCircuit:\n${escapeSectionMarkers(item.dslExample)}` : ''
+      return `USER NOTE ${safeName}:\n${safeUser}${example}`
     })
 
     return `

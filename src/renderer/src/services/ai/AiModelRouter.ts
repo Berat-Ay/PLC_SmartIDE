@@ -6,11 +6,12 @@
  * handling of generated circuits are in the modules imported below.
  */
 
+import type { SecretStatus } from '@shared/types/ipc'
 import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
 import { RagKnowledgeEngine } from './RagKnowledgeEngine'
 import { aiHttp } from './aiHttp'
-import { AgentExecutionResponse, AiCircuitSynthesisPayload, AiConfig, AiProvider, AiTier, DiscoveredModel, GeminiContent } from './aiTypes'
-import { geminiTextModels, loadStoredAiConfig, storeAiConfig } from './aiConfig'
+import { AgentCancelledError, AgentExecutionResponse, AiCircuitSynthesisPayload, AiConfig, AiProvider, AiTier, DiscoveredModel, GeminiContent, isAgentAbortError } from './aiTypes'
+import { geminiTextModels, isStrictGeminiTextModel, loadStoredAiConfig, storeAiConfig } from './aiConfig'
 import { buildAgentInstruction, sanitizeUserPrompt } from './AgentInstruction'
 import { AgentModelReply, extractValidJsonBlock, interpretModelReply } from './ModelReply'
 import { applyCircuitPayload } from './ApplyCircuit'
@@ -18,7 +19,7 @@ import { sanitizeAndAllocateUniqueAddresses } from './GeneratedCircuit'
 import { PendingTest, runAgentLoop, runTestStage, TurnPlan } from './AgentTurn'
 import { createGeminiRequester } from './GeminiClient'
 import { apiErrorMessage, createOpenAiRequester, openAiBaseUrl } from './OpenAiClient'
-import { callOllamaApi } from './OllamaClient'
+import { createOllamaRequester } from './OllamaClient'
 
 // The app, the benchmark and the tests import these from the router
 export type { AgentExecutionResponse, AiCircuitSynthesisPayload, AiConfig, AiProvider, AiTier, DiscoveredModel } from './aiTypes'
@@ -35,18 +36,23 @@ export class AiModelRouter {
   private modelTimeoutMs = 180000
   /** Test first: the test the user has not approved yet, with the conversation that made it */
   private pendingTest?: PendingTest
-  /** What the next agent turn does. Set by executePrompt and approvePendingTest, read once by runAgentTurn */
-  private turnPlan?: TurnPlan
+  /** Serializes prompt execution so cancelling one turn never overlaps stores/heldDiskWrites with the next turn */
+  private turnQueue: Promise<void> = Promise.resolve()
   // Models that answer HTTP 400 to thinkingConfig
   private noThinkingConfig = new Set<string>()
   // OpenAI-compatible endpoint + model that accept JSON mode but never answer in it (a reasoning model that only
   // thinks until the timeout, or ends with no text). Each costs one timeout, so it is remembered until the app restarts
   private noJsonMode = new Set<string>()
   private config: AiConfig
+  private storedSecrets: SecretStatus = {
+    geminiApiKey: false,
+    openaiApiKey: false,
+    encryptionAvailable: false
+  }
 
   private constructor() {
     this.config = loadStoredAiConfig()
-    this.modelTimeoutMs = (this.config.requestTimeoutSec || 180) * 1000
+    this.modelTimeoutMs = Math.min(600, Math.max(10, Number(this.config.requestTimeoutSec) || 180)) * 1000
   }
 
   public static getInstance(): AiModelRouter {
@@ -63,48 +69,102 @@ export class AiModelRouter {
     return { ...this.config }
   }
 
+  public getSecretStatus(): SecretStatus {
+    return { ...this.storedSecrets }
+  }
+
+  public hasApiKey(provider: AiProvider = this.config.provider): boolean {
+    if (provider === 'ollama') return true
+    if (provider === 'gemini') return Boolean(this.config.geminiApiKey?.trim() || this.storedSecrets.geminiApiKey)
+    return Boolean(this.config.openaiApiKey?.trim() || this.storedSecrets.openaiApiKey)
+  }
+
   public updateConfig(newConfig: Partial<AiConfig>): void {
     this.config = { ...this.config, ...newConfig }
-    if (newConfig.requestTimeoutSec) this.modelTimeoutMs = Math.max(10, newConfig.requestTimeoutSec) * 1000
+    if (
+      (newConfig.provider ?? this.config.provider) === 'ollama' &&
+      newConfig.selectedModelId !== undefined &&
+      newConfig.ollamaModel === undefined &&
+      newConfig.selectedModelId.trim() &&
+      !isStrictGeminiTextModel(newConfig.selectedModelId)
+    ) {
+      this.config.ollamaModel = newConfig.selectedModelId.trim()
+    }
+    if (newConfig.requestTimeoutSec !== undefined) {
+      const clamped = Math.min(600, Math.max(10, Number(newConfig.requestTimeoutSec) || 180))
+      this.config.requestTimeoutSec = clamped
+      this.modelTimeoutMs = clamped * 1000
+    }
+    if (
+      newConfig.geminiApiKey !== undefined ||
+      newConfig.openaiApiKey !== undefined ||
+      newConfig.openaiEndpoint !== undefined ||
+      newConfig.ollamaEndpoint !== undefined
+    ) {
+      this.unavailableModels.clear()
+      this.noThinkingConfig.clear()
+      this.noJsonMode.clear()
+    }
     this.saveConfig()
   }
 
-  // Null until stored keys are loaded. Saving earlier would erase them with the still empty values.
-  private savedSecrets: Record<'geminiApiKey' | 'openaiApiKey', string> | null = null
+  /** Explicitly saves or clears an API key. In Electron, keys go to OS-encrypted main storage and are cleared from renderer memory. */
+  public async setApiKey(provider: 'gemini' | 'openai', value: string): Promise<boolean> {
+    this.unavailableModels.clear()
+    this.noThinkingConfig.clear()
+    this.noJsonMode.clear()
 
-  private persistSecrets(): void {
+    const clean = value.trim()
+    const field = provider === 'gemini' ? 'geminiApiKey' : 'openaiApiKey'
     const api = typeof window !== 'undefined' ? window.electronApi : undefined
-    if (!api?.setSecret || !this.savedSecrets) return
-    const failed = (): void => console.warn('API key is kept for this session only: encrypted storage is unavailable')
-    for (const key of ['geminiApiKey', 'openaiApiKey'] as const) {
-      const value = this.config[key] || ''
-      if (value === this.savedSecrets[key]) continue
-      this.savedSecrets[key] = value
-      api.setSecret(key, value).then((stored) => {
-        if (!stored && this.config[key]) failed()
-      }, failed)
+    if (api?.setSecret) {
+      const stored = await api.setSecret(field, clean)
+      if (stored) {
+        this.storedSecrets = { ...this.storedSecrets, [field]: Boolean(clean), encryptionAvailable: true }
+        this.config[field] = ''
+      } else {
+        this.storedSecrets = { ...this.storedSecrets, [field]: false, encryptionAvailable: false }
+        this.config[field] = clean
+      }
+      this.saveConfig()
+      return stored
     }
+
+    this.config[field] = clean
+    this.saveConfig()
+    return true
   }
 
-  /** Loads stored keys. A key still in the old localStorage entry is moved to encrypted storage. */
+  /** Reads encrypted secret status from main process and migrates any legacy localStorage key once. */
   public async hydrateSecrets(): Promise<void> {
     const api = typeof window !== 'undefined' ? window.electronApi : undefined
-    if (!api?.getSecret) return
-    const stored = { geminiApiKey: '', openaiApiKey: '' }
+    if (!api?.getSecretStatus) return
     try {
-      stored.geminiApiKey = (await api.getSecret('geminiApiKey')) || ''
-      stored.openaiApiKey = (await api.getSecret('openaiApiKey')) || ''
-    } finally {
-      this.savedSecrets = stored
-      if (stored.geminiApiKey && !this.config.geminiApiKey) this.config.geminiApiKey = stored.geminiApiKey
-      if (stored.openaiApiKey && !this.config.openaiApiKey) this.config.openaiApiKey = stored.openaiApiKey
-      this.saveConfig()
+      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('antigravity_ai_config_v1') : null
+      if (raw) {
+        const legacy = JSON.parse(raw) as Partial<AiConfig>
+        if (typeof legacy.geminiApiKey === 'string' && legacy.geminiApiKey.trim()) {
+          await api.setSecret('geminiApiKey', legacy.geminiApiKey.trim())
+        }
+        if (typeof legacy.openaiApiKey === 'string' && legacy.openaiApiKey.trim()) {
+          await api.setSecret('openaiApiKey', legacy.openaiApiKey.trim())
+        }
+        storeAiConfig(this.config)
+      }
+    } catch {
+      // Ignore legacy migration errors
+    }
+
+    try {
+      const status = await api.getSecretStatus()
+      this.storedSecrets = status
+    } catch (err) {
+      console.warn('Could not load stored secret status:', err)
     }
   }
 
   private saveConfig(): void {
     storeAiConfig(this.config)
-    this.persistSecrets()
   }
 
   /**
@@ -113,11 +173,19 @@ export class AiModelRouter {
   public async fetchOllamaModels(endpoint?: string): Promise<DiscoveredModel[]> {
     const targetEndpoint = (endpoint || this.config.ollamaEndpoint || 'http://localhost:11434').replace(/\/$/, '')
     try {
-      const res = await fetch(`${targetEndpoint}/api/tags`)
-      if (!res.ok) {
+      const res = await aiHttp(`${targetEndpoint}/api/tags`, {
+        method: 'GET',
+        headers: {},
+        timeoutMs: 15000,
+        allowPrivateNetwork: this.config.allowPrivateNetwork
+      })
+      if (res.error) {
+        throw new Error(res.message || 'Connection failed')
+      }
+      if (res.status < 200 || res.status >= 300) {
         throw new Error(`Ollama HTTP ${res.status}: ${res.statusText}`)
       }
-      const data = await res.json()
+      const data = JSON.parse(res.body)
       const raw = (data.models || []) as Array<{
         name: string
         model?: string
@@ -141,9 +209,9 @@ export class AiModelRouter {
         )
       }
 
-      this.config.availableModels = filtered
-      if (!filtered.some((m) => m.id === this.config.selectedModelId)) {
-        this.config.selectedModelId = filtered[0].id
+      this.config.ollamaModels = filtered
+      if (!filtered.some((m) => m.id === this.config.ollamaModel)) {
+        this.config.ollamaModel = filtered[0].id
       }
       this.config.ollamaEndpoint = targetEndpoint
       this.config.provider = 'ollama'
@@ -172,14 +240,18 @@ export class AiModelRouter {
    */
   public async fetchActiveModels(
     apiKey: string,
-    provider: AiProvider = this.config.provider
+    provider: AiProvider = this.config.provider,
+    endpointOverride?: string
   ): Promise<DiscoveredModel[]> {
     if (provider === 'ollama') {
       return this.fetchOllamaModels(apiKey)
     }
 
     const key = apiKey.trim()
-    if (!key) {
+    const useStoredGemini = provider === 'gemini' && !key && this.storedSecrets.geminiApiKey
+    const useStoredOpenAi = provider === 'openai' && !key && this.storedSecrets.openaiApiKey
+
+    if (!key && !useStoredGemini && !useStoredOpenAi) {
       const err = 'API key cannot be empty'
       this.config.lastDiscoveryStatus = { success: false, message: err, timestamp: Date.now() }
       this.saveConfig()
@@ -189,11 +261,17 @@ export class AiModelRouter {
     if (provider === 'gemini') {
       const url = 'https://generativelanguage.googleapis.com/v1beta/models'
       try {
-        const res = await fetch(url, { headers: { 'x-goog-api-key': key } })
-        if (!res.ok) {
+        const res = await aiHttp(url, {
+          method: 'GET',
+          headers: key ? { 'x-goog-api-key': key } : {},
+          authSecret: useStoredGemini ? 'geminiApiKey' : undefined,
+          timeoutMs: 30000
+        })
+        if (res.error) throw new Error(res.message || 'Connection failed')
+        if (res.status < 200 || res.status >= 300) {
           let errorMsg = `HTTP ${res.status}: ${res.statusText}`
           try {
-            const errJson = await res.json()
+            const errJson = JSON.parse(res.body)
             if (errJson?.error?.message) {
               errorMsg = errJson.error.message
             }
@@ -209,7 +287,7 @@ export class AiModelRouter {
           throw new Error(this.config.lastDiscoveryStatus.message)
         }
 
-        const data = await res.json()
+        const data = JSON.parse(res.body)
         const sorted = geminiTextModels(data.models || [])
         if (sorted.length === 0) {
           throw new Error('No generateContent models returned for this API key.')
@@ -219,7 +297,9 @@ export class AiModelRouter {
         if (!sorted.some((m) => m.id === this.config.selectedModelId)) {
           this.config.selectedModelId = sorted[0].id
         }
-        this.config.geminiApiKey = key
+        if (key) {
+          await this.setApiKey('gemini', key)
+        }
         this.config.provider = 'gemini'
         this.config.lastDiscoveryStatus = {
           success: true,
@@ -239,11 +319,16 @@ export class AiModelRouter {
         throw err
       }
     } else if (provider === 'openai') {
-      const endpoint = openAiBaseUrl(this.config)
+      const endpoint = openAiBaseUrl({
+        ...this.config,
+        ...(endpointOverride ? { openaiEndpoint: endpointOverride } : {})
+      })
       try {
         const res = await aiHttp(`${endpoint}/models`, {
           method: 'GET',
-          headers: { Authorization: `Bearer ${key.trim()}` },
+          headers: key ? { Authorization: `Bearer ${key}` } : {},
+          authSecret: useStoredOpenAi ? 'openaiApiKey' : undefined,
+          allowPrivateNetwork: this.config.allowPrivateNetwork,
           timeoutMs: 30000
         })
         if (res.error) throw new Error(`Could not reach ${endpoint}: ${res.message}`)
@@ -257,7 +342,10 @@ export class AiModelRouter {
 
         this.config.openaiModels = models
         if (!models.some((m) => m.id === this.config.openaiModel)) this.config.openaiModel = models[0].id
-        this.config.openaiApiKey = key
+        if (endpointOverride) this.config.openaiEndpoint = endpointOverride
+        if (key) {
+          await this.setApiKey('openai', key)
+        }
         this.config.provider = 'openai'
         this.config.lastDiscoveryStatus = {
           success: true,
@@ -316,8 +404,7 @@ export class AiModelRouter {
     mode: 'auto-apply' | 'diff-view',
     signal?: AbortSignal
   ): Promise<AgentExecutionResponse> {
-    // Ollama does not run the agent loop, so it has no test step
-    if (!this.config.testFirst || this.config.provider === 'ollama') {
+    if (!this.config.testFirst) {
       this.pendingTest = undefined
       return this.runPrompt(prompt, tier, mode, signal)
     }
@@ -341,12 +428,21 @@ export class AiModelRouter {
     this.pendingTest = undefined
   }
 
-  /** Test first: the user approved the test, so the circuit is written to it */
+  /** Test first: the user approved the test, so the circuit is written to it. Preserves pendingTest if execution fails or cancels. */
   public async approvePendingTest(mode: 'auto-apply' | 'diff-view', signal?: AbortSignal): Promise<AgentExecutionResponse> {
     const pending = this.pendingTest
     if (!pending) throw new Error('No test is waiting for approval.')
     this.pendingTest = undefined
-    return this.runPrompt(pending.prompt, pending.tier, mode, signal, { stage: 'circuit', test: pending.test, tags: pending.tags })
+    try {
+      const res = await this.runPrompt(pending.prompt, pending.tier, mode, signal, { stage: 'circuit', test: pending.test, tags: pending.tags })
+      if (res.isError && !res.stagedChangeset) {
+        this.pendingTest = pending
+      }
+      return res
+    } catch (err) {
+      this.pendingTest = pending
+      throw err
+    }
   }
 
   private async runPrompt(
@@ -356,18 +452,37 @@ export class AiModelRouter {
     signal?: AbortSignal,
     plan?: TurnPlan
   ): Promise<AgentExecutionResponse> {
-    this.turnPlan = plan
+    const waitPrior = this.turnQueue
+    let releaseTurn!: () => void
+    this.turnQueue = new Promise<void>((resolve) => {
+      releaseTurn = resolve
+    })
+    await waitPrior.catch(() => {})
+
+    try {
+      return await this.runPromptSerialized(prompt, tier, mode, signal, plan)
+    } finally {
+      releaseTurn()
+    }
+  }
+
+  private async runPromptSerialized(
+    prompt: string,
+    tier: AiTier,
+    mode: 'auto-apply' | 'diff-view',
+    signal?: AbortSignal,
+    plan?: TurnPlan
+  ): Promise<AgentExecutionResponse> {
     const sanitized = sanitizeUserPrompt(prompt)
     const trimmed = sanitized.trim()
     const isTurkish = this.detectTurkish(trimmed)
 
     if (signal?.aborted) {
-      throw new Error('Synthesis cancelled by user.')
+      throw new AgentCancelledError()
     }
 
     const provider = this.config.provider
-    const apiKey = provider === 'gemini' ? this.config.geminiApiKey : provider === 'openai' ? this.config.openaiApiKey : 'none'
-    if (!apiKey?.trim()) {
+    if (!this.hasApiKey(provider)) {
       const providerName = provider === 'gemini' ? 'Gemini' : 'OpenAI'
       const message = isTurkish
         ? `Yapay zekâ ajanı için ${providerName} API anahtarı gerekli. Anahtarı AI ayarlarından girin. Projede hiçbir şey değiştirilmedi.`
@@ -389,9 +504,9 @@ export class AiModelRouter {
     // Check if Ollama provider is selected
     if (this.config.provider === 'ollama') {
       try {
-        response = await callOllamaApi(trimmed, tier, mode, this.config, signal)
+        response = await this.callOllamaApi(trimmed, tier, mode, isTurkish, signal, plan)
       } catch (err) {
-        if (signal?.aborted || (err as { name?: string })?.name === 'AbortError' || String(err).includes('cancelled')) {
+        if (isAgentAbortError(err, signal)) {
           throw err
         }
         console.warn('Ollama API call failed, reporting honest error:', err)
@@ -412,9 +527,9 @@ export class AiModelRouter {
       }
     } else if (this.config.provider === 'gemini') {
       try {
-        response = await this.callGeminiApi(trimmed, tier, mode, isTurkish, signal)
+        response = await this.callGeminiApi(trimmed, tier, mode, isTurkish, signal, plan)
       } catch (err) {
-        if (signal?.aborted || (err as { name?: string })?.name === 'AbortError' || String(err).includes('cancelled')) {
+        if (isAgentAbortError(err, signal)) {
           throw err
         }
         console.warn('Gemini API call failed, reporting honest error without fake fallback:', err)
@@ -435,9 +550,9 @@ export class AiModelRouter {
       }
     } else {
       try {
-        response = await this.callOpenAiApi(trimmed, tier, mode, isTurkish, signal)
+        response = await this.callOpenAiApi(trimmed, tier, mode, isTurkish, signal, plan)
       } catch (err) {
-        if (signal?.aborted || (err as { name?: string })?.name === 'AbortError' || String(err).includes('cancelled')) {
+        if (isAgentAbortError(err, signal)) {
           throw err
         }
         console.warn('OpenAI API call failed, reporting honest error:', err)
@@ -459,15 +574,15 @@ export class AiModelRouter {
     }
 
     if (signal?.aborted) {
-      throw new Error('Synthesis cancelled by user.')
+      throw new AgentCancelledError()
     }
 
     if (!response) {
       throw new Error(`Provider '${this.config.provider}' returned no response.`)
     }
 
-    // Ensure RAG consulted rules are always populated from Semantic Vectorizer
-    if (!response.ragRulesConsulted || response.ragRulesConsulted.length === 0) {
+    // Populate RAG consulted rules only when the caller did not already run retrieval
+    if (response.ragRulesConsulted === undefined) {
       const topRules = RagKnowledgeEngine.getInstance().retrieveTopKRules(trimmed, 4)
       response.ragRulesConsulted = topRules.map((r) => r.item.name)
     }
@@ -494,10 +609,10 @@ export class AiModelRouter {
     mode: 'auto-apply' | 'diff-view',
     isTurkish: boolean,
     ragRulesConsulted: string[],
-    requestModel: (contents: GeminiContent[]) => Promise<string>
+    requestModel: (contents: GeminiContent[]) => Promise<string>,
+    plan?: TurnPlan,
+    signal?: AbortSignal
   ): Promise<AgentExecutionResponse> {
-    const plan = this.turnPlan
-    this.turnPlan = undefined
     const turn = {
       prompt,
       tier,
@@ -507,6 +622,7 @@ export class AiModelRouter {
       requestModel,
       provider: this.config.provider,
       acceptanceGate: this.config.acceptanceGate,
+      signal,
       onTestProposed: (pending: PendingTest) => {
         this.pendingTest = pending
       }
@@ -521,7 +637,8 @@ export class AiModelRouter {
     tier: AiTier,
     mode: 'auto-apply' | 'diff-view',
     isTurkish: boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    plan?: TurnPlan
   ): Promise<AgentExecutionResponse> {
     const { text, consultedRuleNames } = buildAgentInstruction(prompt)
     const requestModel = createGeminiRequester({
@@ -534,9 +651,10 @@ export class AiModelRouter {
       saveConfig: () => this.saveConfig(),
       unavailableModels: this.unavailableModels,
       noThinkingConfig: this.noThinkingConfig,
-      timeoutMs: this.modelTimeoutMs
+      timeoutMs: this.modelTimeoutMs,
+      useStoredSecret: !this.config.geminiApiKey?.trim() && this.storedSecrets.geminiApiKey
     })
-    return this.runAgentTurn(prompt, tier, mode, isTurkish, consultedRuleNames, requestModel)
+    return this.runAgentTurn(prompt, tier, mode, isTurkish, consultedRuleNames, requestModel, plan, signal)
   }
 
   /**
@@ -548,7 +666,8 @@ export class AiModelRouter {
     tier: AiTier,
     mode: 'auto-apply' | 'diff-view',
     isTurkish: boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    plan?: TurnPlan
   ): Promise<AgentExecutionResponse> {
     const { text, consultedRuleNames } = buildAgentInstruction(prompt)
     const requestModel = createOpenAiRequester({
@@ -559,9 +678,37 @@ export class AiModelRouter {
       signal,
       config: this.config,
       noJsonMode: this.noJsonMode,
-      timeoutMs: this.modelTimeoutMs
+      timeoutMs: this.modelTimeoutMs,
+      useStoredSecret: !this.config.openaiApiKey?.trim() && this.storedSecrets.openaiApiKey
     })
-    const result = await this.runAgentTurn(prompt, tier, mode, isTurkish, consultedRuleNames, requestModel)
+    const result = await this.runAgentTurn(prompt, tier, mode, isTurkish, consultedRuleNames, requestModel, plan, signal)
     return { ...result, providerUsed: 'openai' }
+  }
+
+  /**
+   * Local Ollama API (/api/chat with /api/generate fallback). Runs the same compiler + simulator
+   * verification agent loop as Gemini and OpenAI.
+   */
+  private async callOllamaApi(
+    prompt: string,
+    tier: AiTier,
+    mode: 'auto-apply' | 'diff-view',
+    isTurkish: boolean,
+    signal?: AbortSignal,
+    plan?: TurnPlan
+  ): Promise<AgentExecutionResponse> {
+    const { text, consultedRuleNames } = buildAgentInstruction(prompt)
+    const requestModel = createOllamaRequester({
+      prompt,
+      tier,
+      mode,
+      systemInstruction: text,
+      signal,
+      config: this.config,
+      timeoutMs: this.modelTimeoutMs,
+      noJsonMode: this.noJsonMode
+    })
+    const result = await this.runAgentTurn(prompt, tier, mode, isTurkish, consultedRuleNames, requestModel, plan, signal)
+    return { ...result, providerUsed: 'ollama' }
   }
 }

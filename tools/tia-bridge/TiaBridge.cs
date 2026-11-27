@@ -8,7 +8,9 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
+using System.Xml;
 using Microsoft.Win32;
 
 namespace PlcSmartIde.TiaBridge
@@ -40,15 +42,15 @@ namespace PlcSmartIde.TiaBridge
             try
             {
                 options = ParseArgs(args);
+                Directory.CreateDirectory(options.OutDir);
             }
-            catch (ArgumentException ex)
+            catch (Exception ex)
             {
                 Console.Error.WriteLine(ex.Message);
-                PrintUsage();
+                if (ex is ArgumentException) PrintUsage();
                 return ExitInfrastructure;
             }
 
-            Directory.CreateDirectory(options.OutDir);
             Report report = new Report(options.Command);
             int exitCode;
             try
@@ -63,9 +65,16 @@ namespace PlcSmartIde.TiaBridge
                 exitCode = ExitInfrastructure;
             }
 
-            string reportPath = Path.Combine(options.OutDir, "tia-report.json");
-            File.WriteAllText(reportPath, report.ToJson(), new UTF8Encoding(false));
-            Console.WriteLine("Report: " + reportPath);
+            try
+            {
+                string reportPath = Path.Combine(options.OutDir, "tia-report.json");
+                File.WriteAllText(reportPath, report.ToJson(), new UTF8Encoding(false));
+                Console.WriteLine("Report: " + reportPath);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("Could not write tia-report.json: " + Describe(ex));
+            }
             Console.WriteLine("Result: " + (exitCode == ExitOk ? "OK" : exitCode == ExitProjectProblems ? "TIA FOUND PROBLEMS" : "COULD NOT RUN"));
             return exitCode;
         }
@@ -98,7 +107,13 @@ namespace PlcSmartIde.TiaBridge
                     if (a == "--out") o.OutDir = value;
                     else if (a == "--project") o.ProjectFile = value;
                     else if (a == "--api-dir") o.ApiDir = value;
-                    else if (a == "--tia-version") o.TiaVersion = value.ToUpperInvariant().TrimStart('V');
+                    else if (a == "--tia-version")
+                    {
+                        string v = value.Trim().ToUpperInvariant().TrimStart('V');
+                        if (!Regex.IsMatch(v, @"^\d+(?:\.\d+)?$"))
+                            throw new ArgumentException("Invalid --tia-version: " + value);
+                        o.TiaVersion = v;
+                    }
                     else if (a == "--cpu") o.CpuOverride = value;
                     else throw new ArgumentException("Unknown option: " + a);
                 }
@@ -111,6 +126,22 @@ namespace PlcSmartIde.TiaBridge
             if (o.Command != "verify" && o.ProjectFile == null) throw new ArgumentException("--project is required.");
             o.OutDir = Path.GetFullPath(o.OutDir);
             return o;
+        }
+
+        internal static string ResolveInsideBundle(string bundleFolder, string relativePath)
+        {
+            if (string.IsNullOrWhiteSpace(relativePath))
+                throw new InvalidDataException("Bundle entry path cannot be empty.");
+            if (Path.IsPathRooted(relativePath))
+                throw new InvalidDataException("Bundle entry path cannot be rooted: " + relativePath);
+
+            string fullRoot = Path.GetFullPath(bundleFolder);
+            string sep = Path.DirectorySeparatorChar.ToString();
+            string prefix = fullRoot.EndsWith(sep) ? fullRoot : fullRoot + sep;
+            string fullTarget = Path.GetFullPath(Path.Combine(fullRoot, relativePath));
+            if (!fullTarget.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Bundle entry path escapes bundle folder: " + relativePath);
+            return fullTarget;
         }
 
         // ------------------------------------------------------------------
@@ -203,8 +234,9 @@ namespace PlcSmartIde.TiaBridge
             string file = new AssemblyName(args.Name).Name + ".dll";
             string local = Path.Combine(apiDir, file);
             if (File.Exists(local)) return Assembly.LoadFrom(local);
-            string parent = Directory.GetParent(apiDir).FullName;
-            string above = Path.Combine(parent, file);
+            DirectoryInfo parentDir = Directory.GetParent(apiDir);
+            if (parentDir == null) return null;
+            string above = Path.Combine(parentDir.FullName, file);
             return File.Exists(above) ? Assembly.LoadFrom(above) : null;
         }
 
@@ -270,6 +302,18 @@ namespace PlcSmartIde.TiaBridge
             }
         }
 
+        private static void SafeCloseProject(dynamic project)
+        {
+            if (project == null) return;
+            try
+            {
+                project.Close();
+            }
+            catch (Exception)
+            {
+            }
+        }
+
         private static bool RunVerify(dynamic portal, Options options, Report report)
         {
             Bundle bundle = Bundle.Load(options.Target);
@@ -280,29 +324,34 @@ namespace PlcSmartIde.TiaBridge
             Directory.CreateDirectory(projectRoot);
             string projectName = "Verify_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
             dynamic project = portal.Projects.Create(new DirectoryInfo(projectRoot), projectName);
-
-            string typeIdentifier = options.CpuOverride ?? bundle.CpuTypeIdentifier;
-            if (typeIdentifier == null) throw new InvalidOperationException("The bundle has no CPU. Use --cpu.");
-            report.Cpu = typeIdentifier;
-            dynamic device;
             try
             {
-                device = project.Devices.CreateWithItem(typeIdentifier, "PLC_1", "PLC_1");
-            }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException(
-                    "CPU '" + typeIdentifier + "' could not be created. This TIA may not have that firmware; try --cpu. " + Describe(ex));
-            }
-            dynamic plc = FindPlcSoftware(device);
-            if (plc == null) throw new InvalidOperationException("The created device has no PLC software.");
+                string typeIdentifier = options.CpuOverride ?? bundle.CpuTypeIdentifier;
+                if (typeIdentifier == null) throw new InvalidOperationException("The bundle has no CPU. Use --cpu.");
+                report.Cpu = typeIdentifier;
+                dynamic device;
+                try
+                {
+                    device = project.Devices.CreateWithItem(typeIdentifier, "PLC_1", "PLC_1");
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        "CPU '" + typeIdentifier + "' could not be created. This TIA may not have that firmware; try --cpu. " + Describe(ex));
+                }
+                dynamic plc = FindPlcSoftware(device);
+                if (plc == null) throw new InvalidOperationException("The created device has no PLC software.");
 
-            bool stepsOk = ImportBundle(plc, bundle, options, report);
-            bool compiled = Compile(plc, report);
-            ExportEverything(plc, Path.Combine(options.OutDir, "exported"), report);
-            project.Save();
-            project.Close();
-            return stepsOk && compiled;
+                bool stepsOk = ImportBundle(plc, bundle, options, report);
+                bool compiled = Compile(plc, report);
+                ExportEverything(plc, Path.Combine(options.OutDir, "exported"), report);
+                project.Save();
+                return stepsOk && compiled;
+            }
+            finally
+            {
+                SafeCloseProject(project);
+            }
         }
 
         private static bool RunImport(dynamic portal, Options options, Report report)
@@ -312,25 +361,44 @@ namespace PlcSmartIde.TiaBridge
             report.Warnings.AddRange(bundle.Warnings);
 
             dynamic project = portal.Projects.Open(new FileInfo(Path.GetFullPath(options.ProjectFile)));
-            dynamic plc = FindFirstPlc(project);
-            if (plc == null) throw new InvalidOperationException("The project has no PLC.");
-            bool stepsOk = ImportBundle(plc, bundle, options, report);
-            bool compiled = Compile(plc, report);
-            project.Save();
-            project.Close();
-            return stepsOk && compiled;
+            try
+            {
+                dynamic plc = FindFirstPlc(project);
+                if (plc == null) throw new InvalidOperationException("The project has no PLC.");
+                bool stepsOk = ImportBundle(plc, bundle, options, report);
+                bool compiled = Compile(plc, report);
+                if (stepsOk && compiled)
+                {
+                    project.Save();
+                }
+                else
+                {
+                    report.Note("Project was NOT saved because import or compilation failed.");
+                }
+                return stepsOk && compiled;
+            }
+            finally
+            {
+                SafeCloseProject(project);
+            }
         }
 
         private static bool RunExport(dynamic portal, Options options, Report report)
         {
             dynamic project = portal.Projects.Open(new FileInfo(Path.GetFullPath(options.ProjectFile)));
-            report.Project = Path.GetFileNameWithoutExtension(options.ProjectFile);
-            dynamic plc = FindFirstPlc(project);
-            if (plc == null) throw new InvalidOperationException("The project has no PLC.");
-            bool compiled = Compile(plc, report);
-            ExportEverything(plc, options.OutDir, report);
-            project.Close();
-            return compiled;
+            try
+            {
+                report.Project = Path.GetFileNameWithoutExtension(options.ProjectFile);
+                dynamic plc = FindFirstPlc(project);
+                if (plc == null) throw new InvalidOperationException("The project has no PLC.");
+                bool compiled = Compile(plc, report);
+                ExportEverything(plc, options.OutDir, report);
+                return compiled;
+            }
+            finally
+            {
+                SafeCloseProject(project);
+            }
         }
 
         private static dynamic FindFirstPlc(dynamic project)
@@ -369,12 +437,15 @@ namespace PlcSmartIde.TiaBridge
         private static bool ImportBundle(dynamic plc, Bundle bundle, Options options, Report report)
         {
             bool ok = true;
+            int tagIndex = 0;
             foreach (TagTableEntry table in bundle.TagTables)
             {
+                tagIndex++;
                 StepResult step = report.AddStep("tags", table.Name, table.File);
                 try
                 {
-                    string prepared = WriteTagTableForThisTia(Path.Combine(bundle.Folder, table.File), report.TiaVersion, options.OutDir);
+                    string safePath = ResolveInsideBundle(bundle.Folder, table.File);
+                    string prepared = WriteTagTableForThisTia(safePath, report.TiaVersion, options.OutDir, tagIndex);
                     plc.TagTableGroup.TagTables.Import(new FileInfo(prepared), EnumValue("ImportOptions", "Override"));
                     step.Ok = true;
                 }
@@ -390,7 +461,7 @@ namespace PlcSmartIde.TiaBridge
                 dynamic source = null;
                 try
                 {
-                    string full = Path.Combine(bundle.Folder, entry.File);
+                    string full = ResolveInsideBundle(bundle.Folder, entry.File);
                     string sourceName = Path.GetFileName(entry.File);
                     source = plc.ExternalSourceGroup.ExternalSources.CreateFromFile(sourceName, full);
                     source.GenerateBlocksFromSource();
@@ -428,26 +499,51 @@ namespace PlcSmartIde.TiaBridge
         }
 
         /// <summary>TIA rejects SimaticML that states another version, so the file gets the running version.</summary>
-        private static string WriteTagTableForThisTia(string path, string version, string outDir)
+        private static string WriteTagTableForThisTia(string path, string version, string outDir, int index)
         {
-            string xml = File.ReadAllText(path, Encoding.UTF8);
+            XmlDocument doc = new XmlDocument();
+            doc.XmlResolver = null;
+            doc.PreserveWhitespace = true;
+            doc.Load(path);
+
             if (version != null)
             {
-                xml = System.Text.RegularExpressions.Regex.Replace(
-                    xml, "<Engineering version=\"[^\"]*\"", "<Engineering version=\"V" + version + "\"");
+                XmlNode eng = doc.SelectSingleNode("//Engineering");
+                if (eng != null && eng.Attributes != null)
+                {
+                    XmlAttribute attr = eng.Attributes["version"];
+                    if (attr != null) attr.Value = "V" + version;
+                }
             }
+
             string folder = Path.Combine(outDir, "prepared-tags");
             Directory.CreateDirectory(folder);
-            string prepared = Path.Combine(folder, Path.GetFileName(path));
-            File.WriteAllText(prepared, xml, new UTF8Encoding(false));
+            string baseName = Path.GetFileName(path);
+            string prepared = Path.Combine(folder, index.ToString("D3") + "_" + baseName);
+            using (XmlTextWriter writer = new XmlTextWriter(prepared, new UTF8Encoding(false)))
+            {
+                doc.WriteTo(writer);
+            }
             return prepared;
+        }
+
+        private static dynamic FindBlockRecursive(dynamic group, string name)
+        {
+            dynamic block = group.Blocks.Find(name);
+            if (block != null) return block;
+            foreach (dynamic child in group.Groups)
+            {
+                dynamic nested = FindBlockRecursive(child, name);
+                if (nested != null) return nested;
+            }
+            return null;
         }
 
         private static void SetBlockNumber(dynamic plc, StepEntry entry, StepResult step)
         {
             try
             {
-                dynamic block = plc.BlockGroup.Blocks.Find(entry.Name);
+                dynamic block = FindBlockRecursive(plc.BlockGroup, entry.Name);
                 if (block == null)
                 {
                     step.Notes.Add("Block was not found after generation, so its number was not set.");
@@ -497,6 +593,18 @@ namespace PlcSmartIde.TiaBridge
         // Export
         // ------------------------------------------------------------------
 
+        private static string UniqueFile(HashSet<string> used, string safeBase, string extension)
+        {
+            string candidate = safeBase + extension;
+            int n = 2;
+            while (!used.Add(candidate))
+            {
+                candidate = safeBase + "_" + n + extension;
+                n++;
+            }
+            return candidate;
+        }
+
         private static void ExportEverything(dynamic plc, string root, Report report)
         {
             string xmlDir = Path.Combine(root, "xml");
@@ -506,11 +614,15 @@ namespace PlcSmartIde.TiaBridge
             Directory.CreateDirectory(sourcesDir);
             Directory.CreateDirectory(tagsDir);
 
+            HashSet<string> usedXml = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> usedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> usedTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             List<Dictionary<string, object>> steps = new List<Dictionary<string, object>>();
             List<Dictionary<string, object>> tagTables = new List<Dictionary<string, object>>();
-            ExportBlockGroup(plc, plc.BlockGroup, xmlDir, sourcesDir, steps, report);
-            ExportTypeGroup(plc, plc.TypeGroup, xmlDir, sourcesDir, steps, report);
-            ExportTagGroup(plc.TagTableGroup, tagsDir, tagTables, report);
+            ExportBlockGroup(plc, plc.BlockGroup, xmlDir, sourcesDir, usedXml, usedSources, steps, report);
+            ExportTypeGroup(plc, plc.TypeGroup, xmlDir, sourcesDir, usedXml, usedSources, steps, report);
+            ExportTagGroup(plc.TagTableGroup, tagsDir, usedTags, tagTables, report);
 
             Dictionary<string, object> manifest = new Dictionary<string, object>();
             manifest["formatVersion"] = 1;
@@ -521,17 +633,19 @@ namespace PlcSmartIde.TiaBridge
             manifest["skipped"] = new object[0];
             manifest["warnings"] = new object[0];
             JavaScriptSerializer json = new JavaScriptSerializer();
+            json.MaxJsonLength = int.MaxValue;
             File.WriteAllText(Path.Combine(root, "manifest.json"), json.Serialize(manifest), new UTF8Encoding(false));
         }
 
         private static void ExportBlockGroup(dynamic plc, dynamic group, string xmlDir, string sourcesDir,
-            List<Dictionary<string, object>> steps, Report report)
+            HashSet<string> usedXml, HashSet<string> usedSources, List<Dictionary<string, object>> steps, Report report)
         {
             foreach (dynamic block in group.Blocks)
             {
                 string name = (string)block.Name;
                 string kind = BlockKind(block);
-                ExportXml(block, Path.Combine(xmlDir, SafeName(name) + ".xml"), name, report);
+                string xmlFile = UniqueFile(usedXml, SafeName(name), ".xml");
+                ExportXml(block, Path.Combine(xmlDir, xmlFile), name, report);
 
                 string language = "";
                 try
@@ -548,7 +662,7 @@ namespace PlcSmartIde.TiaBridge
                     continue;
                 }
                 string extension = kind == "db" ? ".db" : ".scl";
-                string file = SafeName(name) + extension;
+                string file = UniqueFile(usedSources, SafeName(name), extension);
                 if (GenerateSource(plc, "PlcBlock", (object)block, Path.Combine(sourcesDir, file), name, report))
                 {
                     Dictionary<string, object> step = new Dictionary<string, object>();
@@ -560,17 +674,18 @@ namespace PlcSmartIde.TiaBridge
                 }
             }
             foreach (dynamic child in group.Groups)
-                ExportBlockGroup(plc, child, xmlDir, sourcesDir, steps, report);
+                ExportBlockGroup(plc, child, xmlDir, sourcesDir, usedXml, usedSources, steps, report);
         }
 
         private static void ExportTypeGroup(dynamic plc, dynamic group, string xmlDir, string sourcesDir,
-            List<Dictionary<string, object>> steps, Report report)
+            HashSet<string> usedXml, HashSet<string> usedSources, List<Dictionary<string, object>> steps, Report report)
         {
             foreach (dynamic type in group.Types)
             {
                 string name = (string)type.Name;
-                ExportXml(type, Path.Combine(xmlDir, SafeName(name) + ".type.xml"), name, report);
-                string file = SafeName(name) + ".udt";
+                string xmlFile = UniqueFile(usedXml, SafeName(name), ".type.xml");
+                ExportXml(type, Path.Combine(xmlDir, xmlFile), name, report);
+                string file = UniqueFile(usedSources, SafeName(name), ".udt");
                 if (GenerateSource(plc, "PlcType", (object)type, Path.Combine(sourcesDir, file), name, report))
                 {
                     Dictionary<string, object> step = new Dictionary<string, object>();
@@ -581,15 +696,16 @@ namespace PlcSmartIde.TiaBridge
                 }
             }
             foreach (dynamic child in group.Groups)
-                ExportTypeGroup(plc, child, xmlDir, sourcesDir, steps, report);
+                ExportTypeGroup(plc, child, xmlDir, sourcesDir, usedXml, usedSources, steps, report);
         }
 
-        private static void ExportTagGroup(dynamic group, string tagsDir, List<Dictionary<string, object>> tables, Report report)
+        private static void ExportTagGroup(dynamic group, string tagsDir, HashSet<string> usedTags,
+            List<Dictionary<string, object>> tables, Report report)
         {
             foreach (dynamic table in group.TagTables)
             {
                 string name = (string)table.Name;
-                string file = SafeName(name) + ".xml";
+                string file = UniqueFile(usedTags, SafeName(name), ".xml");
                 if (ExportXml(table, Path.Combine(tagsDir, file), name, report))
                 {
                     Dictionary<string, object> row = new Dictionary<string, object>();
@@ -599,7 +715,7 @@ namespace PlcSmartIde.TiaBridge
                 }
             }
             foreach (dynamic child in group.Groups)
-                ExportTagGroup(child, tagsDir, tables, report);
+                ExportTagGroup(child, tagsDir, usedTags, tables, report);
         }
 
         private static bool ExportXml(dynamic item, string path, string name, Report report)
@@ -650,7 +766,7 @@ namespace PlcSmartIde.TiaBridge
         {
             StringBuilder safe = new StringBuilder();
             foreach (char c in name) safe.Append(char.IsLetterOrDigit(c) || c == '_' || c == '-' ? c : '_');
-            return safe.ToString();
+            return safe.Length > 0 ? safe.ToString() : "Unnamed";
         }
 
         private static string Describe(Exception ex)
@@ -697,47 +813,80 @@ namespace PlcSmartIde.TiaBridge
             json.MaxJsonLength = int.MaxValue;
             Dictionary<string, object> root = json.Deserialize<Dictionary<string, object>>(
                 System.IO.File.ReadAllText(manifestPath, Encoding.UTF8));
+            if (root == null) throw new InvalidDataException("manifest.json is empty or not a JSON object.");
 
             Bundle bundle = new Bundle();
             bundle.Folder = full;
-            bundle.ProjectName = root["project"] as string;
+            bundle.ProjectName = root.ContainsKey("project") ? root["project"] as string : null;
 
             Dictionary<string, object> cpu = root.ContainsKey("cpu") ? root["cpu"] as Dictionary<string, object> : null;
             if (cpu != null)
             {
-                bundle.CpuTypeIdentifier = "OrderNumber:" + cpu["orderNumber"] + "/" + cpu["firmware"];
+                string orderNumber = OptionalString(cpu, "orderNumber");
+                string firmware = OptionalString(cpu, "firmware");
+                if (!string.IsNullOrWhiteSpace(orderNumber) && !string.IsNullOrWhiteSpace(firmware))
+                    bundle.CpuTypeIdentifier = "OrderNumber:" + orderNumber + "/" + firmware;
             }
             foreach (object item in AsList(root, "tagTables"))
             {
-                Dictionary<string, object> row = (Dictionary<string, object>)item;
+                Dictionary<string, object> row = RequireDict(item, "tagTables entry");
                 TagTableEntry table = new TagTableEntry();
-                table.File = (string)row["file"];
-                table.Name = (string)row["name"];
+                table.File = RequireString(row, "file", "tagTables entry");
+                table.Name = RequireString(row, "name", "tagTables entry");
+                Program.ResolveInsideBundle(bundle.Folder, table.File);
                 bundle.TagTables.Add(table);
             }
             foreach (object item in AsList(root, "steps"))
             {
-                Dictionary<string, object> row = (Dictionary<string, object>)item;
+                Dictionary<string, object> row = RequireDict(item, "steps entry");
                 StepEntry step = new StepEntry();
-                step.File = (string)row["file"];
-                step.Kind = (string)row["kind"];
-                step.Name = (string)row["name"];
+                step.File = RequireString(row, "file", "steps entry");
+                step.Kind = RequireString(row, "kind", "steps entry");
+                step.Name = RequireString(row, "name", "steps entry");
+                Program.ResolveInsideBundle(bundle.Folder, step.File);
                 if (row.ContainsKey("number") && row["number"] != null) step.Number = Convert.ToInt32(row["number"]);
                 bundle.Steps.Add(step);
             }
-            foreach (object item in AsList(root, "warnings")) bundle.Warnings.Add(item.ToString());
+            foreach (object item in AsList(root, "warnings"))
+            {
+                if (item != null) bundle.Warnings.Add(item.ToString());
+            }
             foreach (object item in AsList(root, "skipped"))
             {
-                Dictionary<string, object> row = (Dictionary<string, object>)item;
-                bundle.Warnings.Add("Skipped " + row["name"] + ": " + row["reason"]);
+                Dictionary<string, object> row = item as Dictionary<string, object>;
+                if (row != null)
+                    bundle.Warnings.Add("Skipped " + OptionalString(row, "name") + ": " + OptionalString(row, "reason"));
             }
             return bundle;
+        }
+
+        private static Dictionary<string, object> RequireDict(object value, string context)
+        {
+            Dictionary<string, object> dict = value as Dictionary<string, object>;
+            if (dict == null) throw new InvalidDataException("Expected object in " + context);
+            return dict;
+        }
+
+        private static string RequireString(Dictionary<string, object> dict, string key, string context)
+        {
+            object value;
+            if (!dict.TryGetValue(key, out value) || !(value is string) || string.IsNullOrWhiteSpace((string)value))
+                throw new InvalidDataException("Missing string '" + key + "' in " + context);
+            return (string)value;
+        }
+
+        private static string OptionalString(Dictionary<string, object> dict, string key)
+        {
+            object value;
+            if (dict != null && dict.TryGetValue(key, out value) && value != null) return value.ToString();
+            return "";
         }
 
         private static IEnumerable AsList(Dictionary<string, object> root, string key)
         {
             object value;
-            if (root.TryGetValue(key, out value) && value is IEnumerable) return (IEnumerable)value;
+            if (root != null && root.TryGetValue(key, out value) && value is IEnumerable && !(value is string))
+                return (IEnumerable)value;
             return new object[0];
         }
     }

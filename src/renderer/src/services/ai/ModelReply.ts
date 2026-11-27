@@ -53,6 +53,46 @@ export function escapeControlCharsInJsonStrings(text: string): string {
   return out
 }
 
+/** Extracts candidate balanced `{ ... }` JSON slices while respecting string literals and escapes */
+function extractBalancedJsonObjects(text: string): string[] {
+  const candidates: string[] = []
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== '{') {
+      i++
+      continue
+    }
+    const start = i
+    let depth = 0
+    let inString = false
+    for (let j = start; j < text.length; j++) {
+      const ch = text[j]
+      if (inString) {
+        if (ch === '\\') {
+          j++
+          continue
+        }
+        if (ch === '"') inString = false
+        continue
+      }
+      if (ch === '"') {
+        inString = true
+      } else if (ch === '{') {
+        depth++
+      } else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          candidates.push(text.slice(start, j + 1).trim())
+          i = j
+          break
+        }
+      }
+    }
+    i++
+  }
+  return candidates
+}
+
 /**
  * Resilient JSON Block Extractor
  * Safely locates and extracts JSON payload blocks from markdown code fences
@@ -60,66 +100,83 @@ export function escapeControlCharsInJsonStrings(text: string): string {
  */
 export function extractValidJsonBlock(text: string): { json: any; raw: string } | null {
   if (!text) return null
-  const strict = extractStrictJsonBlock(text)
-  if (strict) return strict
-  // Models often write real line breaks inside a JSON string (the "dsl" text). JSON forbids them, but the
-  // reply is complete: escape them and read it again
-  const repaired = escapeControlCharsInJsonStrings(text)
-  return repaired === text ? null : extractStrictJsonBlock(repaired)
-}
-
-function extractStrictJsonBlock(text: string): { json: any; raw: string } | null {
-  // 1. Match ```json ... ``` or ``` ... ```
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/gi
-  let match: RegExpExecArray | null
-  while ((match = codeBlockRegex.exec(text)) !== null) {
-    const candidate = match[1].trim()
+  const tryCandidate = (candidate: string): { json: any; raw: string } | null => {
+    const trimmed = candidate.trim()
+    if (!trimmed) return null
     try {
-      const parsed = JSON.parse(candidate)
-      return { json: parsed, raw: candidate }
+      return { json: JSON.parse(trimmed), raw: trimmed }
     } catch {
-      // Continue searching
+      const repaired = escapeControlCharsInJsonStrings(trimmed)
+      if (repaired === trimmed) return null
+      try {
+        return { json: JSON.parse(repaired), raw: repaired }
+      } catch {
+        return null
+      }
     }
   }
 
-  // 2. Match raw substring between outer curly braces
+  // 1. Markdown code fences (prefer closing fence on its own line so embedded ``` inside strings won't truncate)
+  const fenceOpenRegex = /```(?:json)?[ \t]*(?:\r?\n|$)/gi
+  let openMatch: RegExpExecArray | null
+  while ((openMatch = fenceOpenRegex.exec(text)) !== null) {
+    const afterOpen = openMatch.index + openMatch[0].length
+    const rest = text.slice(afterOpen)
+    const lineCloseMatch = rest.match(/\r?\n```(?=[ \t]*(?:\r?\n|$))/)
+    const closeIdx = lineCloseMatch?.index ?? rest.lastIndexOf('```')
+    if (closeIdx > 0) {
+      const inside = rest.slice(0, closeIdx)
+      const hit = tryCandidate(inside)
+      if (hit) return hit
+      for (const balanced of extractBalancedJsonObjects(inside)) {
+        const balancedHit = tryCandidate(balanced)
+        if (balancedHit) return balancedHit
+      }
+    }
+  }
+
+  // 2. Balanced `{ ... }` JSON objects in surrounding prose
+  for (const candidate of extractBalancedJsonObjects(text)) {
+    const hit = tryCandidate(candidate)
+    if (hit) return hit
+  }
+
+  // 3. Outer brace span fallback (for replies with unescaped braces inside unquoted text)
   const firstBrace = text.indexOf('{')
   const lastBrace = text.lastIndexOf('}')
   if (firstBrace !== -1 && lastBrace > firstBrace) {
-    const rawSubstring = text.substring(firstBrace, lastBrace + 1).trim()
-    try {
-      const parsed = JSON.parse(rawSubstring)
-      return { json: parsed, raw: rawSubstring }
-    } catch {
-      // Continue
-    }
+    const hit = tryCandidate(text.substring(firstBrace, lastBrace + 1))
+    if (hit) return hit
   }
 
-  // 3. Fallback try the full trimmed text
-  try {
-    const parsed = JSON.parse(text.trim())
-    return { json: parsed, raw: text.trim() }
-  } catch {
-    // Not valid JSON
-  }
-
-  return null
+  // 4. Full trimmed text fallback
+  return tryCandidate(text)
 }
+
+const VALID_DSL_TAG_NAME = /^[\p{L}_][\p{L}\p{N}_]*$/u
 
 /** Adds the JSON tag list to the DSL text as TAG lines. A tag already declared in the DSL wins. */
 function dslWithDeclaredTags(dsl: string, tags: unknown): string {
   if (!Array.isArray(tags)) return dsl
   const inDsl = new Set(Array.from(dsl.matchAll(/^\s*TAG\s+(\S+)/gim)).map((m) => m[1].toLowerCase()))
   const lines = tags
-    .filter(
-      (t) =>
-        typeof t?.name === 'string' &&
-        typeof t?.address === 'string' &&
-        t.address.trim() &&
+    .filter((t) => {
+      if (typeof t?.name !== 'string' || typeof t?.address !== 'string') return false
+      const name = t.name.trim()
+      const addr = t.address.trim()
+      return (
+        VALID_DSL_TAG_NAME.test(name) &&
+        addr.length > 0 &&
+        !/\s/.test(addr) &&
         /^[A-Za-z]*$/.test(String(t.dataType || '')) &&
-        !inDsl.has(t.name.toLowerCase())
-    )
-    .map((t) => `TAG ${t.name} ${t.address} ${t.dataType || 'BOOL'} "${String(t.comment || '').replace(/["\r\n]/g, ' ')}"`)
+        !inDsl.has(name.toLowerCase())
+      )
+    })
+    .map((t) => {
+      const name = t.name.trim()
+      const addr = t.address.trim()
+      return `TAG ${name} ${addr} ${t.dataType || 'BOOL'} "${String(t.comment || '').replace(/["\r\n]/g, ' ')}"`
+    })
   return [...lines, dsl].join('\n')
 }
 
@@ -159,7 +216,7 @@ export function interpretModelReply(rawText: string, ignoreVerification = false)
 
     for (const call of Array.isArray(parsed.toolCalls) ? parsed.toolCalls : []) {
       const tool = String(call?.tool)
-      const params = call?.params && typeof call.params === 'object' ? call.params : {}
+      const params = call?.params && typeof call.params === 'object' && !Array.isArray(call.params) ? call.params : {}
       const isAllowedTagAction = tool !== 'manage_plc_tags' || params.action === 'upsert'
       if (!AGENT_TOOLS.has(tool) || !isAllowedTagAction) {
         reply.problems.push(`Tool '${tool}' with these parameters is not available to you.`)
@@ -193,7 +250,7 @@ export function interpretModelReply(rawText: string, ignoreVerification = false)
       reply.problems.push(...verification.problems)
     }
     if (reply.circuit) {
-      reply.circuit.explanation = reply.explanation || reply.circuit.explanation || 'Synthesized Ladder Logic via Google Gemini.'
+      reply.circuit.explanation = reply.explanation || reply.circuit.explanation || 'Synthesized Ladder Logic.'
       if (parsed.operationMode === 'replace_ob1_networks' || parsed.operationMode === 'append_ob1_networks') {
         reply.circuit.operationMode = parsed.operationMode
       }

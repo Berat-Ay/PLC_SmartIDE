@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { X, Check, Trash2, Split, FileCode2, ArrowRight } from 'lucide-react'
 import { StagedFileChange, PlcAgentTools } from '../../services/ai/PlcAgentTools'
 
@@ -17,6 +17,10 @@ export const DiffViewerModal: React.FC<DiffViewerModalProps> = ({
 }) => {
   const [selectedIdx, setSelectedIdx] = useState(0)
 
+  useEffect(() => {
+    setSelectedIdx(0)
+  }, [changeset])
+
   if (!isOpen || changeset.length === 0) return null
 
   const activeChange = changeset[selectedIdx] || changeset[0]
@@ -24,7 +28,9 @@ export const DiffViewerModal: React.FC<DiffViewerModalProps> = ({
   const handleApprove = () => {
     const tools = PlcAgentTools.getInstance()
     const res = tools.applyStagedChangeset(changeset)
-    onApproved(res.compilerReport?.message || 'Changes applied and compiler verified.')
+    const failures = res.results.filter((r) => !r.success).map((r) => r.message)
+    const statusText = failures.length > 0 ? failures.join(' | ') : res.compilerReport?.message || 'Changes applied and compiler verified.'
+    onApproved(statusText)
     onClose()
   }
 
@@ -68,7 +74,7 @@ export const DiffViewerModal: React.FC<DiffViewerModalProps> = ({
             <div className="flex-1 p-2 space-y-1">
               {changeset.map((change, idx) => (
                 <button
-                  key={change.path}
+                  key={`${change.path}#${idx}`}
                   data-testid="diff-file-item"
                   onClick={() => setSelectedIdx(idx)}
                   className={`w-full text-left p-2 rounded-none text-xs flex items-center gap-2 transition-colors ${

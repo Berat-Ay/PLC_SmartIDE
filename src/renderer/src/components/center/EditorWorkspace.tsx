@@ -1,4 +1,5 @@
-import React from 'react'
+import React, { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   Cpu,
   Tag,
@@ -10,6 +11,8 @@ import {
 } from 'lucide-react'
 import { useUIStore, EditorTab } from '../../stores/useUIStore'
 import { useProjectStore } from '../../stores/useProjectStore'
+import { useBlockStore } from '../../stores/useBlockStore'
+import { makeTabId } from '../../utils/tabIds'
 import { TabBar } from './TabBar'
 import { TagTableEditor } from './editors/TagTableEditor'
 import { DataBlockEditor } from './editors/DataBlockEditor'
@@ -18,22 +21,32 @@ import { HardwareConfigEditor } from './editors/HardwareConfigEditor'
 import { BlockCodeEditor } from './editors/BlockCodeEditor'
 import { VirtualIORackPanel } from '../simulation/VirtualIORackPanel'
 import { TraceOscilloscope } from '../simulation/TraceOscilloscope'
+import { ErrorBoundary } from '../common/ErrorBoundary'
 
 export const EditorWorkspace: React.FC = () => {
-  const {
-    tabs,
-    activeTabId,
-    splitTabId,
-    isSplitView,
-    setActiveTab,
-    openTab
-  } = useUIStore()
-  const { loadDemoProject } = useProjectStore()
+  const [focusedPane, setFocusedPane] = useState<'primary' | 'split'>('primary')
+  const { tabs, activeTabId, splitTabId, isSplitView, setActiveTab, openTab } = useUIStore(
+    useShallow((s) => ({
+      tabs: s.tabs,
+      activeTabId: s.activeTabId,
+      splitTabId: s.splitTabId,
+      isSplitView: s.isSplitView,
+      setActiveTab: s.setActiveTab,
+      openTab: s.openTab
+    }))
+  )
+  const loadDemoProject = useProjectStore((s) => s.loadDemoProject)
+  const firstDb = useBlockStore((s) => s.dataBlocks[0])
+  const firstLad = useBlockStore((s) => s.ladBlocks[0])
+  const firstScl = useBlockStore((s) => s.sclBlocks[0])
 
   const activeTab = tabs.find((t) => t.id === activeTabId)
-  const splitTab = isSplitView ? tabs.find((t) => t.id === splitTabId) : undefined
+  const rawSplitTab = isSplitView ? tabs.find((t) => t.id === splitTabId) : undefined
+  const splitTab = rawSplitTab && rawSplitTab.id !== activeTab?.id ? rawSplitTab : undefined
 
-  const renderTabContent = (tab: EditorTab) => {
+  const renderTabContent = (tab: EditorTab, isSplitPane: boolean) => {
+    const isActivePane = !splitTab || (isSplitPane ? focusedPane === 'split' : focusedPane === 'primary')
+    const panePrefix = isSplitPane ? 'split-' : ''
     switch (tab.type) {
       case 'hardware':
         return <HardwareConfigEditor />
@@ -46,9 +59,9 @@ export const EditorWorkspace: React.FC = () => {
       case 'udt':
         return <UdtEditor udtId={tab.targetId!} />
       case 'lad':
-        return <BlockCodeEditor fileName={tab.targetId!} isLad={true} />
+        return <BlockCodeEditor fileName={tab.targetId!} isLad={true} isActivePane={isActivePane} panePrefix={panePrefix} />
       case 'scl':
-        return <BlockCodeEditor fileName={tab.targetId!} isLad={false} />
+        return <BlockCodeEditor fileName={tab.targetId!} isLad={false} isActivePane={isActivePane} panePrefix={panePrefix} />
       case 'simulation':
         return <VirtualIORackPanel />
       case 'trace':
@@ -78,7 +91,7 @@ export const EditorWorkspace: React.FC = () => {
 
           <div className="grid grid-cols-2 gap-3 text-left">
             <button
-              onClick={() => openTab({ id: 'tab_hardware_config', title: 'Device Configuration', type: 'hardware' })}
+              onClick={() => openTab({ id: makeTabId('hardware'), title: 'Device Configuration', type: 'hardware' })}
               className="p-3 rounded-lg bg-industrial-950 border border-industrial-800 hover:border-cyan-500 hover:bg-industrial-850 transition-all group flex items-start gap-3"
             >
               <Cpu className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
@@ -93,7 +106,7 @@ export const EditorWorkspace: React.FC = () => {
             </button>
 
             <button
-              onClick={() => openTab({ id: 'tab_all_tags', title: 'All PLC Tags', type: 'allTags' })}
+              onClick={() => openTab({ id: makeTabId('allTags'), title: 'All PLC Tags', type: 'allTags' })}
               className="p-3 rounded-lg bg-industrial-950 border border-industrial-800 hover:border-cyan-500 hover:bg-industrial-850 transition-all group flex items-start gap-3"
             >
               <Tag className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
@@ -107,38 +120,48 @@ export const EditorWorkspace: React.FC = () => {
               </div>
             </button>
 
-            <button
-              onClick={() => openTab({ id: 'tab_db_DB1_PlantData.db.json', title: 'DB1_PlantData', type: 'db', targetId: 'DB1_PlantData.db.json' })}
-              className="p-3 rounded-lg bg-industrial-950 border border-industrial-800 hover:border-amber-500 hover:bg-industrial-850 transition-all group flex items-start gap-3"
-            >
-              <Database className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <div className="text-xs font-semibold text-industrial-200 group-hover:text-white">
-                  DB1_PlantData
+            {firstDb && (
+              <button
+                onClick={() => openTab({ id: makeTabId('db', firstDb.fileName), title: firstDb.name, type: 'db', targetId: firstDb.fileName })}
+                className="p-3 rounded-lg bg-industrial-950 border border-industrial-800 hover:border-amber-500 hover:bg-industrial-850 transition-all group flex items-start gap-3"
+              >
+                <Database className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-semibold text-industrial-200 group-hover:text-white">
+                    {firstDb.name}
+                  </div>
+                  <div className="text-[11px] text-industrial-400 mt-0.5">
+                    Global DB with S7 Standard Access Byte.Bit offsets.
+                  </div>
                 </div>
-                <div className="text-[11px] text-industrial-400 mt-0.5">
-                  Global DB with S7 Standard Access Byte.Bit offsets.
+              </button>
+            )}
+
+            {(firstLad || firstScl) && (
+              <button
+                onClick={() => {
+                  if (firstLad) {
+                    openTab({ id: makeTabId('lad', firstLad.fileName), title: firstLad.name, type: 'lad', targetId: firstLad.fileName })
+                  } else if (firstScl) {
+                    openTab({ id: makeTabId('scl', firstScl.fileName), title: firstScl.name, type: 'scl', targetId: firstScl.fileName })
+                  }
+                }}
+                className="p-3 rounded-lg bg-industrial-950 border border-industrial-800 hover:border-purple-500 hover:bg-industrial-850 transition-all group flex items-start gap-3"
+              >
+                <FileCode2 className="w-5 h-5 text-purple-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-semibold text-industrial-200 group-hover:text-white">
+                    {firstLad ? `${firstLad.name} (LAD)` : `${firstScl!.name} (SCL)`}
+                  </div>
+                  <div className="text-[11px] text-industrial-400 mt-0.5">
+                    {firstLad ? 'Ladder logic AST with variable interface strip.' : 'Structured Control Language source block.'}
+                  </div>
                 </div>
-              </div>
-            </button>
+              </button>
+            )}
 
             <button
-              onClick={() => openTab({ id: 'tab_lad_OB1_Main.lad.json', title: 'OB1_Main', type: 'lad', targetId: 'OB1_Main.lad.json' })}
-              className="p-3 rounded-lg bg-industrial-950 border border-industrial-800 hover:border-purple-500 hover:bg-industrial-850 transition-all group flex items-start gap-3"
-            >
-              <FileCode2 className="w-5 h-5 text-purple-400 shrink-0 mt-0.5" />
-              <div>
-                <div className="text-xs font-semibold text-industrial-200 group-hover:text-white">
-                  OB1_Main (LAD)
-                </div>
-                <div className="text-[11px] text-industrial-400 mt-0.5">
-                  Ladder logic AST with variable interface strip.
-                </div>
-              </div>
-            </button>
-
-            <button
-              onClick={() => openTab({ id: 'tab_simulation', title: 'Simulation & Fault Panel', type: 'simulation' })}
+              onClick={() => openTab({ id: makeTabId('simulation'), title: 'Simulation & Fault Panel', type: 'simulation' })}
               className="p-3 rounded-lg bg-industrial-950 border border-industrial-800 hover:border-amber-500 hover:bg-industrial-850 transition-all group flex items-start gap-3 col-span-2"
             >
               <Flame className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
@@ -179,13 +202,23 @@ export const EditorWorkspace: React.FC = () => {
       {/* Editor Content Area (Single or Side-by-Side Split View) */}
       <div className="flex-1 overflow-hidden flex">
         {/* Left / Primary Pane */}
-        <div className={`h-full overflow-hidden ${isSplitView && splitTab ? 'w-1/2 border-r border-industrial-800' : 'w-full'}`}>
-          {activeTab ? renderTabContent(activeTab) : null}
+        <div
+          onMouseDownCapture={() => setFocusedPane('primary')}
+          className={`h-full overflow-hidden ${isSplitView && splitTab ? 'w-1/2 border-r border-industrial-800' : 'w-full'}`}
+        >
+          {activeTab ? (
+            <ErrorBoundary key={activeTab.id} label={activeTab.title}>
+              {renderTabContent(activeTab, false)}
+            </ErrorBoundary>
+          ) : null}
         </div>
 
         {/* Right Split Pane */}
         {isSplitView && splitTab && (
-          <div className="h-full w-1/2 overflow-hidden flex flex-col">
+          <div
+            onMouseDownCapture={() => setFocusedPane('split')}
+            className="h-full w-1/2 overflow-hidden flex flex-col"
+          >
             <div className="h-7 px-3 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between text-[11px] text-industrial-300">
               <span className="font-semibold text-cyan-300 font-mono truncate">
                 Split View: {splitTab.title}
@@ -195,7 +228,9 @@ export const EditorWorkspace: React.FC = () => {
               </span>
             </div>
             <div className="flex-1 overflow-hidden">
-              {renderTabContent(splitTab)}
+              <ErrorBoundary key={`split_${splitTab.id}`} label={splitTab.title}>
+                {renderTabContent(splitTab, true)}
+              </ErrorBoundary>
             </div>
           </div>
         )}

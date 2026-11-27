@@ -52,6 +52,59 @@ export class SclParser {
     return false
   }
 
+  private tokenAt(offset: number): SclToken {
+    return this.tokens[this.pos + offset] || { type: 'EOF', value: '', line: 0, col: 0 }
+  }
+
+  private consumeRegionDirective(): boolean {
+    const cur = this.current()
+    if (cur.type !== 'KEYWORD') return false
+    if (cur.value === 'REGION') {
+      const regionLine = cur.line
+      this.advance()
+      while (this.current().type !== 'EOF' && this.current().line === regionLine) {
+        this.advance()
+      }
+      return true
+    }
+    if (cur.value === 'END_REGION') {
+      this.advance()
+      if (this.current().value === ';') this.advance()
+      return true
+    }
+    return false
+  }
+
+  private parseCaseInt(): number {
+    const cur = this.current()
+    let sign = 1
+    if (cur.value === '-' || cur.value === '+') {
+      sign = cur.value === '-' ? -1 : 1
+      this.advance()
+    }
+    const numTok = this.current()
+    if (numTok.type === 'NUMBER') {
+      this.advance()
+      return sign * (Number(numTok.value) || 0)
+    }
+    this.errors.push(`Line ${numTok.line || cur.line}: Expected integer CASE label, found '${numTok.value}'`)
+    if (numTok.type !== 'EOF') this.advance()
+    return 0
+  }
+
+  private isCaseLabelStart(): boolean {
+    const cur = this.current()
+    if (cur.type === 'NUMBER') {
+      const next = this.peek().value
+      return next === ':' || next === ',' || next === '..'
+    }
+    if ((cur.value === '-' || cur.value === '+') && this.peek().type === 'NUMBER') {
+      const after = this.tokenAt(2).value
+      return after === ':' || after === ',' || after === '..'
+    }
+    return false
+  }
+
   private parseQualifiedIdentifier(): string {
     let name = this.current().value
     this.advance()
@@ -71,6 +124,7 @@ export class SclParser {
           break
         }
       } else if (this.current().value === '[') {
+        const bracketLine = this.current().line
         this.advance() // consume '['
         let idx = ''
         let depth = 0
@@ -80,7 +134,11 @@ export class SclParser {
           idx += this.current().value
           this.advance()
         }
-        if (this.current().value === ']') this.advance()
+        if (this.current().value === ']') {
+          this.advance()
+        } else {
+          this.errors.push(`Line ${bracketLine}: Unclosed '[' in index expression`)
+        }
         name += `[${idx}]`
       }
     }
@@ -129,6 +187,10 @@ export class SclParser {
         continue
       }
 
+      if (this.consumeRegionDirective()) {
+        continue
+      }
+
       if (
         cur.type === 'KEYWORD' &&
         ['END_ORGANIZATION_BLOCK', 'END_FUNCTION_BLOCK', 'END_FUNCTION'].includes(cur.value)
@@ -169,8 +231,11 @@ export class SclParser {
         this.current().type !== 'EOF' &&
         !['ELSIF', 'ELSE', 'END_IF'].includes(this.current().value)
       ) {
+        if (this.consumeRegionDirective()) continue
+        const before = this.pos
         const s = this.parseStatement()
         if (s) thenStmts.push(s)
+        if (this.pos === before) this.advance()
       }
 
       while (this.matchKeyword('ELSIF')) {
@@ -182,8 +247,11 @@ export class SclParser {
           this.current().type !== 'EOF' &&
           !['ELSIF', 'ELSE', 'END_IF'].includes(this.current().value)
         ) {
+          if (this.consumeRegionDirective()) continue
+          const before = this.pos
           const s = this.parseStatement()
           if (s) branchStmts.push(s)
+          if (this.pos === before) this.advance()
         }
         elsifBranches.push({ condition: elsifCond, statements: branchStmts, line: branchLine })
       }
@@ -191,8 +259,11 @@ export class SclParser {
       if (this.matchKeyword('ELSE')) {
         elseStmts = []
         while (this.current().type !== 'EOF' && this.current().value !== 'END_IF') {
+          if (this.consumeRegionDirective()) continue
+          const before = this.pos
           const s = this.parseStatement()
           if (s) elseStmts.push(s)
+          if (this.pos === before) this.advance()
         }
       }
 
@@ -219,24 +290,25 @@ export class SclParser {
       let elseStmts: SclStatement[] | undefined = undefined
 
       while (this.current().type !== 'EOF' && !['ELSE', 'END_CASE'].includes(this.current().value)) {
+        if (this.consumeRegionDirective()) continue
         const caseLine = this.current().line
         const vals: Array<number | { from: number; to: number }> = []
 
-        // Parse case values e.g. 1: or 2, 3: or 10..20:
+        // Parse case values e.g. 1: or -5: or 2, 3: or -10..-1:
         while (this.current().type !== 'EOF' && this.current().value !== ':') {
-          const v = Number(this.current().value) || 0
-          this.advance()
+          const before = this.pos
+          const v = this.parseCaseInt()
 
           if (this.current().value === '..') {
             this.advance()
-            const vTo = Number(this.current().value) || v
-            this.advance()
+            const vTo = this.parseCaseInt()
             vals.push({ from: v, to: vTo })
           } else {
             vals.push(v)
           }
 
           if (this.current().value === ',') this.advance()
+          if (this.pos === before) this.advance()
         }
         this.expect(':')
 
@@ -244,20 +316,27 @@ export class SclParser {
         while (
           this.current().type !== 'EOF' &&
           !['ELSE', 'END_CASE'].includes(this.current().value) &&
-          !(this.current().type === 'NUMBER' && (this.peek().value === ':' || this.peek().value === ',' || this.peek().value === '..'))
+          !this.isCaseLabelStart()
         ) {
+          if (this.consumeRegionDirective()) continue
+          const before = this.pos
           const s = this.parseStatement()
           if (s) caseStmts.push(s)
+          if (this.pos === before) this.advance()
         }
 
         cases.push({ values: vals, statements: caseStmts, line: caseLine })
       }
 
       if (this.matchKeyword('ELSE')) {
+        if (this.current().value === ':') this.advance()
         elseStmts = []
         while (this.current().type !== 'EOF' && this.current().value !== 'END_CASE') {
+          if (this.consumeRegionDirective()) continue
+          const before = this.pos
           const s = this.parseStatement()
           if (s) elseStmts.push(s)
+          if (this.pos === before) this.advance()
         }
       }
 
@@ -290,8 +369,11 @@ export class SclParser {
 
       const body: SclStatement[] = []
       while (this.current().type !== 'EOF' && this.current().value !== 'END_FOR') {
+        if (this.consumeRegionDirective()) continue
+        const before = this.pos
         const s = this.parseStatement()
         if (s) body.push(s)
+        if (this.pos === before) this.advance()
       }
       this.expect('END_FOR')
       if (this.current().value === ';') this.advance()
@@ -315,8 +397,11 @@ export class SclParser {
 
       const body: SclStatement[] = []
       while (this.current().type !== 'EOF' && this.current().value !== 'END_WHILE') {
+        if (this.consumeRegionDirective()) continue
+        const before = this.pos
         const s = this.parseStatement()
         if (s) body.push(s)
+        if (this.pos === before) this.advance()
       }
       this.expect('END_WHILE')
       if (this.current().value === ';') this.advance()
@@ -334,8 +419,11 @@ export class SclParser {
       const startLine = cur.line
       const body: SclStatement[] = []
       while (this.current().type !== 'EOF' && this.current().value !== 'UNTIL') {
+        if (this.consumeRegionDirective()) continue
+        const before = this.pos
         const s = this.parseStatement()
         if (s) body.push(s)
+        if (this.pos === before) this.advance()
       }
       this.expect('UNTIL')
       const cond = this.parseExpression()
@@ -389,6 +477,7 @@ export class SclParser {
         const args: Record<string, SclExpression> = {}
         const outputArgs: string[] = []
         while (this.current().type !== 'EOF' && this.current().value !== ')') {
+          const before = this.pos
           let paramName = ''
           if (this.peek().value === ':=' || this.peek().value === '=>') {
             paramName = this.current().value
@@ -401,6 +490,7 @@ export class SclParser {
           const valExpr = this.parseExpression()
           args[paramName] = valExpr
           if (this.current().value === ',') this.advance()
+          if (this.pos === before) this.advance()
         }
         this.expect(')')
         if (this.current().value === ';') this.advance()
@@ -574,6 +664,7 @@ export class SclParser {
         this.advance()
         const args: Record<string, SclExpression> = {}
         while (this.current().type !== 'EOF' && this.current().value !== ')') {
+          const before = this.pos
           let paramName = ''
           if (this.peek().value === ':=' || this.peek().value === '=>') {
             paramName = this.current().value
@@ -585,6 +676,7 @@ export class SclParser {
           const valExpr = this.parseExpression()
           args[paramName] = valExpr
           if (this.current().value === ',') this.advance()
+          if (this.pos === before) this.advance()
         }
         this.expect(')')
         return { kind: 'call_expr', callee: name, calleeQuoted: quoted, args, line: cur.line }

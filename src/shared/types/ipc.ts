@@ -32,9 +32,16 @@ export interface CreateProjectRequest {
   defaultLanguage: 'LAD' | 'SCL'
 }
 
+export interface SecretStatus {
+  geminiApiKey: boolean
+  openaiApiKey: boolean
+  encryptionAvailable: boolean
+}
+
 export interface ElectronApi {
   selectProjectDirectory: () => Promise<string | null>
   selectDirectory: () => Promise<string | null>
+  getDefaultProjectsRoot: () => Promise<string>
   createProject: (options: CreateProjectRequest) => Promise<ProjectLoadPayload>
   openProject: (projectDir: string) => Promise<ProjectLoadPayload>
   saveProjectFile: (projectDir: string, relativePath: string, content: string) => Promise<boolean>
@@ -46,12 +53,14 @@ export interface ElectronApi {
   exportTiaBundle: (projectName: string, files: { filename: string; folder: string; content: string }[]) => Promise<string | null>
   /** Asks for a folder and returns its TIA files. Null when cancelled. */
   pickTiaImportFolder: () => Promise<{ folder: string; files: { path: string; content: string }[] } | null>
-  getSecret: (key: string) => Promise<string | null>
+  getSecretStatus: () => Promise<SecretStatus>
   setSecret: (key: string, value: string) => Promise<boolean>
   /** An AI API request sent by the main process, where a server without CORS headers can still answer */
   aiHttpRequest: (request: AiHttpRequest) => Promise<AiHttpResponse>
   /** Aborts a request started with aiHttpRequest */
   aiHttpCancel: (id: string) => Promise<void>
+  /** True only when Electron was started under NODE_ENV=test (e.g. Playwright GUI audit) */
+  isTestMode?: boolean
 }
 
 export interface AiHttpRequest {
@@ -61,6 +70,8 @@ export interface AiHttpRequest {
   headers: Record<string, string>
   body?: string
   timeoutMs: number
+  authSecret?: 'geminiApiKey' | 'openaiApiKey'
+  allowPrivateNetwork?: boolean
 }
 
 /** status is 0 when no HTTP answer came: error says why (network, timeout or cancelled) */

@@ -1,4 +1,6 @@
 import { LadBlockDefinition, LadNetwork, BlockVariable, LadCoil } from '@shared/types/blocks'
+import { TagTable } from '@shared/types/tags'
+import { parseS7Address } from '@shared/constants/s7rules'
 import {
   LadderNode,
   LadderCoilNode,
@@ -40,14 +42,42 @@ export class DoubleCoilDetector {
     return clean || 'Var'
   }
 
+  private static buildAddressMap(tagTables?: TagTable[]): Map<string, string> {
+    const map = new Map<string, string>()
+    for (const table of tagTables || []) {
+      for (const tag of table.tags || []) {
+        if (!tag.name || !tag.address) continue
+        const parsed = parseS7Address(tag.address)
+        const normAddr = parsed.isValid
+          ? (parsed.raw.startsWith('%') ? parsed.raw : `%${parsed.raw}`)
+          : tag.address.trim().toUpperCase()
+        map.set(this.getBaseOperandName(tag.name).toUpperCase(), normAddr)
+        map.set(normAddr.replace(/^%/, ''), normAddr)
+        map.set(normAddr, normAddr)
+      }
+    }
+    return map
+  }
+
+  private static canonicalKey(operand: string, addrMap: Map<string, string>): string {
+    const base = this.getBaseOperandName(operand).toUpperCase()
+    if (!base) return ''
+    const mapped = addrMap.get(base) || addrMap.get(`%${base}`)
+    if (mapped) return mapped
+    const parsed = parseS7Address(base)
+    if (parsed.isValid) return parsed.raw.startsWith('%') ? parsed.raw : `%${parsed.raw}`
+    return base
+  }
+
   /**
    * Scans a Ladder Block (or all active blocks) for double coil occurrences
    */
-  public static detectConflicts(block: LadBlockDefinition): DoubleCoilConflict[] {
-    return this.scanBlock(block)
+  public static detectConflicts(block: LadBlockDefinition, tagTables?: TagTable[]): DoubleCoilConflict[] {
+    return this.scanBlock(block, tagTables)
   }
 
-  public static scanBlock(block: LadBlockDefinition): DoubleCoilConflict[] {
+  public static scanBlock(block: LadBlockDefinition, tagTables?: TagTable[]): DoubleCoilConflict[] {
+    const addrMap = this.buildAddressMap(tagTables)
     const operandToCoils = new Map<
       string,
       Array<{ networkNumber: number; coilId: string; rawOperand: string; isMergeNet: boolean }>
@@ -62,7 +92,7 @@ export class DoubleCoilDetector {
         return
       }
 
-      const normalized = this.getBaseOperandName(trimmed).toUpperCase()
+      const normalized = this.canonicalKey(trimmed, addrMap)
       if (!normalized) return
 
       const list = operandToCoils.get(normalized) || []
@@ -115,13 +145,12 @@ export class DoubleCoilDetector {
     for (const [normOp, list] of operandToCoils.entries()) {
       // Filter list: coils in non-merge networks
       const nonMergeList = list.filter((c) => !c.isMergeNet)
-      const nonMergeNets = Array.from(new Set(nonMergeList.map((c) => c.networkNumber)))
 
-      // Double-coil conflict only exists if:
-      // 1) 2 or more distinct NON-MERGE networks drive this operand, OR
-      // 2) At least 1 non-merge network drives this operand while a merge network also drives it (incomplete refactor)
+      // Double-coil conflict exists if:
+      // 1) 2 or more non-merge coils write the same address (across networks or in parallel branches), OR
+      // 2) At least 1 non-merge coil drives this operand while a merge network also drives it (incomplete refactor)
       const hasMergeNet = list.some((c) => c.isMergeNet)
-      const isConflicting = nonMergeNets.length >= 2 || (hasMergeNet && nonMergeNets.length >= 1)
+      const isConflicting = nonMergeList.length >= 2 || (hasMergeNet && nonMergeList.length >= 1)
 
       if (isConflicting) {
         const distinctNets = Array.from(new Set(list.map((c) => c.networkNumber)))
@@ -145,10 +174,15 @@ export class DoubleCoilDetector {
    * Converts double coils into intermediate variables and generates/updates a single consolidated OR output mapping network.
    * Completely idempotent: clicking repeatedly will never create _Net1_Net1 chains or duplicate networks.
    */
-  public static autoRefactorBlock(block: LadBlockDefinition, conflictOperand?: string): LadBlockDefinition {
+  public static autoRefactorBlock(
+    block: LadBlockDefinition,
+    conflictOperand?: string,
+    tagTables?: TagTable[]
+  ): LadBlockDefinition {
+    const addrMap = this.buildAddressMap(tagTables)
     let targetOperand = conflictOperand
     if (!targetOperand) {
-      const conflicts = this.scanBlock(block)
+      const conflicts = this.scanBlock(block, tagTables)
       if (conflicts.length === 0) return block
       targetOperand = conflicts[0].operand
     }
@@ -156,29 +190,36 @@ export class DoubleCoilDetector {
     const baseOperand = this.getBaseOperandName(targetOperand)
     if (!baseOperand) return block
     const sanitizedVarBase = this.getSanitizedVarName(targetOperand)
-    const normTarget = baseOperand.toUpperCase()
+    const normTarget = this.canonicalKey(targetOperand, addrMap)
 
-    // Find all networks driving this base operand (excluding existing auto-generated merge networks)
+    const nodesHaveMatchingCoil = (nodes: LadderNode[]): boolean => {
+      for (const n of nodes) {
+        if (n.kind === 'coil') {
+          const c = n as LadderCoilNode
+          if (
+            (c.coilType === 'OUTPUT_COIL' || c.coilType === 'NEGATED_COIL') &&
+            this.canonicalKey(c.operand, addrMap) === normTarget
+          ) {
+            return true
+          }
+        } else if (n.kind === 'parallel') {
+          if (n.branches.some((branch) => nodesHaveMatchingCoil(branch))) return true
+        }
+      }
+      return false
+    }
+
+    // Find all networks driving this target operand (excluding existing auto-generated merge networks)
     const conflictingNetNumbers: number[] = []
     for (const net of block.networks) {
       if (net.isAutoGeneratedMerge) continue
 
       const hasCoil =
-        (net.nodes || []).some((n) => {
-          if (n.kind !== 'coil') return false
-          const c = n as LadderCoilNode
-          return (
-            (c.coilType === 'OUTPUT_COIL' || c.coilType === 'NEGATED_COIL') &&
-            this.getBaseOperandName(c.operand).toUpperCase() === normTarget
-          )
-        }) ||
+        (net.nodes ? nodesHaveMatchingCoil(net.nodes) : false) ||
         (net.elements || []).some((el) => {
           if (el.kind !== 'coil') return false
           const c = el.data as LadCoil
-          return (
-            (c.type === 'COIL') &&
-            this.getBaseOperandName(c.operand).toUpperCase() === normTarget
-          )
+          return c.type === 'COIL' && this.canonicalKey(c.operand, addrMap) === normTarget
         })
 
       if (hasCoil && !conflictingNetNumbers.includes(net.networkNumber)) {
@@ -207,7 +248,7 @@ export class DoubleCoilDetector {
         const net = updatedNetworks[netIdx]
         if (net.isAutoGeneratedMerge) continue
 
-        // Replace coils in Phase 2 nodes
+        // Replace coils in Phase 2 nodes (including inside parallel branches)
         if (net.nodes) {
           const replaceInNodes = (nodes: LadderSeriesNode[]): LadderSeriesNode[] => {
             return nodes.map((n) => {
@@ -215,7 +256,7 @@ export class DoubleCoilDetector {
                 n.kind === 'coil' &&
                 (n as LadderCoilNode).coilType !== 'SET_COIL' &&
                 (n as LadderCoilNode).coilType !== 'RESET_COIL' &&
-                this.getBaseOperandName((n as LadderCoilNode).operand).toUpperCase() === normTarget
+                this.canonicalKey((n as LadderCoilNode).operand, addrMap) === normTarget
               ) {
                 return {
                   ...n,
@@ -245,7 +286,7 @@ export class DoubleCoilDetector {
             elements: net.elements.map((el) => {
               if (
                 el.kind === 'coil' &&
-                this.getBaseOperandName((el.data as LadCoil).operand).toUpperCase() === normTarget
+                this.canonicalKey((el.data as LadCoil).operand, addrMap) === normTarget
               ) {
                 return {
                   ...el,

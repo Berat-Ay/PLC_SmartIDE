@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { Plus, Trash2, Database, Layers } from 'lucide-react'
 import { useBlockStore } from '../../../stores/useBlockStore'
 import { useProjectStore } from '../../../stores/useProjectStore'
@@ -17,18 +18,27 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
     sym: string
     currentValue: string
   } | null>(null)
-  const {
-    dataBlocks,
-    udts,
-    toggleDbOptimizedAccess,
-    addDbVariable,
-    updateDbVariable,
-    deleteDbVariable
-  } = useBlockStore()
-  const { markDirty } = useProjectStore()
-  const { isMonitoring, engine, forceValue } = useRuntimeStore()
-
-  const db = dataBlocks.find((d) => d.fileName === fileName)
+  const db = useBlockStore((s) => s.dataBlocks.find((d) => d.fileName === fileName))
+  const udts = useBlockStore((s) => s.udts)
+  const { toggleDbOptimizedAccess, addDbVariable, updateDbVariable, deleteDbVariable } = useBlockStore(
+    useShallow((s) => ({
+      toggleDbOptimizedAccess: s.toggleDbOptimizedAccess,
+      addDbVariable: s.addDbVariable,
+      updateDbVariable: s.updateDbVariable,
+      deleteDbVariable: s.deleteDbVariable
+    }))
+  )
+  const markDirty = useProjectStore((s) => s.markDirty)
+  const { isMonitoring, engine, forceValue, currentSnapshot, forceOverrides } = useRuntimeStore(
+    useShallow((s) => ({
+      isMonitoring: s.isMonitoring,
+      engine: s.engine,
+      forceValue: s.forceValue,
+      currentSnapshot: s.currentSnapshot,
+      forceOverrides: s.forceOverrides
+    }))
+  )
+  void currentSnapshot
 
   if (!db) {
     return (
@@ -238,9 +248,18 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
                     const sym = `${db.name}.${v.name}`
                     const liveVal = engine.getVariable(sym) ?? engine.getVariable(`DB${db.blockNumber}.${v.name}`) ?? v.defaultValue
                     const isBool = v.dataType === 'BOOL'
+                    const isForced = forceOverrides.has(sym) || forceOverrides.has(sym.toUpperCase())
                     return (
                       <td className="py-1 px-3 whitespace-nowrap">
-                        <div className="flex items-center gap-1.5 font-mono text-[11px] whitespace-nowrap">
+                        <div className="flex items-center gap-1 font-mono text-[11px] whitespace-nowrap">
+                          {isForced && (
+                            <span
+                              title="Forced over PLC logic"
+                              className="px-1 py-0.5 bg-amber-950 text-amber-300 border border-amber-700 text-[9px] font-bold rounded-none"
+                            >
+                              F
+                            </span>
+                          )}
                           <span
                             className={`px-1.5 py-0.5 rounded font-bold ${
                               isBool
@@ -267,10 +286,22 @@ export const DataBlockEditor: React.FC<DataBlockEditorProps> = ({ fileName }) =>
                               }
                             }}
                             title="Modify DB variable online"
-                            className="px-1.5 py-0.5 rounded bg-industrial-800 hover:bg-industrial-700 text-industrial-300 hover:text-white text-[9px] border border-industrial-700 font-sans cursor-pointer whitespace-nowrap"
+                            className="px-1.5 py-0.5 rounded-none bg-industrial-800 hover:bg-industrial-700 text-industrial-300 hover:text-white text-[9px] border border-industrial-700 font-sans cursor-pointer whitespace-nowrap"
                           >
                             Modify
                           </button>
+                          {isForced && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                forceValue(sym, undefined, false)
+                              }}
+                              title="Release DB force override"
+                              className="px-1.5 py-0.5 rounded-none bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-700 text-[9px] font-sans cursor-pointer whitespace-nowrap"
+                            >
+                              Unforce
+                            </button>
+                          )}
                         </div>
                       </td>
                     )

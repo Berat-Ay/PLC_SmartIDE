@@ -25,6 +25,7 @@ import {
 } from '@shared/types/ladder'
 import { TagDefinition } from '@shared/types/tags'
 import { S7DataType } from '@shared/types/s7types'
+import { getOccupiedCoordinates, parseS7Address } from '@shared/constants/s7rules'
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
 
 export interface DslCompilationResult {
@@ -153,6 +154,22 @@ export class LadderDslCompiler {
         knownTags.set(released.name.toLowerCase(), released)
       }
     }
+    const getAddressCoords = (addr: string): string[] => {
+      const parsed = parseS7Address(addr)
+      if (parsed.isValid) {
+        return getOccupiedCoordinates(parsed).map((c) => `${c.area}:${c.byte}:${c.bit}`)
+      }
+      const norm = normalizeS7Address(addr)
+      if (norm.isValid && norm.area && norm.byteAddress !== undefined) {
+        return [`${norm.area}:${norm.byteAddress}:${norm.bitAddress !== undefined ? norm.bitAddress : 0}`]
+      }
+      return []
+    }
+
+    const markAddressCoords = (addr: string): void => {
+      for (const k of getAddressCoords(addr)) usedBitCoordinates.add(k)
+    }
+
     const keptAddresses = new Set<string>()
     for (const kept of options?.keptTags || []) {
       const norm = normalizeS7Address(kept.address || '')
@@ -160,9 +177,7 @@ export class LadderDslCompiler {
       const upper = norm.formatted.toUpperCase()
       keptAddresses.add(upper)
       usedAddresses.set(upper, kept.name)
-      if (norm.area && norm.byteAddress !== undefined) {
-        usedBitCoordinates.add(`${norm.area}:${norm.byteAddress}:${norm.bitAddress !== undefined ? norm.bitAddress : 0}`)
-      }
+      markAddressCoords(upper)
       if (!redeclared.has(kept.name.toLowerCase())) knownTags.set(kept.name.toLowerCase(), kept)
     }
 
@@ -175,10 +190,7 @@ export class LadderDslCompiler {
         if (norm.isValid) {
           const upper = norm.formatted.toUpperCase()
           usedAddresses.set(upper, ex.name)
-          if (norm.area && norm.byteAddress !== undefined) {
-            const bit = norm.bitAddress !== undefined ? norm.bitAddress : 0
-            usedBitCoordinates.add(`${norm.area}:${norm.byteAddress}:${bit}`)
-          }
+          markAddressCoords(upper)
         }
       }
     }
@@ -261,18 +273,15 @@ export class LadderDslCompiler {
           let finalAddress = norm.isValid ? norm.formatted.toUpperCase() : rawAddress.toUpperCase()
           const area = (finalAddress.startsWith('%I') ? 'I' : finalAddress.startsWith('%Q') ? 'Q' : 'M') as 'I' | 'Q' | 'M'
 
-          let coordKey: string | null = null
-          if (norm.isValid && norm.area && norm.byteAddress !== undefined) {
-            const bit = norm.bitAddress !== undefined ? norm.bitAddress : 0
-            coordKey = `${norm.area}:${norm.byteAddress}:${bit}`
-          }
+          let coords = getAddressCoords(finalAddress)
 
-          // Conflict-Free Address Allocation Check:
+          // Conflict-Free Address Allocation Check (checks all bytes/bits of multi-byte addresses):
           const existingOccupant = usedAddresses.get(finalAddress)
+          const hasCoordCollision =
+            coords.some((k) => usedBitCoordinates.has(k)) && existingOccupant?.toLowerCase() !== name.toLowerCase()
           const isColliding =
             !keptAddresses.has(finalAddress) &&
-            ((existingOccupant && existingOccupant.toLowerCase() !== name.toLowerCase()) ||
-              (coordKey && usedBitCoordinates.has(coordKey) && existingOccupant?.toLowerCase() !== name.toLowerCase()))
+            ((existingOccupant && existingOccupant.toLowerCase() !== name.toLowerCase()) || hasCoordCollision)
 
           if (isColliding) {
             // Allocate next free sequential bit in same area
@@ -288,15 +297,12 @@ export class LadderDslCompiler {
             })
             addressRewrites.set(finalAddress, safeAddr)
             finalAddress = safeAddr
-            const safeNorm = normalizeS7Address(safeAddr)
-            if (safeNorm.isValid && safeNorm.area && safeNorm.byteAddress !== undefined) {
-              coordKey = `${safeNorm.area}:${safeNorm.byteAddress}:${safeNorm.bitAddress || 0}`
-            }
+            coords = getAddressCoords(finalAddress)
           }
 
           usedAddresses.set(finalAddress, name)
-          if (coordKey) {
-            usedBitCoordinates.add(coordKey)
+          for (const k of coords) {
+            usedBitCoordinates.add(k)
           }
 
           const tagDef: TagDefinition = {
@@ -588,18 +594,23 @@ export class LadderDslCompiler {
         return [coilNode]
       }
 
-      // Timers: TON, TOF, TP
-      if (name === 'TON' || name === 'TOF' || name === 'TP') {
+      // Timers: TON, TOF, TP, TONR
+      if (name === 'TON' || name === 'TOF' || name === 'TP' || name === 'TONR') {
         const instName = subArgs[0]?.trim() || `T${globalNodeCounter}`
         let ptValue = 'T#10s'
+        let rValue = ''
 
-        // Check for PT=... or second positional parameter
-        if (subArgs.length > 1) {
-          const second = subArgs[1].trim()
-          if (second.toUpperCase().startsWith('PT=')) {
-            ptValue = second.substring(3).trim().replace(/['"]/g, '')
-          } else {
-            ptValue = second.replace(/['"]/g, '')
+        for (let i = 1; i < subArgs.length; i++) {
+          const arg = subArgs[i].trim()
+          const upperArg = arg.toUpperCase()
+          if (upperArg.startsWith('PT=')) {
+            ptValue = arg.substring(3).trim().replace(/['"]/g, '')
+          } else if (upperArg.startsWith('R=') || upperArg.startsWith('RESET=')) {
+            rValue = arg.split('=')[1].trim().replace(/['"]/g, '')
+          } else if (i === 1 && !arg.includes('=')) {
+            ptValue = arg.replace(/['"]/g, '')
+          } else if (i === 2 && !arg.includes('=') && name === 'TONR') {
+            rValue = arg.replace(/['"]/g, '')
           }
         }
 
@@ -610,6 +621,7 @@ export class LadderDslCompiler {
           timerType,
           instanceDb: instName,
           inOperand: '',
+          rOperand: rValue || undefined,
           ptOperand: ptValue,
           qOperand: `${instName}.Q`,
           etOperand: `${instName}.ET`
@@ -758,7 +770,7 @@ export class LadderDslCompiler {
         )
       } else {
         errors.push(
-          `Network ${currentNetwork}: unknown instruction ${name}(...). The DSL has NO, NC, P_TRIG, N_TRIG, COIL, NEG_COIL, SET, RESET, TON, TOF, TP, CTU, CTD, CTUD, CMP_EQ/NE/GT/LT/GE/LE, ADD, SUB, MUL, DIV, MOVE, NORM_X, SCALE_X, SERIES and PARALLEL.`
+          `Network ${currentNetwork}: unknown instruction ${name}(...). The DSL has NO, NC, P_TRIG, N_TRIG, COIL, NEG_COIL, SET, RESET, TON, TOF, TP, TONR, CTU, CTD, CTUD, CMP_EQ/NE/GT/LT/GE/LE, ADD, SUB, MUL, DIV, MOVE, NORM_X, SCALE_X, SERIES and PARALLEL.`
         )
       }
       return []
@@ -853,7 +865,9 @@ export class LadderDslCompiler {
 
         if (node.kind === 'timer') {
           const t = node as LadderTimerNode
-          return `${t.timerType || 'TON'}(${t.instanceDb || 'T1'}, PT=${t.ptOperand || 'T#10s'})`
+          const params = [`PT=${t.ptOperand || 'T#10s'}`]
+          if (t.timerType === 'TONR' && t.rOperand) params.push(`R=${t.rOperand}`)
+          return `${t.timerType || 'TON'}(${t.instanceDb || 'T1'}, ${params.join(', ')})`
         }
 
         if (node.kind === 'counter') {
@@ -861,8 +875,13 @@ export class LadderDslCompiler {
           const extraParams: string[] = [`PV=${cnt.pvOperand || '10'}`]
           if (cnt.cuOperand) extraParams.push(`CU=${cnt.cuOperand}`)
           if (cnt.cdOperand) extraParams.push(`CD=${cnt.cdOperand}`)
-          if (cnt.ldOperand) extraParams.push(`LD=${cnt.ldOperand}`)
-          if (cnt.rLdOperand) extraParams.push(`R=${cnt.rLdOperand}`)
+          if (cnt.counterType === 'CTD') {
+            const ldVal = cnt.ldOperand || cnt.rLdOperand
+            if (ldVal) extraParams.push(`LD=${ldVal}`)
+          } else {
+            if (cnt.ldOperand) extraParams.push(`LD=${cnt.ldOperand}`)
+            if (cnt.rLdOperand) extraParams.push(`R=${cnt.rLdOperand}`)
+          }
           return `${cnt.counterType || 'CTU'}(${cnt.instanceDb || 'C1'}, ${extraParams.join(', ')})`
         }
 
@@ -874,7 +893,10 @@ export class LadderDslCompiler {
         if (node.kind === 'math') {
           const m = node as LadderMathNode
           if (m.boxType === 'NORM_X' || m.boxType === 'SCALE_X') {
-            return `${m.boxType}(${m.value || ''}, ${m.min || ''}, ${m.max || ''}, ${m.out || ''})`
+            return `${m.boxType}(${m.value || m.in1 || ''}, ${m.min || ''}, ${m.max || m.in2 || ''}, ${m.out || ''})`
+          }
+          if (m.boxType === 'MOVE') {
+            return `MOVE(${m.in1 || ''}, ${m.out || ''})`
           }
           return `${m.boxType}(${m.in1 || ''}, ${m.in2 || ''}, ${m.out || ''})`
         }

@@ -9,8 +9,6 @@ import {
 } from '@shared/types/hardware'
 import { CpuProfile } from '@shared/constants/cpuProfiles'
 import { getDefaultCpuConfig } from '@shared/constants/hardwareDefaults'
-import { useTagStore } from './useTagStore'
-import { useCrossRefStore } from './useCrossRefStore'
 
 interface HardwareStoreState {
   config: CpuConfig
@@ -38,6 +36,7 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         ...state.config,
         general: {
           ...state.config.general,
+          profileId: profile.id,
           cpuName: profile.name,
           targetCpu: profile.family === 'S7-1200' ? 'Virtual S7-1200' : 'Virtual S7-1500'
         },
@@ -53,8 +52,6 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         }
       }
     }))
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   updateGeneral: (updates) => {
@@ -73,9 +70,6 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         systemMemory: { enabled, byteAddress }
       }
     }))
-    // System memory changed -> re-scan overlaps & cross-references
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   updateClockMemory: (enabled, byteAddress) => {
@@ -85,9 +79,6 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         clockMemory: { enabled, byteAddress }
       }
     }))
-    // Clock memory changed -> re-scan overlaps & cross-references
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   updateDiChannel: (index, updates) => {
@@ -103,8 +94,6 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         }
       }
     })
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   updateDqChannel: (index, updates) => {
@@ -120,8 +109,6 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         }
       }
     })
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   updateAiChannel: (index, updates) => {
@@ -137,8 +124,6 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         }
       }
     })
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   updateAqChannel: (index, updates) => {
@@ -154,8 +139,6 @@ export const useHardwareStore = create<HardwareStoreState>((set) => ({
         }
       }
     })
-    useTagStore.getState().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   updateOb: (blockNumber, updates) => {
