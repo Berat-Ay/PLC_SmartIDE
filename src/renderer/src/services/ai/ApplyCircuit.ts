@@ -1,5 +1,6 @@
 /** Writes a generated circuit into the first tag table and OB1, or stages it for the user's review */
 
+import { makeTabId } from '../../utils/tabIds'
 import { PlcAgentTools } from './PlcAgentTools'
 import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
@@ -21,7 +22,7 @@ import { reservedMerkerBytes, tagsKeptWhenReplacingOb1 } from './ProjectContext'
 export function applyCircuitPayload(
   payload: AiCircuitSynthesisPayload,
   mode: 'auto-apply' | 'diff-view',
-  options: { trialRun?: boolean } = {}
+  options: { trialRun?: boolean; skipSnapshot?: boolean; protectedTagNames?: Set<string> } = {}
 ): {
   summaryText: string
   stagedChangeset?: Array<{
@@ -33,17 +34,26 @@ export function applyCircuitPayload(
   }>
   /** Tags that could not keep the address the model gave */
   addressMoves: AddressMove[]
+  /** Normalized, optimized and address-allocated circuit actually applied/staged */
+  effectiveCircuit: AiCircuitSynthesisPayload
 } {
   const normalizedNetworks = normalizeAiGeneratedNetworks(payload.networks || [])
   if (normalizedNetworks.length === 0 || hasEmptyNetwork(normalizedNetworks)) {
     throw new Error('The model returned an empty network, so the project was not changed.')
   }
-  if (mode === 'auto-apply' && !options.trialRun) PlcAgentTools.getInstance().captureSnapshot()
+  if (mode === 'auto-apply' && !options.trialRun && !options.skipSnapshot) {
+    PlcAgentTools.getInstance().captureSnapshot()
+  }
   const tablesBefore = structuredClone(useTagStore.getState().tagTables)
-  const effectivePayload = optimizeAndCleanGeneratedAst({
-    ...payload,
-    networks: normalizedNetworks
-  })
+  const allLiveTagsBeforeClean = tablesBefore.flatMap((t) => t.tags)
+  const effectivePayload = optimizeAndCleanGeneratedAst(
+    {
+      ...payload,
+      networks: normalizedNetworks
+    },
+    allLiveTagsBeforeClean,
+    options.protectedTagNames
+  )
   const isReplacing = effectivePayload.operationMode === 'replace_ob1_networks'
   // The new networks may use an existing tag by name without declaring it again, as the DSL may.
   // Such a tag stays, and keeps its address, when OB1 is replaced. Titles and comments are words, not uses of a tag
@@ -64,46 +74,54 @@ export function applyCircuitPayload(
   effectivePayload.networks = sanitized.networks
   const tagsCreatedNames: string[] = []
 
-  // 1. Upsert Tags (and prune orphaned tags on replacement)
+  // 1. Upsert Tags (and prune orphaned tags on replacement) across all tag tables
   try {
     const tagStore = useTagStore.getState()
-    const tableId = tagStore.tagTables[0]?.id || 'tbl_default'
+    const defaultTableId = tagStore.tagTables[0]?.id || 'tbl_default'
 
     // Prune orphaned tags if completely replacing OB1 networks to prevent collision duplicates (%Q0.0, %I0.0)
     if (effectivePayload.operationMode === 'replace_ob1_networks') {
       const newTagNames = new Set((effectivePayload.tagsToUpsert || []).map((t) => t.name.toLowerCase()))
       const kept = new Set(tagsKeptWhenReplacingOb1())
-      const currentTable = tagStore.tagTables.find((t) => t.id === tableId)
+      const currentTable = tagStore.tagTables.find((t) => t.id === defaultTableId)
       if (currentTable) {
         const tagsToRemove = currentTable.tags.filter(
           (t) => !newTagNames.has(t.name.toLowerCase()) && !kept.has(t) && !usedByNewProgram(t.name)
         )
         for (const t of tagsToRemove) {
-          tagStore.deleteTag(tableId, t.id)
+          tagStore.deleteTag(defaultTableId, t.id)
         }
       }
     }
 
-    const refreshedTags = tagStore.tagTables.flatMap((t) => t.tags)
+    // Track tag name -> (tableId, tagId) across ALL tables so secondary tables update in-place and duplicates dedupe
+    const tagLocationMap = new Map<string, { tableId: string; id: string }>()
+    for (const table of useTagStore.getState().tagTables) {
+      for (const t of table.tags) {
+        tagLocationMap.set(t.name.toLowerCase(), { tableId: table.id, id: t.id })
+      }
+    }
+
     for (const tag of effectivePayload.tagsToUpsert || []) {
       const normResult = normalizeS7Address(tag.address)
       const normAddr = normResult.isValid ? normResult.address : tag.address
-      const existing = refreshedTags.find((t) => t.name.toLowerCase() === tag.name.toLowerCase())
+      const existingLoc = tagLocationMap.get(tag.name.toLowerCase())
 
-      if (existing) {
-        tagStore.updateTag(tableId, existing.id, {
+      if (existingLoc) {
+        tagStore.updateTag(existingLoc.tableId, existingLoc.id, {
           address: normAddr,
           dataType: tag.dataType,
           comment: tag.comment || ''
         })
         tagsCreatedNames.push(`${tag.name} (${normAddr}) [Updated]`)
       } else {
-        tagStore.addTag(tableId, {
+        const created = tagStore.addTag(defaultTableId, {
           name: tag.name,
           address: normAddr,
           dataType: tag.dataType,
           comment: tag.comment || ''
         })
+        tagLocationMap.set(tag.name.toLowerCase(), { tableId: defaultTableId, id: created.id })
         tagsCreatedNames.push(`${tag.name} (${normAddr})`)
       }
     }
@@ -143,15 +161,16 @@ export function applyCircuitPayload(
   }
 
   if (ob1) {
-    const updatedNetworks =
+    const rawUpdated =
       effectivePayload.operationMode === 'append_ob1_networks'
         ? [...(ob1.networks || []), ...withUniqueLadderIds(ob1.networks || [], effectivePayload.networks || [])]
         : effectivePayload.networks || []
 
-    // Normalize network numbers
-    updatedNetworks.forEach((net, idx) => {
-      net.networkNumber = idx + 1
-    })
+    // Clone before numbering so snapshot/rollback network objects are never mutated in place
+    const updatedNetworks = rawUpdated.map((net, idx) => ({
+      ...net,
+      networkNumber: idx + 1
+    }))
 
     if (mode === 'auto-apply') {
       blockStore.updateLadBlock(ob1.fileName, { networks: updatedNetworks })
@@ -167,7 +186,7 @@ export function applyCircuitPayload(
             uiStore.setActiveTab(existingTab.id)
           } else {
             uiStore.openTab({
-              id: 'tab_ob1_main',
+              id: makeTabId('lad', ob1.fileName),
               title: 'OB1_Main',
               type: 'lad',
               targetId: ob1.fileName
@@ -182,14 +201,16 @@ export function applyCircuitPayload(
       stagedChangeset = [
         ...stagedTags,
         {
-          path: `blocks/${ob1.fileName}`,
-          title: `OB1_Main (${payload.networks.length} Networks)`,
+          path: `/blocks/${ob1.fileName}`,
+          title: `OB1_Main (${updatedNetworks.length} Networks)`,
           fileType: 'lad',
           beforeContent: JSON.stringify(ob1, null, 2),
           afterContent: JSON.stringify({ ...ob1, networks: updatedNetworks }, null, 2)
         }
       ]
     }
+  } else if (mode === 'diff-view' && stagedTags.length > 0) {
+    stagedChangeset = stagedTags
   }
 
   const summaryText = [
@@ -197,13 +218,14 @@ export function applyCircuitPayload(
     '',
     `**Synthesized Ladder Logic Summary:**`,
     `- **Tags Configured:** ${tagsCreatedNames.join(', ') || 'None'}`,
-    `- **Networks Drawn:** ${payload.networks?.length || 0} network(s) in OB1_Main`,
+    `- **Networks Drawn:** ${effectivePayload.networks?.length || 0} network(s) in OB1_Main`,
     `- **Execution Mode:** ${mode === 'auto-apply' ? '[Auto-Apply] Directly written to canvas' : '[Diff-View] Staged for review'}`
   ].join('\n')
 
   return {
     summaryText,
     stagedChangeset,
-    addressMoves: sanitized.moved
+    addressMoves: sanitized.moved,
+    effectiveCircuit: effectivePayload
   }
 }

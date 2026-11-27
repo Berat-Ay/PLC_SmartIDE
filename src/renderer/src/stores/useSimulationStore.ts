@@ -1,7 +1,10 @@
 import { create } from 'zustand'
 import { PlantPhysicsEngine, PlantEngineeringMetrics, ChannelFaultState } from '../runtime/PlantPhysicsEngine'
+import { SimScenarioSandbox } from '../runtime/SimScenarioSandbox'
 import { useRuntimeStore } from './useRuntimeStore'
 import { useProjectStore } from './useProjectStore'
+import { useUIStore } from './useUIStore'
+import { registerPhysicsAttachHook } from './projectCoordinator'
 
 export type SimulationSubTab = 'rack' | 'mimic' | 'scenario' | 'trace'
 
@@ -15,6 +18,7 @@ interface SimulationStoreState {
   faults: Record<string, ChannelFaultState>
   metrics: PlantEngineeringMetrics
   scenarioCode: string
+  scenarioError: string | null
 
   // Actions
   setActiveSubTab: (tab: SimulationSubTab) => void
@@ -25,7 +29,7 @@ interface SimulationStoreState {
   setDigitalInput: (byte: number, bit: number, value: boolean) => void
   setAnalogInputRaw: (channel: string, rawValue: number) => void
   setScenarioCode: (code: string) => void
-  applyScenarioScript: (code: string) => void
+  applyScenarioScript: (code: string) => Promise<{ ok: boolean; error?: string }>
   refreshMetrics: () => void
 }
 
@@ -64,15 +68,35 @@ export default function definePlantSimulation(physics, runtime, dt) {
 `
 
 const physicsInstance = new PlantPhysicsEngine()
+const scenarioSandbox = new SimScenarioSandbox()
+let physicsAttached = false
+let lastSimUiSyncAt = 0
+const SIM_UI_SYNC_INTERVAL_MS = 100
 
-export const useSimulationStore = create<SimulationStoreState>((set) => {
-  // Wire physics engine to virtual PLC runtime cyclic hook
+function isSimulationUiVisible(): boolean {
+  const { tabs, activeTabId, splitTabId, isSplitView } = useUIStore.getState()
+  const active = tabs.find((t) => t.id === activeTabId)
+  if (active && (active.type === 'simulation' || active.type === 'trace')) return true
+  if (isSplitView && splitTabId) {
+    const split = tabs.find((t) => t.id === splitTabId)
+    if (split && (split.type === 'simulation' || split.type === 'trace')) return true
+  }
+  return false
+}
+
+export function attachPhysicsToRuntime(): void {
+  if (physicsAttached) return
+  physicsAttached = true
   const runtimeEngine = useRuntimeStore.getState().engine
   runtimeEngine.setPhysicsHook((dtSeconds, runtime) => {
     physicsInstance.step(dtSeconds, runtime)
 
-    // Sync state for UI subscription
-    set({
+    // Sync state for UI subscription at ~10 Hz and only while simulation/trace view is open
+    if (!isSimulationUiVisible()) return
+    const now = Date.now()
+    if (now - lastSimUiSyncAt < SIM_UI_SYNC_INTERVAL_MS) return
+    lastSimUiSyncAt = now
+    useSimulationStore.setState({
       tankLevelRaw: physicsInstance.tankLevelRaw,
       reactorTempRaw: physicsInstance.reactorTempRaw,
       outflowValvePct: physicsInstance.outflowValvePct,
@@ -80,6 +104,13 @@ export const useSimulationStore = create<SimulationStoreState>((set) => {
       faults: { ...physicsInstance.faults },
       metrics: physicsInstance.getEngineeringValues(runtime)
     })
+  })
+}
+
+export const useSimulationStore = create<SimulationStoreState>((set) => {
+  scenarioSandbox.setOnRuntimeError((error) => {
+    physicsInstance.setScenarioRunner(undefined)
+    set({ scenarioError: error })
   })
 
   return {
@@ -92,6 +123,7 @@ export const useSimulationStore = create<SimulationStoreState>((set) => {
     faults: { ...physicsInstance.faults },
     metrics: physicsInstance.getEngineeringValues(),
     scenarioCode: defaultScenarioCode,
+    scenarioError: null,
 
     setActiveSubTab: (activeSubTab) => set({ activeSubTab }),
 
@@ -135,33 +167,30 @@ export const useSimulationStore = create<SimulationStoreState>((set) => {
     setScenarioCode: (scenarioCode) => {
       set({ scenarioCode })
       // An edited scenario is saved back to the project's own file, if it has one
-      const { simulationScripts } = useProjectStore.getState()
+      const projectState = useProjectStore.getState()
+      const { simulationScripts } = projectState
       if (simulationScripts.length > 0) {
         useProjectStore.setState({
           simulationScripts: [{ ...simulationScripts[0], code: scenarioCode }, ...simulationScripts.slice(1)]
         })
+        projectState.markDirty(true)
       }
     },
 
-    applyScenarioScript: (code: string) => {
-      try {
-        // Dynamically instantiate function from user script body
-        // Extracts the inner function body or wraps it
-        const cleanCode = code
-          .replace(/export\s+default\s+function\s*\w*\s*\([^)]*\)\s*\{/, '')
-          .replace(/\}\s*$/, '')
-
-        const runner = new Function('physics', 'runtime', 'dt', cleanCode) as (
-          physics: PlantPhysicsEngine,
-          runtime: any,
-          dt: number
-        ) => void
-
-        physicsInstance.setScenarioRunner(runner)
-        set({ scenarioCode: code })
-      } catch (err) {
-        console.error('Failed to compile simulation script:', err)
+    applyScenarioScript: async (code: string) => {
+      const result = await scenarioSandbox.compile(code)
+      if (!result.ok) {
+        physicsInstance.setScenarioRunner(undefined)
+        const error = result.error || 'Failed to compile simulation script'
+        set({ scenarioError: error })
+        return { ok: false, error }
       }
+
+      physicsInstance.setScenarioRunner((physics, runtime, dt) => {
+        scenarioSandbox.step(physics, runtime, dt)
+      })
+      set({ scenarioCode: code, scenarioError: null })
+      return { ok: true }
     },
 
     refreshMetrics: () => {
@@ -178,3 +207,6 @@ useProjectStore.subscribe((state, previous) => {
     if (useSimulationStore.getState().scenarioCode !== code) useSimulationStore.setState({ scenarioCode: code })
   }
 })
+
+registerPhysicsAttachHook(attachPhysicsToRuntime)
+attachPhysicsToRuntime()

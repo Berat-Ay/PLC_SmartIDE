@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Cpu,
   FilePlus,
@@ -20,17 +20,41 @@ function formatIpcError(err: unknown): string {
   return raw.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, '')
 }
 
+function joinProjectPath(root: string, name: string): string {
+  const cleanRoot = root.replace(/\\/g, '/').replace(/\/+$/, '')
+  const cleanName = name.trim() || 'Project_01'
+  return `${cleanRoot}/${cleanName}`
+}
+
 export const ProjectStartupWizard: React.FC = () => {
   const { createNewProject, loadDemoProject } = useProjectStore()
 
   const [activeTab, setActiveTab] = useState<'create' | 'open'>('create')
   const [projectName, setProjectName] = useState('Project_01')
+  const [defaultProjectsRoot, setDefaultProjectsRoot] = useState<string>('')
   const [projectPath, setProjectPath] = useState('C:/Projects/S7/Project_01')
   const [isCustomPath, setIsCustomPath] = useState(false)
   const [selectedCpuId, setSelectedCpuId] = useState<string>(CPU_1214C_PROFILE.id)
   const [selectedLanguage, setSelectedLanguage] = useState<'LAD' | 'SCL'>('LAD')
   const [isCreating, setIsCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    if (!window.electronApi?.getDefaultProjectsRoot) return
+    window.electronApi
+      .getDefaultProjectsRoot()
+      .then((root) => {
+        if (!active || !root) return
+        setDefaultProjectsRoot(root)
+        setProjectPath((prev) => (isCustomPath ? prev : joinProjectPath(root, projectName)))
+      })
+      .catch((err) => console.warn('Could not determine default projects directory:', err))
+    return () => {
+      active = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const selectedProfile: CpuProfile =
     ALL_CPU_PROFILES.find((p) => p.id === selectedCpuId) || CPU_1214C_PROFILE
@@ -54,10 +78,23 @@ export const ProjectStartupWizard: React.FC = () => {
 
   const handleCreate = async () => {
     const cleanName = projectName.trim() || 'Project_01'
-    const cleanPath = projectPath.trim()
+    let cleanPath = projectPath.trim()
     setCreateError(null)
 
     if (window.electronApi?.createProject) {
+      if (!isCustomPath && !defaultProjectsRoot && window.electronApi.getDefaultProjectsRoot) {
+        try {
+          const root = await window.electronApi.getDefaultProjectsRoot()
+          if (root) {
+            setDefaultProjectsRoot(root)
+            cleanPath = joinProjectPath(root, cleanName)
+            setProjectPath(cleanPath)
+          }
+        } catch (err) {
+          setCreateError(formatIpcError(err))
+          return
+        }
+      }
       if (!cleanPath) {
         setCreateError('Please specify a Target Directory for the new project.')
         return
@@ -210,7 +247,7 @@ export const ProjectStartupWizard: React.FC = () => {
                     setProjectName(name)
                     setCreateError(null)
                     if (!isCustomPath) {
-                      setProjectPath(`C:/Projects/S7/${name.trim() || 'Project_01'}`)
+                      setProjectPath(joinProjectPath(defaultProjectsRoot || 'C:/Projects/S7', name))
                     }
                   }}
                   className="w-full h-8 px-3 bg-[#0c0d10] border border-[#27272a] text-xs font-mono text-industrial-100 focus:border-[#00a3a6] focus:outline-hidden"

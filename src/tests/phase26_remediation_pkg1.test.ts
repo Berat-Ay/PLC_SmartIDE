@@ -141,7 +141,7 @@ async function run(): Promise<void> {
     const storeScl = useBlockStore.getState().sclBlocks
     const uiState = useUIStore.getState()
     check('useProjectStore.createNewProject sets OB1_Main.scl', storeScl.length === 1 && storeScl[0].fileName === 'OB1_Main.scl', storeScl[0]?.fileName)
-    check('useProjectStore.createNewProject opens OB1_Main.scl tab', uiState.activeTabId === 'OB1_Main.scl' && uiState.tabs[0]?.targetId === 'OB1_Main.scl', uiState.tabs)
+    check('useProjectStore.createNewProject opens OB1_Main.scl tab', uiState.activeTabId === 'tab_scl_OB1_Main.scl' && uiState.tabs[0]?.targetId === 'OB1_Main.scl', uiState.tabs)
 
     // 4. AddBlockModal LAD scaffolding + Instance DB binding + PlcRuntimeEngine execution
     const ladNetworks = createInitialLadNetworks()

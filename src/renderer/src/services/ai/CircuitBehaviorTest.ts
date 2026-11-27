@@ -9,6 +9,7 @@ import { parseS7Address } from '@shared/constants/s7rules'
 import { PlcRuntimeEngine } from '../../runtime/PlcRuntimeEngine'
 import { LadderEvaluator } from '../../runtime/LadderEvaluator'
 import { SclInterpreter } from '../../runtime/SclInterpreter'
+import { walkLadderNodes } from './aiClientUtils'
 
 type BehaviorValue = boolean | number
 
@@ -42,6 +43,7 @@ const MAX_SCANS = 3_000
 const MIN_SCAN_MS = 10
 const MAX_TIMELINE_ENTRIES = 40
 const PULSE_SCANS = 2
+const MAX_PULSE_MS = 40
 /** A failed check is watched this many scans more, to tell a late value from a wrong one */
 const LATE_SCANS = 3
 const INSTANCE_FIELD = /^[A-Za-z0-9_]+\.(Q|ET|QU|QD|CV)$/i
@@ -80,22 +82,59 @@ export function parseBehaviorTest(raw: unknown): { test?: BehaviorTest; problems
   return problems.length > 0 ? { problems } : { test: { steps }, problems: [] }
 }
 
-export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload): BehaviorResult {
+export function runBehaviorTest(
+  test: BehaviorTest,
+  project: ProjectLoadPayload,
+  options?: { extraWatched?: string[] }
+): BehaviorResult {
   const failures: string[] = []
   const pulses: string[] = []
   const tags = new Map(project.tagTables.flatMap((t) => t.tags || []).map((t) => [t.name.toLowerCase(), t]))
   const clean = (name: string): string => name.replace(/"/g, '').trim()
   const addressOf = (name: string): string => tags.get(clean(name).toLowerCase())?.address || clean(name)
-  const dataBlocks = new Set((project.dataBlocks || []).map((db) => db.name.toLowerCase()))
-  // An unknown instance reads as FALSE, so it must really be in the program or a check on it passes by itself
-  const programText = JSON.stringify([project.ladBlocks, project.sclBlocks])
+
+  // Real DB member index so nonexistent DB.MissingField checks fail honestly
+  const dbFields = new Map<string, Set<string>>()
+  for (const db of project.dataBlocks || []) {
+    const fields = new Set<string>()
+    for (const v of db.variables || []) {
+      if (v.name) fields.add(v.name.toLowerCase())
+    }
+    dbFields.set(db.name.toLowerCase(), fields)
+  }
+
+  // Real timer/counter instances declared in LAD networks or SCL blocks (never match network titles/comments)
+  const declaredInstances = new Set<string>()
+  for (const lad of project.ladBlocks || []) {
+    for (const net of lad.networks || []) {
+      walkLadderNodes(net.nodes, (n) => {
+        if ((n.kind === 'timer' || n.kind === 'counter') && n.instanceDb) {
+          declaredInstances.add(clean(n.instanceDb).toLowerCase())
+        }
+      })
+    }
+  }
+  for (const scl of project.sclBlocks || []) {
+    for (const m of (scl.code || '').matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:TON|TOF|TP|TONR|CTU|CTD|CTUD|IEC_TIMER|IEC_COUNTER)\b/gim)) {
+      declaredInstances.add(m[1].toLowerCase())
+    }
+  }
+
   const isInstanceField = (name: string): boolean =>
-    INSTANCE_FIELD.test(name) && new RegExp(`\\b${name.split('.')[0]}\\b`, 'i').test(programText)
+    INSTANCE_FIELD.test(name) && declaredInstances.has(name.split('.')[0].toLowerCase())
+  const isKnownDbMember = (rawName: string): boolean => {
+    const cleaned = clean(rawName)
+    const dot = cleaned.indexOf('.')
+    if (dot <= 0) return false
+    const dbName = cleaned.slice(0, dot).toLowerCase()
+    const fieldName = cleaned.slice(dot + 1).split('.')[0].toLowerCase()
+    return dbFields.get(dbName)?.has(fieldName) ?? false
+  }
   const isKnown = (name: string): boolean =>
     tags.has(clean(name).toLowerCase()) ||
     parseS7Address(clean(name)).isValid ||
     isInstanceField(clean(name)) ||
-    dataBlocks.has(clean(name).split('.')[0].toLowerCase())
+    isKnownDbMember(clean(name))
   const inArea = (name: string, area: string): boolean => {
     const parsed = parseS7Address(addressOf(name))
     return parsed.isValid && parsed.area === area
@@ -116,7 +155,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
     .flatMap((t) => t.tags || [])
     .filter((t) => parseS7Address(t.address || '').area === 'Q' && parseS7Address(t.address || '').sizeCategory === 'BIT')
     .map((t) => t.name)
-  const watched = [...new Set([...outputs, ...expected])]
+  const watched = [...new Set([...outputs, ...expected, ...(options?.extraWatched || [])])]
 
   const end = test.steps[test.steps.length - 1].atMs
   const scanMs = Math.max(MIN_SCAN_MS, Math.ceil(end / MAX_SCANS))
@@ -124,12 +163,14 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
   // The evaluators keep edge memory in statics, which the live CPU is using
   const restoreLadder = LadderEvaluator.saveInternalStates()
   const restoreScl = SclInterpreter.saveEdgeStates()
-  const engine = new PlcRuntimeEngine(structuredClone(project))
+  let engine: PlcRuntimeEngine | undefined
   try {
+    const runEngine = new PlcRuntimeEngine(structuredClone(project))
+    engine = runEngine
     let now = 1000
     const startedAt = now
-    engine.setClock(() => now)
-    engine.start({ manualScans: true })
+    runEngine.setClock(() => now)
+    runEngine.start({ manualScans: true })
 
     const last = new Map<string, unknown>()
     const onForScans = new Map<string, number>()
@@ -137,15 +178,17 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
     const changes: string[] = []
     let changeCount = 0
     let checks = 0
+    let scansRun = 0
     const seconds = (): string => ((now - startedAt) / 1000).toFixed(2)
-    const read = (name: string): unknown => engine.getVariable(addressOf(name))
+    const read = (name: string): unknown => runEngine.getVariable(addressOf(name))
     const matches = (actual: unknown, value: BehaviorValue): boolean =>
       typeof value === 'boolean' ? !!actual === value : Math.abs(Number(actual) - value) <= Math.max(1e-6, Math.abs(value) * 1e-4)
     // A failed check whose value arrives a scan or two later is most often a test that looks too early
     const late: Array<{ failure: number; name: string; value: BehaviorValue; scansLeft: number; scans: number }> = []
 
     const scan = (): void => {
-      engine.scanOnce()
+      scansRun++
+      runEngine.scanOnce()
       for (let i = late.length - 1; i >= 0; i--) {
         const pending = late[i]
         pending.scans++
@@ -169,7 +212,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
             onForScans.set(name, (onForScans.get(name) || 0) + 1)
           } else {
             const scans = onForScans.get(name) || 0
-            if (scans > 0 && scans <= PULSE_SCANS && pulses.length < 5) {
+            if (scans > 0 && scans <= PULSE_SCANS && scans * scanMs <= MAX_PULSE_MS && pulses.length < 5) {
               pulses.push(`Output '${name}' was on for only ${scans} scan(s), ending at ${seconds()} s.`)
             }
             onForScans.set(name, 0)
@@ -185,9 +228,13 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
       }
       // A new input could cause the value itself, so a late value is only told before the next change
       if (step.set) late.length = 0
-      for (const [name, value] of Object.entries(step.set || {})) engine.setVariable(addressOf(name), value)
+      for (const [name, value] of Object.entries(step.set || {})) runEngine.setVariable(addressOf(name), value)
       if (step.set) {
-        now += scanMs
+        now = Math.max(now, startedAt + step.atMs)
+        scan()
+      } else if (scansRun === 0) {
+        // Ensure OB1 evaluates at least once before an initial expect step (e.g. atMs: 0 without set)
+        now = Math.max(now, startedAt + step.atMs)
         scan()
       }
       for (const [name, value] of Object.entries(step.expect || {})) {
@@ -219,7 +266,7 @@ export function runBehaviorTest(test: BehaviorTest, project: ProjectLoadPayload)
     const more = changeCount > changes.length ? `\n... and ${changeCount - changes.length} more changes` : ''
     return { checks, failures, pulses, timeline: changes.join('\n') + more, seenOn: Array.from(seenOn) }
   } finally {
-    engine.stop()
+    engine?.stop()
     restoreLadder()
     restoreScl()
   }

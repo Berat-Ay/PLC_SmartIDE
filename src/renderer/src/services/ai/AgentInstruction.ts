@@ -30,8 +30,8 @@ export const AGENT_TOOLS = new Set([
 export function sanitizeUserPrompt(rawPrompt: string): string {
   if (!rawPrompt) return ''
   return rawPrompt
-    .replace(/\[DIAGNOSTIC\][\s\S]*$/i, '')
-    .replace(/\[TIP\][\s\S]*$/i, '')
+    .replace(/\r?\n?\[DIAGNOSTIC\]\s*(?:\*\*(?:Bobin Neden Kapal[ıi]|Why is this Coil OFF)\?|Canl[ıi] Bobin Te[şs]his Raporu:)[\s\S]*$/i, '')
+    .replace(/\s*\[TIP\]\s*Try asking:[\s\S]*$/i, '')
     .replace(/RAG Context:\s*[\w_-]+/gi, '')
     .replace(/Rungline Agent\s*$/i, '')
     .trim()
@@ -115,40 +115,5 @@ ${ragPromptSection}
 The current project lists this CPU's inputs, outputs, clock memory and system memory. Use those.
 Give every new tag its address, either as a TAG line in "dsl" or in "tagsToUpsert". A tag that already exists keeps its address if you do not declare it again. Never use the CPU's clock or system memory bytes for your own bits.
 If the prompt is purely informational without ladder logic, provide an explanation directly.`
-  return { text: systemInstructionText, consultedRuleNames }
-}
-
-/** The system instruction for Ollama, which answers in Compact Ladder DSL and does not run the agent loop */
-export function buildOllamaInstruction(prompt: string): { text: string; consultedRuleNames: string[] } {
-  const ragEngine = RagKnowledgeEngine.getInstance()
-  const topRules = ragEngine.retrieveTopKRules(prompt, 3)
-  const ragPromptSection = ragEngine.formatRetrievedRulesForPrompt(topRules)
-  const consultedRuleNames = topRules.map((r) => r.item.name)
-
-  const systemInstructionText = `You are an expert Siemens S7-1200/1500 PLC programmer.
-When asked to synthesize, create, or modify PLC Ladder logic, circuits, timers, motors, or I/O configurations, output your response strictly in Compact Ladder DSL:
-
-# EXPLANATION
-Detailed engineering explanation in the user's language.
-
-# TAG DECLARATIONS
-TAG <Name> <Address> <DataType> "<Comment>"
-
-# NETWORK DEFINITIONS
-NW 1 "<Title>": <EXPRESSION>
-NW 2 "<Title>": <EXPRESSION>
-
-Compact Ladder DSL Syntax:
-- Contacts: NO(operand), NC(operand), P_TRIG(operand), N_TRIG(operand), each with one value. P_TRIG and N_TRIG keep their own edge memory
-- Coils: COIL(operand), NEG_COIL(operand), SET(operand), RESET(operand), each with one value
-- Timers: TON(T_Name, PT=T#10s), TOF(...), TP(...)
-- Counters: CTU(C_Name, PV=10), CTD(...)
-- Comparators: CMP_EQ(in1, in2), CMP_NE, CMP_GT, CMP_LT, CMP_GE, CMP_LE. Add REAL as a third value to compare REALs
-- Math: ADD(in1, in2, out), SUB, MUL, DIV with the same three values; MOVE(in, out) with two; NORM_X(value, min, max, out) and SCALE_X(value, min, max, out) with four
-- Combinators: SERIES(elem1, elem2, ...), PARALLEL(branch1, branch2, ...)
-
-${LADDER_RULES}
-${ragPromptSection}
-Standard Siemens S7 Addresses: Inputs %I0.0..%I1.5, Outputs %Q0.0..%Q1.1.`
   return { text: systemInstructionText, consultedRuleNames }
 }

@@ -7,7 +7,7 @@ import { BlockInterface, DataBlockDefinition, LadBlockDefinition, SclBlockDefini
 import { LadderNode } from '@shared/types/ladder'
 import { CpuProfile, getCpuProfile } from '@shared/constants/cpuProfiles'
 import { parseS7Address } from '@shared/constants/s7rules'
-import { parseS7Time } from '@shared/s7/time'
+import { parseS7LTimeNs, parseS7Time } from '@shared/s7/time'
 import { LayoutVariable, parseTypeName, splitPath, TypeResolver } from '@shared/s7/typeLayout'
 import { SclLexer } from '@shared/scl/lexer'
 import { SclToken } from '@shared/scl/ast'
@@ -47,7 +47,11 @@ class Checker {
   private readonly resolver: TypeResolver
 
   constructor(private readonly input: ProgramCheckInput) {
-    this.profile = getCpuProfile(input.cpuConfig?.general?.targetCpu || input.cpuConfig?.general?.cpuName)
+    this.profile = getCpuProfile(
+      input.cpuConfig?.general?.profileId ||
+        input.cpuConfig?.general?.targetCpu ||
+        input.cpuConfig?.general?.cpuName
+    )
     for (const table of input.tagTables) {
       for (const tag of table.tags || []) this.tagNames.add((tag.name || '').toLowerCase())
     }
@@ -61,7 +65,8 @@ class Checker {
       fb: (name) => {
         const block = this.codeBlocks.get(name.toLowerCase())
         if (!block || block.blockType !== 'FB') return undefined
-        return [...this.interfaceOf(block).input, ...this.interfaceOf(block).static]
+        const iface = this.interfaceOf(block)
+        return [...iface.input, ...iface.output, ...iface.inOut, ...iface.static]
       }
     }
   }
@@ -183,8 +188,12 @@ class Checker {
 
     body.forEach((token, index) => {
       const where = { ...base, line: token.line }
-      if (token.type === 'TIME' && parseS7Time(token.value) === null) {
-        this.add({ ...where, iecCode: 'S7-TMR-004', message: `[S7-TMR-004] ${blockName}: invalid time literal '${token.value}'.` })
+      if (token.type === 'TIME') {
+        const isLTime = /^(LTIME|LT)#/i.test(token.value)
+        const ok = isLTime ? parseS7LTimeNs(token.value) !== null : parseS7Time(token.value) !== null
+        if (!ok) {
+          this.add({ ...where, iecCode: 'S7-TMR-004', message: `[S7-TMR-004] ${blockName}: invalid time literal '${token.value}'.` })
+        }
         return
       }
       if (token.type !== 'IDENTIFIER') return
@@ -245,12 +254,15 @@ class Checker {
     const trimmed = (raw || '').trim()
     if (!trimmed || trimmed === '???' || trimmed.includes('???')) return // Reported as S7-LAD-002
     if (BOX_PIN_PLACEHOLDER.test(trimmed)) return
-    if (/^-?\d+(\.\d+)?$/.test(trimmed) || /^(TRUE|FALSE)$/i.test(trimmed)) return
+    if (/^[-+]?\d+(?:_\d+)*(?:\.\d+(?:_\d+)*)?$/.test(trimmed) || /^(TRUE|FALSE)$/i.test(trimmed)) return
+    if (/^(?:[A-Z0-9_]+#)?(?:16|8|2)#[0-9A-Fa-f_]+$/i.test(trimmed)) return
+    if (/^(?:INT|DINT|SINT|USINT|UINT|UDINT|LINT|ULINT|REAL|LREAL|BYTE|WORD|DWORD|LWORD|BOOL|CHAR|WCHAR)#/i.test(trimmed)) return
 
     const quoted = trimmed.startsWith('"')
     const clean = trimmed.replace(/"/g, '')
     if (/^(LTIME|TIME|LT|T)#/i.test(clean)) {
-      if (parseS7Time(clean) === null) {
+      const ok = /^(LTIME|LT)#/i.test(clean) ? parseS7LTimeNs(clean) !== null : parseS7Time(clean) !== null
+      if (!ok) {
         this.add({ ...base, iecCode: 'S7-TMR-004', message: `[S7-TMR-004] ${blockName}: invalid time literal '${clean}'.` })
       }
       return
@@ -301,16 +313,23 @@ class Checker {
           this.checkLadOperand(operand, iface, base, block.name)
           if (node.kind === 'timer') {
             this.checkLadOperand(n.ptOperand, iface, base, block.name)
+            this.checkLadOperand(n.rOperand, iface, base, block.name)
             this.checkLadOperand(n.qOperand, iface, base, block.name)
             this.checkLadOperand(n.etOperand, iface, base, block.name)
           }
           if (node.kind === 'counter') {
-            for (const key of ['pvOperand', 'rLdOperand', 'cuOperand', 'cdOperand', 'qOperand', 'cvOperand']) {
+            for (const key of ['pvOperand', 'rLdOperand', 'ldOperand', 'cuOperand', 'cdOperand', 'qOperand', 'quOperand', 'qdOperand', 'cvOperand']) {
               this.checkLadOperand(n[key], iface, base, block.name)
             }
           }
+          if (node.kind === 'comparator') {
+            this.checkLadOperand(n.op1, iface, base, block.name)
+            this.checkLadOperand(n.op2, iface, base, block.name)
+          }
           if (node.kind === 'math') {
-            this.checkLadOperand(n.out, iface, base, block.name)
+            for (const key of ['in1', 'in2', 'min', 'max', 'value', 'out']) {
+              this.checkLadOperand(n[key], iface, base, block.name)
+            }
           }
         })
       }
@@ -339,7 +358,10 @@ export function findIoBitsWithoutChannel(tagTables: TagTable[], cpuConfig?: CpuC
       const parsed = parseS7Address(tag.address || '')
       if (!parsed.isValid || parsed.sizeCategory !== 'BIT') continue
       const channels = parsed.area === 'I' ? inputs : parsed.area === 'Q' ? outputs : []
-      if (channels.length === 0 || channels.includes(tag.address.toUpperCase())) continue
+      const normAddr = tag.address.trim().toUpperCase().startsWith('%')
+        ? tag.address.trim().toUpperCase()
+        : `%${tag.address.trim().toUpperCase()}`
+      if (channels.length === 0 || channels.includes(normAddr)) continue
       findings.push({
         iecCode: 'S7-IO-009',
         tagName: tag.name,

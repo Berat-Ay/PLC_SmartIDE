@@ -57,6 +57,17 @@ function safeFileName(name: string): string {
   return name.replace(/[^A-Za-z0-9_.-]+/g, '_')
 }
 
+function uniqueSafeFileName(rawName: string, ext: string, usedLower: Set<string>): string {
+  const base = safeFileName(rawName) || 'Block'
+  let candidate = `${base}.${ext}`
+  let suffix = 2
+  while (usedLower.has(candidate.toLowerCase())) {
+    candidate = `${base}_${suffix++}.${ext}`
+  }
+  usedLower.add(candidate.toLowerCase())
+  return candidate
+}
+
 function typeReferences(dataType: string, into: Set<string>): void {
   const quoted = dataType.match(/"([^"]+)"/g)
   for (const q of quoted || []) into.add(q.replace(/"/g, '').toLowerCase())
@@ -117,6 +128,9 @@ export function buildTiaBundle(payload: ProjectLoadPayload, options: TiaBundleOp
   const transpiledSclBlocks: SclBlockDefinition[] = []
   const transpiledLad: { name: string; file: string }[] = []
 
+  const usedSourceFiles = new Set<string>()
+  const usedTagFiles = new Set<string>()
+
   if (shouldTranspileLad) {
     for (const lad of payload.ladBlocks) {
       const res = transpileLadToScl(lad, { existingDbNames, nextDbNumber })
@@ -127,7 +141,8 @@ export function buildTiaBundle(payload: ProjectLoadPayload, options: TiaBundleOp
         synthesizedDbs.push(db)
       }
       transpiledSclBlocks.push(res.sclBlock)
-      transpiledLad.push({ name: lad.name, file: `sources/${safeFileName(lad.name)}.scl` })
+      const ladFile = uniqueSafeFileName(lad.name, 'scl', usedSourceFiles)
+      transpiledLad.push({ name: lad.name, file: `sources/${ladFile}` })
       warnings.push(...res.warnings)
     }
     if (transpiledLad.length > 0) {
@@ -147,9 +162,9 @@ export function buildTiaBundle(payload: ProjectLoadPayload, options: TiaBundleOp
   for (const udt of payload.udts) {
     const written = writeUdt(udt)
     const dependsOn = new Set<string>()
-    for (const m of udt.members) typeReferences(m.dataType, dependsOn)
+    variableReferences(udt.members as BlockVariable[], dependsOn)
     warnings.push(...written.warnings)
-    steps.push({ file: `${safeFileName(udt.name)}.udt`, kind: 'udt', name: udt.name, content: written.content, dependsOn })
+    steps.push({ file: uniqueSafeFileName(udt.name, 'udt', usedSourceFiles), kind: 'udt', name: udt.name, content: written.content, dependsOn })
   }
 
   for (const db of [...payload.dataBlocks, ...synthesizedDbs]) {
@@ -161,7 +176,7 @@ export function buildTiaBundle(payload: ProjectLoadPayload, options: TiaBundleOp
     }
     warnings.push(...written.warnings)
     steps.push({
-      file: `${safeFileName(db.name)}.db`,
+      file: uniqueSafeFileName(db.name, 'db', usedSourceFiles),
       kind: 'db',
       name: db.name,
       number: db.blockNumber,
@@ -181,9 +196,13 @@ export function buildTiaBundle(payload: ProjectLoadPayload, options: TiaBundleOp
     tokens.forEach((token, index) => {
       if (token.quoted && tokens[index - 1]?.value !== '.') dependsOn.add(token.value.toLowerCase())
     })
+    const transpiledEntry = transpiledLad.find((t) => t.name === block.name)
+    const stepFile = transpiledEntry
+      ? transpiledEntry.file.replace(/^sources\//, '')
+      : uniqueSafeFileName(block.name, 'scl', usedSourceFiles)
     warnings.push(...written.warnings)
     steps.push({
-      file: `${safeFileName(block.name)}.scl`,
+      file: stepFile,
       kind: block.blockType.toLowerCase() as TiaStepKind,
       name: block.name,
       number: block.blockNumber,
@@ -204,14 +223,14 @@ export function buildTiaBundle(payload: ProjectLoadPayload, options: TiaBundleOp
   const tagTables = payload.tagTables.map((table) => {
     const written = writeTagTableXml(table)
     warnings.push(...written.warnings)
-    const filename = `${safeFileName(table.name)}.xml`
+    const filename = uniqueSafeFileName(table.name, 'xml', usedTagFiles)
     files.push({ filename, folder: 'tags', content: written.content, type: 'xml' })
     return { file: `tags/${filename}`, name: table.name }
   })
   files.push({ filename: 'PLC_Tags.csv', folder: 'tags', content: writeTagCsv(payload.tagTables), type: 'csv' })
 
   const general = payload.hardware?.general
-  const profile = getCpuProfile(general?.targetCpu || general?.cpuName || payload.metadata?.targetCpu)
+  const profile = getCpuProfile(general?.profileId || general?.targetCpu || general?.cpuName || payload.metadata?.targetCpu)
   if (!profile) warnings.push('The target CPU is not known. Pass --cpu to the bridge or add the device in TIA by hand.')
 
   const manifest: TiaManifest = {

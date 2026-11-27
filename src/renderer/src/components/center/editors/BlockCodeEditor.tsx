@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FileCode2,
   Code,
@@ -13,6 +13,7 @@ import {
 import { useBlockStore } from '../../../stores/useBlockStore'
 import { useProjectStore } from '../../../stores/useProjectStore'
 import { useRuntimeStore } from '../../../stores/useRuntimeStore'
+import { useTagStore } from '../../../stores/useTagStore'
 import { BlockInterfaceStrip } from '../BlockInterfaceStrip'
 import { SvgLadderCanvas } from '../ladder/SvgLadderCanvas'
 import { DoubleCoilBanner } from '../ladder/DoubleCoilBanner'
@@ -25,23 +26,55 @@ import { StlListingGenerator } from '../../../services/compiler/StlListingGenera
 interface BlockCodeEditorProps {
   fileName: string
   isLad: boolean
+  isActivePane?: boolean
+  panePrefix?: string
 }
 
-export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLad }) => {
-  const { ladBlocks, sclBlocks, updateLadBlock, updateSclBlock } = useBlockStore()
-  const { markDirty } = useProjectStore()
-  const { isMonitoring, currentSnapshot, scrubbedSnapshot, timeTravelActive } = useRuntimeStore()
+export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({
+  fileName,
+  isLad,
+  isActivePane = true,
+  panePrefix = ''
+}) => {
+  const ladBlock = useBlockStore((s) => (isLad ? s.ladBlocks.find((b) => b.fileName === fileName) : undefined))
+  const sclBlock = useBlockStore((s) => (!isLad ? s.sclBlocks.find((b) => b.fileName === fileName) : undefined))
+  const updateLadBlock = useBlockStore((s) => s.updateLadBlock)
+  const updateSclBlock = useBlockStore((s) => s.updateSclBlock)
+  const tagTables = useTagStore((s) => s.tagTables)
+  const markDirty = useProjectStore((s) => s.markDirty)
+  const isMonitoring = useRuntimeStore((s) => s.isMonitoring)
+  const sclLineValues = useRuntimeStore((s) => {
+    const snap = s.timeTravelActive ? s.scrubbedSnapshot : s.currentSnapshot
+    return snap?.sclLineValues?.[fileName]
+  })
 
   const [showRawJson, setShowRawJson] = useState(false)
   const [showBytecode, setShowBytecode] = useState(false)
   const [copiedBytecode, setCopiedBytecode] = useState(false)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [showQuickForce, setShowQuickForce] = useState(false)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const activeSnapshot = timeTravelActive ? scrubbedSnapshot : currentSnapshot
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    }
+  }, [])
 
-  const ladBlock = isLad ? ladBlocks.find((b) => b.fileName === fileName) : undefined
-  const sclBlock = !isLad ? sclBlocks.find((b) => b.fileName === fileName) : undefined
+  const conflicts = useMemo(
+    () => (isLad && ladBlock ? DoubleCoilDetector.detectConflicts(ladBlock, tagTables) : []),
+    [isLad, ladBlock, tagTables]
+  )
+  const sclSyntax = useMemo(
+    () => (!isLad && sclBlock ? SclInterpreter.validateSyntax(sclBlock.code) : null),
+    [isLad, sclBlock]
+  )
+  const compiledBytecode = useMemo(() => {
+    if (!showBytecode) return null
+    if (isLad && ladBlock) return StlListingGenerator.forLadBlock(ladBlock)
+    if (!isLad && sclBlock) return StlListingGenerator.forSclBlock(sclBlock)
+    return null
+  }, [showBytecode, isLad, ladBlock, sclBlock])
 
   if (isLad && !ladBlock) {
     return (
@@ -60,15 +93,6 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
   }
 
   const currentBlock = isLad ? ladBlock! : sclBlock!
-  const conflicts = isLad && ladBlock ? DoubleCoilDetector.detectConflicts(ladBlock) : []
-  const sclSyntax = !isLad && sclBlock ? SclInterpreter.validateSyntax(sclBlock.code) : null
-  const compiledBytecode = showBytecode
-    ? isLad && ladBlock
-      ? StlListingGenerator.forLadBlock(ladBlock)
-      : sclBlock
-      ? StlListingGenerator.forSclBlock(sclBlock)
-      : null
-    : null
 
   return (
     <div className="cq h-full flex flex-col bg-industrial-900 select-none text-xs overflow-hidden">
@@ -205,9 +229,10 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                 </span>
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText(compiledBytecode.listingText)
+                    navigator.clipboard?.writeText(compiledBytecode.listingText).catch(() => {})
                     setCopiedBytecode(true)
-                    setTimeout(() => setCopiedBytecode(false), 2000)
+                    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+                    copyTimerRef.current = setTimeout(() => setCopiedBytecode(false), 2000)
                   }}
                   data-testid="copy-bytecode-btn"
                   className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-mono bg-industrial-800 hover:bg-industrial-700 text-industrial-200 hover:text-white border border-industrial-600 cursor-pointer"
@@ -249,6 +274,8 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                     }}
                     selectedNodeId={selectedNodeId}
                     onSelectNode={setSelectedNodeId}
+                    isActivePane={isActivePane}
+                    panePrefix={panePrefix}
                   />
                 )}
               </div>
@@ -302,7 +329,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                           <Eye className="w-3 h-3" />
                           <span>Live Line Values</span>
                         </div>
-                        {Object.entries(activeSnapshot?.sclLineValues?.[currentBlock.fileName] || {}).map(([lineStr, val]) => (
+                        {Object.entries(sclLineValues || {}).map(([lineStr, val]) => (
                           <div
                             key={lineStr}
                             className="flex items-center justify-between p-1.5 rounded bg-industrial-950 border border-industrial-800 font-mono text-[11px]"
@@ -311,7 +338,7 @@ export const BlockCodeEditor: React.FC<BlockCodeEditorProps> = ({ fileName, isLa
                             <span className="font-bold text-emerald-400">{String(val)}</span>
                           </div>
                         ))}
-                        {Object.keys(activeSnapshot?.sclLineValues?.[currentBlock.fileName] || {}).length === 0 && (
+                        {Object.keys(sclLineValues || {}).length === 0 && (
                           <div className="text-[11px] text-industrial-500 italic p-2 text-center">
                             Scan cycle active. Monitoring local variables...
                           </div>

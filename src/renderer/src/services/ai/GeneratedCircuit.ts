@@ -1,6 +1,8 @@
 /** Cleans the networks and tags a model generated before they reach the project */
 
 import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
+import { parseS7Address, formatS7Address, getCategoryForType, getOccupiedCoordinates } from '@shared/constants/s7rules'
+import { walkLadderNodes } from './aiClientUtils'
 import {
   LadderNode,
   LadderSeriesNode,
@@ -68,10 +70,11 @@ export function normalizeAiGeneratedNetworks(rawNetworks: any[]): LadderNetwork[
       rawKind === 'TIMER' ||
       raw.kind === 'timer'
     ) {
+      const rawTimerType = typeof raw.timerType === 'string' ? raw.timerType.toUpperCase() : ''
       const timerType: TimerType =
-        raw.timerType?.toUpperCase() === 'TOF' || rawKind === 'TOF'
+        rawTimerType === 'TOF' || rawKind === 'TOF'
           ? 'TOF'
-          : raw.timerType?.toUpperCase() === 'TP' || rawKind === 'TP'
+          : rawTimerType === 'TP' || rawKind === 'TP'
             ? 'TP'
             : 'TON'
 
@@ -114,8 +117,8 @@ export function normalizeAiGeneratedNetworks(rawNetworks: any[]): LadderNetwork[
       rawKind === 'COUNTER' ||
       raw.kind === 'counter'
     ) {
-      let counterType: CounterType = 'CTUD'
-      if (raw.counterType) {
+      let counterType: CounterType = 'CTU'
+      if (typeof raw.counterType === 'string' && raw.counterType.trim()) {
         const ctUpper = raw.counterType.toUpperCase()
         if (ctUpper === 'CTU' || ctUpper === 'CTD' || ctUpper === 'CTUD') {
           counterType = ctUpper as CounterType
@@ -124,6 +127,8 @@ export function normalizeAiGeneratedNetworks(rawNetworks: any[]): LadderNetwork[
         counterType = 'CTU'
       } else if (rawKind === 'CTD') {
         counterType = 'CTD'
+      } else if (rawKind === 'CTUD') {
+        counterType = 'CTUD'
       }
 
       const instName = (
@@ -189,8 +194,9 @@ export function normalizeAiGeneratedNetworks(rawNetworks: any[]): LadderNetwork[
       const op1 = String(raw.op1 ?? raw.in1 ?? raw.left ?? raw.input1 ?? '0').trim()
       const op2 = String(raw.op2 ?? raw.in2 ?? raw.right ?? raw.input2 ?? '0').trim()
       let dataType: 'INT' | 'DINT' | 'REAL' | 'TIME' = 'INT'
-      if (raw.dataType && ['INT', 'DINT', 'REAL', 'TIME'].includes(raw.dataType.toUpperCase())) {
-        dataType = raw.dataType.toUpperCase()
+      const rawCmpDataType = typeof raw.dataType === 'string' ? raw.dataType.toUpperCase() : ''
+      if (rawCmpDataType === 'INT' || rawCmpDataType === 'DINT' || rawCmpDataType === 'REAL' || rawCmpDataType === 'TIME') {
+        dataType = rawCmpDataType
       }
 
       return {
@@ -298,8 +304,13 @@ export function normalizeAiGeneratedNetworks(rawNetworks: any[]): LadderNetwork[
 /**
  * Removes a plain %M coil that only copies a timer's or counter's Q, and reads the instance bit instead.
  * Other coil types stay: a SET coil latches and a negated coil inverts, so they are not the same as Q.
+ * Physical I/O coils (even pre-existing ones) and tags checked by verification/approved tests are always kept.
  */
-export function optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload): AiCircuitSynthesisPayload {
+export function optimizeAndCleanGeneratedAst(
+  payload: AiCircuitSynthesisPayload,
+  existingTags: Array<{ name: string; address: string }> = [],
+  protectedTagNames: Set<string> = new Set()
+): AiCircuitSynthesisPayload {
   if (!payload.networks || payload.networks.length === 0) return payload
 
   const strippedCoilMap = new Map<string, string>() // dummyOperandLower -> replacement e.g. "T1.Q"
@@ -320,8 +331,16 @@ export function optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload)
       ) {
         const t = current as LadderTimerNode | LadderCounterNode
         const c = next as LadderCoilNode
-        const declared = (payload.tagsToUpsert || []).find((tag) => tag.name.toLowerCase() === c.operand.toLowerCase())
-        if (/^%?[IQ]/i.test(c.address || declared?.address || '')) {
+        const opLower = (c.operand || '').replace(/"/g, '').trim().toLowerCase()
+        const symLower = (c.symbolName || '').replace(/"/g, '').trim().toLowerCase()
+        const declared = (payload.tagsToUpsert || []).find((tag) => tag.name.toLowerCase() === opLower)
+        const preExisting = existingTags.find((tag) => tag.name.toLowerCase() === opLower)
+        const resolvedAddr = c.address || declared?.address || preExisting?.address || ''
+        const isProtected =
+          protectedTagNames.has(opLower) ||
+          (symLower ? protectedTagNames.has(symLower) : false) ||
+          (c.address ? protectedTagNames.has(c.address.trim().toLowerCase()) : false)
+        if (/^%?[IQ]/i.test(resolvedAddr) || isProtected) {
           newNodes.push(current)
           continue
         }
@@ -329,9 +348,9 @@ export function optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload)
         const countsDown = current.kind === 'counter' && (current as LadderCounterNode).counterType === 'CTD'
         const nativeBit = current.kind === 'timer' ? `${instName}.Q` : `${instName}.${countsDown ? 'QD' : 'QU'}`
 
-        strippedCoilMap.set(c.operand.toLowerCase(), nativeBit)
+        if (opLower) strippedCoilMap.set(opLower, nativeBit)
         if (c.address) strippedCoilMap.set(c.address.toLowerCase(), nativeBit)
-        if (c.symbolName) strippedCoilMap.set(c.symbolName.toLowerCase(), nativeBit)
+        if (symLower) strippedCoilMap.set(symLower, nativeBit)
 
         const updatedTimerOrCounter = {
           ...t,
@@ -351,13 +370,20 @@ export function optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload)
     }
   })
 
-  // 2. Rewrite any contact that referenced the stripped dummy coil
-  const rewireContacts = (nodes: LadderNode[]): LadderNode[] => {
+  if (strippedCoilMap.size === 0) return payload
+
+  const replaceOperand = (val?: string): string | undefined => {
+    if (!val) return val
+    return strippedCoilMap.get(val.replace(/"/g, '').trim().toLowerCase()) ?? val
+  }
+
+  // 2. Rewrite any node that referenced the stripped dummy coil
+  const rewireRefs = (nodes: LadderNode[]): LadderNode[] => {
     return nodes.map((n) => {
       if (n.kind === 'contact') {
         const ct = n as LadderContactNode
         const match =
-          strippedCoilMap.get(ct.operand.toLowerCase()) ||
+          strippedCoilMap.get((ct.operand || '').toLowerCase()) ||
           (ct.address ? strippedCoilMap.get(ct.address.toLowerCase()) : undefined) ||
           (ct.symbolName ? strippedCoilMap.get(ct.symbolName.toLowerCase()) : undefined)
 
@@ -369,11 +395,37 @@ export function optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload)
             symbolName: match
           }
         }
+      } else if (n.kind === 'timer') {
+        const t = n as LadderTimerNode
+        const inOp = replaceOperand(t.inOperand) ?? t.inOperand
+        if (inOp !== t.inOperand) return { ...t, inOperand: inOp }
+      } else if (n.kind === 'counter') {
+        const c = n as LadderCounterNode
+        return {
+          ...c,
+          cuCdOperand: replaceOperand(c.cuCdOperand) || '',
+          cuOperand: replaceOperand(c.cuOperand),
+          cdOperand: replaceOperand(c.cdOperand),
+          rLdOperand: replaceOperand(c.rLdOperand) ?? c.rLdOperand
+        }
+      } else if (n.kind === 'comparator') {
+        const cmp = n as LadderComparatorNode
+        return { ...cmp, op1: replaceOperand(cmp.op1) || cmp.op1, op2: replaceOperand(cmp.op2) || cmp.op2 }
+      } else if (n.kind === 'math') {
+        const m = n as LadderMathNode
+        return {
+          ...m,
+          in1: replaceOperand(m.in1),
+          in2: replaceOperand(m.in2),
+          value: replaceOperand(m.value),
+          min: replaceOperand(m.min),
+          max: replaceOperand(m.max)
+        }
       } else if (n.kind === 'parallel') {
         const p = n as LadderParallelBranchNode
         return {
           ...p,
-          branches: p.branches.map(rewireContacts)
+          branches: p.branches.map(rewireRefs)
         }
       }
       return n
@@ -382,7 +434,7 @@ export function optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload)
 
   const rewiredNetworks = cleanedNetworks.map((net) => ({
     ...net,
-    nodes: rewireContacts(net.nodes)
+    nodes: rewireRefs(net.nodes)
   }))
 
   // 3. Drop the tags of the coils removed above
@@ -399,9 +451,7 @@ export function optimizeAndCleanGeneratedAst(payload: AiCircuitSynthesisPayload)
 
 /**
  * Deterministic Unique Address Allocator & Network Rewirer
- * Ensures that tags generated or modified by AI never have duplicate addresses (e.g. Start_Btn %I0.1 & Stop_Btn %I0.1).
- * Automatically re-maps colliding tags to sequential safe addresses (%I0.0, %I0.1, %Q0.0, %Q0.1, etc.)
- * and updates corresponding node operands and addresses in Ladder Networks.
+ * Tracks byte + bit S7 coordinates so multi-byte WORD/DWORD tags and reserved clock/system bytes never collide.
  */
 export function sanitizeAndAllocateUniqueAddresses(
   tagsToUpsert: Array<{ name: string; dataType: 'BOOL' | 'INT' | 'DINT' | 'REAL' | 'TIME'; address: string; comment?: string }>,
@@ -414,12 +464,35 @@ export function sanitizeAndAllocateUniqueAddresses(
   moved: AddressMove[]
 } {
   const moved: AddressMove[] = []
-  const usedAddresses = new Map<string, string>() // normalizedAddr -> tagName
+  const bitOccupants = new Map<string, string>() // "AREA:byte:bit" -> tagName
+  const occupiedAddrs = new Set<string>()
   const addressRewrites = new Map<string, string>() // oldNormalizedAddr -> newNormalizedAddr
   const nameToAddressMap = new Map<string, string>() // tagName.toLowerCase() -> newNormalizedAddr
 
+  const registerAddress = (addrStr: string, occupantName: string): void => {
+    const parsed = parseS7Address(addrStr)
+    if (!parsed.isValid) {
+      occupiedAddrs.add(addrStr.trim().toUpperCase())
+      return
+    }
+    for (const c of getOccupiedCoordinates(parsed)) {
+      bitOccupants.set(`${c.area}:${c.byte}:${c.bit}`, occupantName)
+    }
+    occupiedAddrs.add(addrStr.trim().toUpperCase())
+  }
+
+  const findConflict = (addrStr: string, selfNameLower: string): string | undefined => {
+    const parsed = parseS7Address(addrStr)
+    if (!parsed.isValid) return undefined
+    for (const c of getOccupiedCoordinates(parsed)) {
+      const occ = bitOccupants.get(`${c.area}:${c.byte}:${c.bit}`)
+      if (occ && occ.toLowerCase() !== selfNameLower) return occ
+    }
+    return undefined
+  }
+
   for (const byte of reservedMerkerBytes) {
-    for (let bit = 0; bit < 8; bit++) usedAddresses.set(`%M${byte}.${bit}`, RESERVED_BYTE_OCCUPANT)
+    registerAddress(`%MB${byte}`, RESERVED_BYTE_OCCUPANT)
   }
 
   // Register existing tags that are not being replaced by name
@@ -428,48 +501,74 @@ export function sanitizeAndAllocateUniqueAddresses(
     if (!newTagNames.has(ex.name.trim().toLowerCase()) && ex.address) {
       const norm = normalizeS7Address(ex.address)
       if (norm.isValid) {
-        usedAddresses.set(norm.formatted.toUpperCase(), ex.name)
+        registerAddress(norm.formatted.toUpperCase(), ex.name)
       }
     }
   }
 
-  const allocateNextFree = (area: 'I' | 'Q' | 'M', isBit: boolean): string => {
-    for (let byte = 0; byte < 1000; byte++) {
-      if (isBit) {
+  const allocateNextFree = (area: 'I' | 'Q' | 'M', category: 'BIT' | 'BYTE' | 'WORD' | 'DWORD'): string => {
+    const isByteFree = (byte: number): boolean => {
+      for (let bit = 0; bit < 8; bit++) {
+        if (bitOccupants.has(`${area}:${byte}:${bit}`)) return false
+      }
+      return true
+    }
+
+    if (category === 'BIT') {
+      for (let byte = 0; byte < 1000; byte++) {
         for (let bit = 0; bit < 8; bit++) {
-          const candidate = `%${area}${byte}.${bit}`
-          if (!usedAddresses.has(candidate.toUpperCase())) {
-            return candidate
-          }
-        }
-      } else {
-        const candidate = `%${area}W${byte * 2}`
-        if (!usedAddresses.has(candidate.toUpperCase())) {
-          return candidate
+          if (!bitOccupants.has(`${area}:${byte}:${bit}`)) return formatS7Address(area, 'BIT', byte, bit)
         }
       }
+      return `%${area}0.0`
     }
-    return `%${area}0.0`
+
+    if (category === 'BYTE') {
+      for (let byte = 0; byte < 1000; byte++) {
+        if (isByteFree(byte)) return formatS7Address(area, 'BYTE', byte)
+      }
+      return formatS7Address(area, 'BYTE', 100)
+    }
+
+    const width = category === 'DWORD' ? 4 : 2
+    for (let byte = 0; byte + width <= 1000; byte += 2) {
+      let ok = true
+      for (let b = 0; b < width; b++) {
+        if (!isByteFree(byte + b)) {
+          ok = false
+          break
+        }
+      }
+      if (ok) return formatS7Address(area, category, byte)
+    }
+    return formatS7Address(area, category, 100)
   }
 
   const sanitizedTags = tagsToUpsert.map((tag) => {
     const norm = normalizeS7Address(tag.address)
     let formattedAddr = norm.isValid ? norm.formatted.toUpperCase() : tag.address.trim().toUpperCase()
-    const area = (formattedAddr.startsWith('%I') ? 'I' : formattedAddr.startsWith('%Q') ? 'Q' : 'M') as 'I' | 'Q' | 'M'
-    const isBit = tag.dataType === 'BOOL' || !formattedAddr.includes('W')
+    const parsed = parseS7Address(formattedAddr)
+    const area = (parsed.isValid ? parsed.area : formattedAddr.startsWith('%I') ? 'I' : formattedAddr.startsWith('%Q') ? 'Q' : 'M') as 'I' | 'Q' | 'M'
+    const category =
+      String(tag.dataType || '').toUpperCase() === 'BOOL'
+        ? parsed.isValid && parsed.sizeCategory !== 'BIT'
+          ? parsed.sizeCategory
+          : 'BIT'
+        : getCategoryForType(tag.dataType)
 
-    // Check if this address is already taken by a different tag
-    const existingOccupant = usedAddresses.get(formattedAddr)
-    if (existingOccupant && existingOccupant.toLowerCase() !== tag.name.toLowerCase()) {
-      // Collision detected! Allocate next free safe address
-      const safeAddr = allocateNextFree(area, isBit)
+    const existingOccupant = findConflict(formattedAddr, tag.name.trim().toLowerCase())
+    if (existingOccupant) {
+      const safeAddr = allocateNextFree(area, category)
       moved.push({ name: tag.name, from: formattedAddr, to: safeAddr, takenBy: existingOccupant })
-      addressRewrites.set(formattedAddr, safeAddr)
+      // Only rewrite unattached direct addresses when no active tag owns the original address
+      if (existingOccupant === RESERVED_BYTE_OCCUPANT) {
+        addressRewrites.set(formattedAddr, safeAddr)
+      }
       formattedAddr = safeAddr
     }
 
-    usedAddresses.set(formattedAddr, tag.name)
-    nameToAddressMap.set(tag.name.toLowerCase(), formattedAddr)
+    registerAddress(formattedAddr, tag.name)
+    nameToAddressMap.set(tag.name.trim().toLowerCase(), formattedAddr)
 
     return {
       ...tag,
@@ -477,25 +576,70 @@ export function sanitizeAndAllocateUniqueAddresses(
     }
   })
 
+  // Keep a lookup to prevent unused lint and allow direct rewrite if nothing owns `from`
+  void occupiedAddrs
+  const rewriteOperandIfDirect = (op?: string): string | undefined => {
+    if (!op) return op
+    const norm = normalizeS7Address(op)
+    if (norm.isValid) {
+      const movedDirect = addressRewrites.get(norm.formatted.toUpperCase())
+      if (movedDirect) return movedDirect
+    }
+    return op
+  }
+
   // Rewire nodes in networks
   const rewireNode = (node: LadderNode): LadderNode => {
     if (node.kind === 'contact') {
       const c = node as LadderContactNode
       const newAddr =
-        (c.symbolName && nameToAddressMap.get(c.symbolName.toLowerCase())) ||
-        (c.operand && nameToAddressMap.get(c.operand.toLowerCase())) ||
-        (c.address && addressRewrites.get(c.address.toUpperCase()))
-      if (newAddr) {
-        return { ...c, address: newAddr }
+        (c.symbolName && nameToAddressMap.get(c.symbolName.trim().toLowerCase())) ||
+        (c.operand && nameToAddressMap.get(c.operand.trim().toLowerCase())) ||
+        (c.address && addressRewrites.get(c.address.trim().toUpperCase()))
+      const newOperand = rewriteOperandIfDirect(c.operand)
+      if (newAddr || newOperand !== c.operand) {
+        return { ...c, ...(newAddr ? { address: newAddr } : {}), ...(newOperand !== c.operand ? { operand: newOperand || c.operand } : {}) }
       }
     } else if (node.kind === 'coil') {
       const c = node as LadderCoilNode
       const newAddr =
-        (c.symbolName && nameToAddressMap.get(c.symbolName.toLowerCase())) ||
-        (c.operand && nameToAddressMap.get(c.operand.toLowerCase())) ||
-        (c.address && addressRewrites.get(c.address.toUpperCase()))
-      if (newAddr) {
-        return { ...c, address: newAddr }
+        (c.symbolName && nameToAddressMap.get(c.symbolName.trim().toLowerCase())) ||
+        (c.operand && nameToAddressMap.get(c.operand.trim().toLowerCase())) ||
+        (c.address && addressRewrites.get(c.address.trim().toUpperCase()))
+      const newOperand = rewriteOperandIfDirect(c.operand)
+      if (newAddr || newOperand !== c.operand) {
+        return { ...c, ...(newAddr ? { address: newAddr } : {}), ...(newOperand !== c.operand ? { operand: newOperand || c.operand } : {}) }
+      }
+    } else if (node.kind === 'timer') {
+      const t = node as LadderTimerNode
+      const inOp = rewriteOperandIfDirect(t.inOperand) ?? t.inOperand
+      if (inOp !== t.inOperand) return { ...t, inOperand: inOp }
+    } else if (node.kind === 'counter') {
+      const c = node as LadderCounterNode
+      return {
+        ...c,
+        cuCdOperand: rewriteOperandIfDirect(c.cuCdOperand) || '',
+        cuOperand: rewriteOperandIfDirect(c.cuOperand),
+        cdOperand: rewriteOperandIfDirect(c.cdOperand),
+        rLdOperand: rewriteOperandIfDirect(c.rLdOperand) ?? c.rLdOperand
+      }
+    } else if (node.kind === 'comparator') {
+      const cmp = node as LadderComparatorNode
+      return {
+        ...cmp,
+        op1: rewriteOperandIfDirect(cmp.op1) || cmp.op1,
+        op2: rewriteOperandIfDirect(cmp.op2) || cmp.op2
+      }
+    } else if (node.kind === 'math') {
+      const m = node as LadderMathNode
+      return {
+        ...m,
+        in1: rewriteOperandIfDirect(m.in1),
+        in2: rewriteOperandIfDirect(m.in2),
+        out: rewriteOperandIfDirect(m.out),
+        value: rewriteOperandIfDirect(m.value),
+        min: rewriteOperandIfDirect(m.min),
+        max: rewriteOperandIfDirect(m.max)
       }
     } else if (node.kind === 'parallel') {
       const p = node as LadderParallelBranchNode
@@ -511,6 +655,9 @@ export function sanitizeAndAllocateUniqueAddresses(
     ...net,
     nodes: (net.nodes || []).map(rewireNode)
   }))
+
+  // Also ensure referenced walk helper works consistently if callers inspect node sets
+  void walkLadderNodes
 
   return {
     tags: sanitizedTags,

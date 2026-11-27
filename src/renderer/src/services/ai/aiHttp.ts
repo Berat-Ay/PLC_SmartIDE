@@ -8,6 +8,8 @@ interface AiHttpOptions {
   body?: string
   timeoutMs: number
   signal?: AbortSignal
+  authSecret?: 'geminiApiKey' | 'openaiApiKey'
+  allowPrivateNetwork?: boolean
 }
 
 let requestCounter = 0
@@ -35,8 +37,18 @@ export async function aiHttp(url: string, options: AiHttpOptions): Promise<AiHtt
         method: options.method,
         headers: options.headers,
         body: options.body,
-        timeoutMs: options.timeoutMs
+        timeoutMs: options.timeoutMs,
+        authSecret: options.authSecret,
+        allowPrivateNetwork: options.allowPrivateNetwork
       })
+    } catch (err) {
+      return {
+        status: 0,
+        statusText: '',
+        body: '',
+        error: 'network',
+        message: String((err as Error)?.message || err)
+      }
     } finally {
       options.signal?.removeEventListener('abort', onAbort)
     }
@@ -57,7 +69,11 @@ export async function aiHttp(url: string, options: AiHttpOptions): Promise<AiHtt
       body: options.method === 'POST' ? options.body : undefined,
       signal: controller.signal
     })
-    return { status: response.status, statusText: response.statusText, body: await response.text() }
+    const body =
+      typeof (response as { text?: () => Promise<string> }).text === 'function'
+        ? await response.text()
+        : JSON.stringify(await response.json())
+    return { status: response.status, statusText: response.statusText, body }
   } catch (err) {
     if (controller.signal.aborted) {
       return timedOut

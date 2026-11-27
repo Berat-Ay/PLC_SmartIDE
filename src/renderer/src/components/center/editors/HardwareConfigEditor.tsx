@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   Cpu,
   Clock,
@@ -17,6 +18,12 @@ import {
   AnalogOutputType
 } from '@shared/types/hardware'
 
+function clampInt(raw: string, min: number, max: number, fallback: number): number {
+  const n = parseInt(raw, 10)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(min, Math.min(max, n))
+}
+
 export const HardwareConfigEditor: React.FC = () => {
   const {
     config,
@@ -29,12 +36,28 @@ export const HardwareConfigEditor: React.FC = () => {
     updateAiChannel,
     updateAqChannel,
     updateOb
-  } = useHardwareStore()
-  const { markDirty } = useProjectStore()
+  } = useHardwareStore(
+    useShallow((s) => ({
+      config: s.config,
+      applyCpuProfile: s.applyCpuProfile,
+      updateGeneral: s.updateGeneral,
+      updateSystemMemory: s.updateSystemMemory,
+      updateClockMemory: s.updateClockMemory,
+      updateDiChannel: s.updateDiChannel,
+      updateDqChannel: s.updateDqChannel,
+      updateAiChannel: s.updateAiChannel,
+      updateAqChannel: s.updateAqChannel,
+      updateOb: s.updateOb
+    }))
+  )
+  const markDirty = useProjectStore((s) => s.markDirty)
 
   const [activeTab, setActiveTab] = useState<'general' | 'memory' | 'digital' | 'analog' | 'obs'>('general')
 
-  const currentProfile = ALL_CPU_PROFILES.find((p) => p.name === config.general.cpuName) || ALL_CPU_PROFILES[0]
+  const currentProfile =
+    (config.general.profileId ? ALL_CPU_PROFILES.find((p) => p.id === config.general.profileId) : undefined) ||
+    ALL_CPU_PROFILES.find((p) => p.name === config.general.cpuName) ||
+    ALL_CPU_PROFILES[0]
 
   return (
     <div className="cq h-full flex flex-col bg-industrial-900 select-none text-xs overflow-hidden">
@@ -203,7 +226,7 @@ export const HardwareConfigEditor: React.FC = () => {
                     max={60000}
                     value={config.general.cycleWatchdogTimeMs}
                     onChange={(e) => {
-                      updateGeneral({ cycleWatchdogTimeMs: parseInt(e.target.value, 10) || 150 })
+                      updateGeneral({ cycleWatchdogTimeMs: clampInt(e.target.value, 1, 60000, 150) })
                       markDirty(true)
                     }}
                     className="w-full bg-industrial-900 border border-industrial-700 rounded px-2.5 py-1.5 text-industrial-100 font-mono focus:border-cyan-500 focus:outline-hidden"
@@ -227,7 +250,7 @@ export const HardwareConfigEditor: React.FC = () => {
                       disabled={!config.general.minCycleTimeEnabled}
                       value={config.general.minCycleTimeMs}
                       onChange={(e) => {
-                        updateGeneral({ minCycleTimeMs: parseInt(e.target.value, 10) || 1 })
+                        updateGeneral({ minCycleTimeMs: clampInt(e.target.value, 0, 60000, 1) })
                         markDirty(true)
                       }}
                       className="w-full bg-industrial-900 border border-industrial-700 disabled:opacity-50 rounded px-2.5 py-1.5 text-industrial-100 font-mono focus:border-cyan-500 focus:outline-hidden"
@@ -249,7 +272,7 @@ export const HardwareConfigEditor: React.FC = () => {
                         updateGeneral({
                           retentiveMemory: {
                             ...config.general.retentiveMemory,
-                            startByte: parseInt(e.target.value, 10) || 0
+                            startByte: clampInt(e.target.value, 0, 65535, 0)
                           }
                         })
                         markDirty(true)
@@ -261,12 +284,14 @@ export const HardwareConfigEditor: React.FC = () => {
                     <span className="text-[11px] text-industrial-400">Byte Count:</span>
                     <input
                       type="number"
+                      min={0}
+                      max={65536}
                       value={config.general.retentiveMemory.byteCount}
                       onChange={(e) => {
                         updateGeneral({
                           retentiveMemory: {
                             ...config.general.retentiveMemory,
-                            byteCount: parseInt(e.target.value, 10) || 2048
+                            byteCount: clampInt(e.target.value, 0, 65536, 0)
                           }
                         })
                         markDirty(true)
@@ -320,7 +345,7 @@ export const HardwareConfigEditor: React.FC = () => {
                       max={65535}
                       value={config.systemMemory.byteAddress}
                       onChange={(e) => {
-                        updateSystemMemory(true, parseInt(e.target.value, 10) || 0)
+                        updateSystemMemory(true, clampInt(e.target.value, 0, 65535, 0))
                         markDirty(true)
                       }}
                       className="w-24 bg-industrial-900 border border-industrial-700 rounded px-2 py-1 text-industrial-100 font-mono focus:border-cyan-500 focus:outline-hidden"
@@ -379,7 +404,7 @@ export const HardwareConfigEditor: React.FC = () => {
                       max={65535}
                       value={config.clockMemory.byteAddress}
                       onChange={(e) => {
-                        updateClockMemory(true, parseInt(e.target.value, 10) || 0)
+                        updateClockMemory(true, clampInt(e.target.value, 0, 65535, 0))
                         markDirty(true)
                       }}
                       className="w-24 bg-industrial-900 border border-industrial-700 rounded px-2 py-1 text-industrial-100 font-mono focus:border-cyan-500 focus:outline-hidden"
@@ -811,7 +836,7 @@ export const HardwareConfigEditor: React.FC = () => {
                               type="number"
                               value={ob.cycleTimeMs || 100}
                               onChange={(e) => {
-                                updateOb(ob.blockNumber, { cycleTimeMs: parseInt(e.target.value, 10) || 100 })
+                                updateOb(ob.blockNumber, { cycleTimeMs: clampInt(e.target.value, 1, 60000, 100) })
                                 markDirty(true)
                               }}
                               className="w-16 bg-industrial-950 border border-industrial-700 rounded px-1.5 py-0.5 text-cyan-300 font-mono text-center focus:outline-hidden"

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { AcceptanceSummary } from '../services/scenarios/ScenarioAcceptance'
+import { generateId } from '../utils/id'
 
 export type TabType = 'hardware' | 'tagTable' | 'allTags' | 'db' | 'udt' | 'lad' | 'scl' | 'simulation' | 'trace'
 
@@ -61,6 +62,7 @@ interface UIStoreState {
   agentMode: 'auto-apply' | 'diff-view'
   agentTier: 'fast-flash' | 'deep-pro'
   agentMessages: AgentChatMessage[]
+  pendingCoilDiagnostic: { operand: string; networkNumber: number } | null
 
   // Actions
   setCanvasZoom: (zoom: number) => void
@@ -85,6 +87,7 @@ interface UIStoreState {
   setAddBlockModalOpen: (open: boolean) => void
   setAgentMode: (mode: 'auto-apply' | 'diff-view') => void
   setAgentTier: (tier: 'fast-flash' | 'deep-pro') => void
+  setPendingCoilDiagnostic: (req: { operand: string; networkNumber: number } | null) => void
   sendAgentMessage: (
     text: string,
     sender?: 'user' | 'agent',
@@ -121,6 +124,7 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
 
   agentMode: 'auto-apply',
   agentTier: 'fast-flash',
+  pendingCoilDiagnostic: null,
   agentMessages: [
     {
       id: 'msg_welcome',
@@ -174,7 +178,14 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
       )
     })),
 
-  setActiveTab: (activeTabId) => set({ activeTabId }),
+  setActiveTab: (activeTabId) => {
+    const { isSplitView, splitTabId, activeTabId: prevActive } = get()
+    if (isSplitView && activeTabId && splitTabId === activeTabId) {
+      set({ activeTabId, splitTabId: prevActive && prevActive !== activeTabId ? prevActive : null, isSplitView: Boolean(prevActive && prevActive !== activeTabId) })
+      return
+    }
+    set({ activeTabId })
+  },
 
   toggleSplitView: () => {
     const { isSplitView, tabs, activeTabId } = get()
@@ -209,6 +220,7 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
 
   setAgentMode: (agentMode) => set({ agentMode }),
   setAgentTier: (agentTier) => set({ agentTier }),
+  setPendingCoilDiagnostic: (pendingCoilDiagnostic) => set({ pendingCoilDiagnostic }),
 
   sendAgentMessage: (
     text,
@@ -218,7 +230,7 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
   ) => {
     if (!text || !text.trim()) return
     const msg: AgentChatMessage = {
-      id: `msg_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: generateId('msg'),
       sender,
       text: text.trim(),
       timestamp: Date.now(),

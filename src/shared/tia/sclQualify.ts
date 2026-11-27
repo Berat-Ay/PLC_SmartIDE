@@ -30,6 +30,23 @@ export function qualifySclBody(body: string, iface: BlockInterface, blockName: s
   let lastSignificant = ''
 
   const copyUntil = (end: string): void => {
+    if (end === "'") {
+      let pos = i + 1
+      while (pos < body.length) {
+        if (body[pos] === '$' && pos + 1 < body.length) {
+          pos += 2
+          continue
+        }
+        if (body[pos] === "'") {
+          pos++
+          break
+        }
+        pos++
+      }
+      out += body.slice(i, pos)
+      i = pos
+      return
+    }
     const close = body.indexOf(end, i + 1)
     const stop = close < 0 ? body.length : close + end.length
     out += body.slice(i, stop)

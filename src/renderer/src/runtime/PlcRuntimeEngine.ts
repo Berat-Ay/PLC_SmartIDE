@@ -18,7 +18,6 @@ import {
   S7Type,
   splitPath,
   StructType,
-  TypeResolver,
   writeValue
 } from '@shared/s7/typeLayout'
 import { effectiveInterface, emptyInterface, parseSourceBlock } from '@shared/scl/sourceBlock'
@@ -26,10 +25,14 @@ import { SclBlockCall, SclExecutionContext, SclInterpreter } from './SclInterpre
 import { LadderEvaluator } from './LadderEvaluator'
 import { S7BinaryMemory, S7ResolvedAddress } from './S7BinaryMemory'
 import { ProjectLoadPayload } from '@shared/types/ipc'
+import { CpuConfig } from '@shared/types/hardware'
 import { TagTable, TagDefinition } from '@shared/types/tags'
 import { UdtDefinition } from '@shared/types/types'
 import { BlockInterface, LadBlockDefinition, SclBlockDefinition, DataBlockDefinition } from '@shared/types/blocks'
-import { LadderNode } from '@shared/types/ladder'
+import { SnapshotHistory } from './engine/SnapshotHistory'
+import { DbEntry, DbRegistry } from './engine/DbRegistry'
+import { BuiltinInstanceManager, CounterStateRecord, TimerStateRecord } from './engine/BuiltinInstanceManager'
+import { SymbolForceTable } from './engine/SymbolForceTable'
 
 /** Live editor state. The engine reads it so online edits take effect, without importing any store. */
 export interface LiveProjectProvider {
@@ -47,18 +50,18 @@ export interface RuntimeDiagnostic {
   message: string
 }
 
-type CodeBlock = LadBlockDefinition | SclBlockDefinition
+export type ExternalRuntimeWriteCmd =
+  | { kind: 'setVariable'; symbolOrAddress: string; value: unknown }
+  | { kind: 'setBit'; area: 'I' | 'Q' | 'M'; byte: number; bit: number; value: boolean }
+  | { kind: 'setByte'; area: 'I' | 'Q' | 'M'; byte: number; value: number }
+  | { kind: 'setWord'; area: 'I' | 'Q' | 'M'; byte: number; value: number }
+  | { kind: 'setDWord'; area: 'I' | 'Q' | 'M'; byte: number; value: number }
+  | { kind: 'setForcedValue'; addressOrSymbol: string; value: unknown; active: boolean }
+  | { kind: 'setTraceRecording'; active: boolean }
+  | { kind: 'injectHardwareFault'; channel: string }
+  | { kind: 'clearHardwareFault'; channel: string }
 
-interface DbEntry {
-  def: DataBlockDefinition
-  name: string
-  number: number
-  layout: StructType
-  bytes: Uint8Array
-  view: DataView
-  signature: string
-  builtin?: BuiltinInstanceKind
-}
+type CodeBlock = LadBlockDefinition | SclBlockDefinition
 
 interface Scope {
   bytes: Uint8Array
@@ -121,8 +124,48 @@ export class PlcRuntimeEngine {
     return this.memory.merker
   }
 
-  // DB contents live in bytes inside S7BinaryMemory; these entries describe their layout
-  private dbEntries = new Map<string, DbEntry>()
+  // Extracted Subsystems
+  private readonly dbRegistry: DbRegistry = new DbRegistry({
+    memory: this.memory,
+    getLiveDataBlocks: () => this.getLiveDataBlocks(),
+    getLiveUdts: () => this.getLiveUdts(),
+    findBlock: (name) => this.findBlock(name),
+    interfaceOf: (block) => this.interfaceOf(block),
+    instanceVariables: (iface) => this.instanceVariables(iface),
+    reportOnce: (msg, sev) => this.reportOnce(msg, sev)
+  })
+  private get dbEntries(): Map<string, DbEntry> {
+    return this.dbRegistry.entries
+  }
+
+  private readonly builtins: BuiltinInstanceManager = new BuiltinInstanceManager({
+    memory: this.memory,
+    clock: () => this.clock(),
+    getDbEntries: () => this.dbRegistry.values(),
+    getLiveLadBlocks: () => this.getLiveLadBlocks(),
+    getLiveSclBlocks: () => this.getLiveSclBlocks(),
+    interfaceOf: (block) => this.interfaceOf(block)
+  })
+
+  private readonly forceTable: SymbolForceTable = new SymbolForceTable(this.memory)
+  public get forceOverrides(): Map<string, unknown> {
+    return this.forceTable.map
+  }
+
+  public get timerStates(): TimerStateRecord {
+    return this.builtins.timerStates
+  }
+  public set timerStates(val: TimerStateRecord) {
+    this.builtins.timerStates = val
+  }
+
+  public get counterStates(): CounterStateRecord {
+    return this.builtins.counterStates
+  }
+  public set counterStates(val: CounterStateRecord) {
+    this.builtins.counterStates = val
+  }
+
   private blockInfoCache = new WeakMap<object, BlockInfo>()
   private frames: Frame[] = []
   private diagnostics: RuntimeDiagnostic[] = []
@@ -132,24 +175,12 @@ export class PlcRuntimeEngine {
   private tagByName = new Map<string, TagDefinition>()
   private tagByAddress = new Map<string, TagDefinition>()
 
-  public forceOverrides = new Map<string, unknown>()
-
-  // Native IEC Timer & Counter State Dictionaries
-  public timerStates: Record<string, { IN: boolean; Q: boolean; PT: number; ET: number }> = {}
-  public counterStates: Record<
-    string,
-    { CU: boolean; CD: boolean; R: boolean; PV: number; QU: boolean; QD: boolean; CV: number }
-  > = {}
-
   // Live node power states and SCL values
   private currentLadPowerStates: Record<string, { powered: boolean; liveValues?: Record<string, string | number> }> = {}
   private currentSclLineValues: Record<string, Record<number, string | number>> = {}
 
   // 1,000-Cycle O(1) Circular Ring Buffer
-  private readonly MAX_HISTORY = 1000
-  private historySlots: Array<RuntimeMemorySnapshot | undefined> = new Array(1000)
-  private historyHead = 0
-  private historyCount = 0
+  private readonly history = new SnapshotHistory(1000)
 
   // Throttling & Monitoring Flags
   private monitoringEnabled = false
@@ -165,6 +196,10 @@ export class PlcRuntimeEngine {
   private onSnapshotCallback?: (snapshot: RuntimeMemorySnapshot, metrics: RuntimeWorkerMetrics) => void
   private onStateChangeCallback?: (state: RuntimeOperatingState) => void
   private physicsHook?: (dtSeconds: number, engine: PlcRuntimeEngine) => void
+  private externalWriteSink?: (cmd: ExternalRuntimeWriteCmd) => void
+  private inScanCycle = false
+  private suppressExternalSink = false
+  private lastIngestedTimestamp = 0
 
   constructor(payload?: ProjectLoadPayload) {
     this.memory.onAccessError = (message) => this.reportOnce(message, 'error')
@@ -175,6 +210,10 @@ export class PlcRuntimeEngine {
 
   public setLiveProjectProvider(provider: LiveProjectProvider): void {
     this.liveProvider = provider
+  }
+
+  public setExternalWriteSink(sink?: (cmd: ExternalRuntimeWriteCmd) => void): void {
+    this.externalWriteSink = sink
   }
 
   /** Replaces the time source. Used by tests to run timers without waiting. */
@@ -192,6 +231,13 @@ export class PlcRuntimeEngine {
 
   public setTraceRecordingActive(active: boolean): void {
     this.traceRecordingActive = active
+    if (!this.suppressExternalSink) {
+      this.externalWriteSink?.({ kind: 'setTraceRecording', active })
+    }
+  }
+
+  public isTraceRecordingActive(): boolean {
+    return this.traceRecordingActive
   }
 
   public getDiagnostics(): RuntimeDiagnostic[] {
@@ -231,52 +277,51 @@ export class PlcRuntimeEngine {
     this.blockInfoCache = new WeakMap()
     this.reportedOnce.clear()
 
-    const profile = getCpuProfile(payload.hardware?.general?.targetCpu || payload.hardware?.general?.cpuName || payload.metadata?.targetCpu)
+    const profile = getCpuProfile(
+      payload.hardware?.general?.profileId ||
+        payload.hardware?.general?.targetCpu ||
+        payload.hardware?.general?.cpuName ||
+        payload.metadata?.targetCpu
+    )
     if (profile) this.memory.configure(profile.inputBytes, profile.outputBytes, profile.merkerBytes)
 
     this.syncDataBlocks()
     this.writeSystemBits(false)
   }
 
-  private typeResolver(): TypeResolver {
-    return {
-      udt: (name) => this.getLiveUdts().find((u) => u.name.toLowerCase() === name.toLowerCase())?.members as LayoutVariable[] | undefined,
-      fb: (name) => {
-        const block = this.findBlock(name)
-        return block && block.blockType === 'FB' ? this.instanceVariables(this.interfaceOf(block)) : undefined
-      },
-      onUnknownType: (typeName) => this.reportOnce(`Unknown data type '${typeName}'`, 'error')
+  /** Applies live IDE hardware, DB, UDT, and block edits cleanly (called inside worker on syncLiveProject). */
+  public refreshLiveProjectState(hardware?: CpuConfig): void {
+    if (hardware && this.projectPayload) {
+      this.projectPayload = { ...this.projectPayload, hardware }
+      const profile = getCpuProfile(
+        hardware.general?.profileId ||
+          hardware.general?.targetCpu ||
+          hardware.general?.cpuName ||
+          this.projectPayload.metadata?.targetCpu
+      )
+      if (profile) this.memory.configure(profile.inputBytes, profile.outputBytes, profile.merkerBytes)
     }
+    this.blockInfoCache = new WeakMap()
+    this.tagIndexSource = null
+    this.syncDataBlocks()
+    this.writeSystemBits(this.firstScanPending)
+  }
+
+  private typeResolver() {
+    return this.dbRegistry.typeResolver()
+  }
+
+  private entryMemory(entry: DbEntry): { bytes: Uint8Array; view: DataView } {
+    return this.dbRegistry.entryMemory(entry)
   }
 
   /** Creates a DB's bytes when it is new or its declaration changed; otherwise contents are kept. */
-  private syncDataBlocks(): void {
-    const resolver = this.typeResolver()
-    const defs = this.getLiveDataBlocks()
-    const next = new Map<string, DbEntry>()
-    let autoNumber = defs.reduce((max, d) => Math.max(max, d.blockNumber || 0), 0)
+  public syncDataBlocks(): void {
+    this.dbRegistry.syncDataBlocks()
+  }
 
-    for (const def of defs) {
-      const parent = def.dbType === 'Instance' ? def.parentFbName : undefined
-      const builtin = parent ? builtinInstanceKind(parent) : undefined
-      const fb = parent && !builtin ? this.findBlock(parent) : undefined
-      const variables: LayoutVariable[] = fb ? this.instanceVariables(this.interfaceOf(fb)) : def.variables || []
-      const number = def.blockNumber || ++autoNumber
-      const signature = JSON.stringify([number, parent || '', variables])
-      const key = def.name.toLowerCase()
-
-      const existing = this.dbEntries.get(key)
-      if (existing && existing.signature === signature) {
-        next.set(key, { ...existing, def })
-        continue
-      }
-
-      const layout = buildLayout(variables, resolver)
-      const { bytes, view } = this.memory.allocateDb(number, Math.max(layout.byteSize, 1))
-      applyStartValues(bytes, view, layout)
-      next.set(key, { def, name: def.name, number, layout, bytes, view, signature, builtin })
-    }
-    this.dbEntries = next
+  public exportDbBytes(): Record<number, Uint8Array> {
+    return this.dbRegistry.exportDbBytes()
   }
 
   private writeSystemBits(firstScan: boolean): void {
@@ -293,17 +338,25 @@ export class PlcRuntimeEngine {
     this.memory.piq.fill(0)
 
     const retentive = this.projectPayload?.hardware?.general?.retentiveMemory
-    const keep = retentive ? this.memory.merker.slice(retentive.startByte, retentive.startByte + retentive.byteCount) : null
+    const merkerLen = this.memory.merker.length
+    const start = retentive ? Math.max(0, Math.min(merkerLen, Math.trunc(retentive.startByte))) : 0
+    const end = retentive ? Math.max(start, Math.min(merkerLen, start + Math.max(0, Math.trunc(retentive.byteCount)))) : 0
+    const keep = end > start ? this.memory.merker.slice(start, end) : null
     this.memory.merker.fill(0)
-    if (retentive && keep) this.memory.merker.set(keep, retentive.startByte)
+    if (keep && start < merkerLen) this.memory.merker.set(keep, start)
 
     for (const entry of this.dbEntries.values()) {
-      reinitNonRetain(entry.bytes, entry.view, entry.layout)
+      const { bytes, view } = this.entryMemory(entry)
+      reinitNonRetain(bytes, view, entry.layout)
     }
 
     this.memory.timerStates.clear()
     this.memory.counterStates.clear()
     this.memory.edgeStates.clear()
+    this.memory.ladderEdgeStates.clear()
+    this.memory.sclEdgeStates.clear()
+    this.timerStates = {}
+    this.counterStates = {}
     LadderEvaluator.resetInternalStates()
     SclInterpreter.resetEdgeStates()
   }
@@ -364,17 +417,21 @@ export class PlcRuntimeEngine {
   public stop(): void {
     if (this.state === 'STOP') return
     this.clearTimers()
+    this.memory.piq.fill(0)
     this.state = 'STOP'
     this.onStateChangeCallback?.(this.state)
+    this.emitSnapshot(1, true, false)
   }
 
   /** Program error or double watchdog overrun: the CPU leaves RUN and reports why. */
   private faultStop(message: string): void {
     this.addDiagnostic(message, 'error')
     this.clearTimers()
+    this.memory.piq.fill(0)
     this.frames = []
     this.state = 'ERROR'
     this.onStateChangeCallback?.(this.state)
+    this.emitSnapshot(1, true, false)
   }
 
   public reset(): void {
@@ -384,17 +441,15 @@ export class PlcRuntimeEngine {
     this.memory.reset()
     LadderEvaluator.resetInternalStates()
     SclInterpreter.resetEdgeStates()
-    this.timerStates = {}
-    this.counterStates = {}
-    this.forceOverrides.clear()
+    this.builtins.clear()
+    this.forceTable.clearAll()
     this.cycleNumber = 0
-    this.historySlots = new Array(this.MAX_HISTORY)
-    this.historyHead = 0
-    this.historyCount = 0
+    this.history.clear()
     this.lastUiEmitTime = 0
+    this.lastIngestedTimestamp = 0
     this.currentLadPowerStates = {}
     this.currentSclLineValues = {}
-    this.dbEntries.clear()
+    this.dbRegistry.clear()
     this.diagnostics = []
     this.reportedOnce.clear()
 
@@ -410,48 +465,19 @@ export class PlcRuntimeEngine {
   }
 
   private pushHistory(snapshot: RuntimeMemorySnapshot): void {
-    this.historySlots[this.historyHead] = snapshot
-    this.historyHead = (this.historyHead + 1) % this.MAX_HISTORY
-    if (this.historyCount < this.MAX_HISTORY) {
-      this.historyCount++
-    }
-  }
-
-  private historyAt(logicalIndex: number): RuntimeMemorySnapshot | undefined {
-    if (logicalIndex < 0 || logicalIndex >= this.historyCount) return undefined
-    const oldestSlot = this.historyCount < this.MAX_HISTORY ? 0 : this.historyHead
-    return this.historySlots[(oldestSlot + logicalIndex) % this.MAX_HISTORY]
+    this.history.push(snapshot)
   }
 
   public getHistory(): RuntimeMemorySnapshot[] {
-    const out: RuntimeMemorySnapshot[] = new Array(this.historyCount)
-    for (let i = 0; i < this.historyCount; i++) {
-      out[i] = this.historyAt(i)!
-    }
-    return out
+    return this.history.getAll()
   }
 
   public getRecentHistory(count: number): RuntimeMemorySnapshot[] {
-    if (count <= 0 || this.historyCount === 0) return []
-    const take = Math.min(count, this.historyCount)
-    const start = this.historyCount - take
-    const out: RuntimeMemorySnapshot[] = new Array(take)
-    for (let i = 0; i < take; i++) {
-      out[i] = this.historyAt(start + i)!
-    }
-    return out
+    return this.history.getRecent(count)
   }
 
   public getHistorySince(afterCycleNumber: number): RuntimeMemorySnapshot[] {
-    if (this.historyCount === 0) return []
-    const out: RuntimeMemorySnapshot[] = []
-    for (let i = this.historyCount - 1; i >= 0; i--) {
-      const snap = this.historyAt(i)
-      if (!snap || snap.cycleNumber <= afterCycleNumber) break
-      out.push(snap)
-    }
-    out.reverse()
-    return out
+    return this.history.getSince(afterCycleNumber)
   }
 
   public getLiveTagTables(): TagTable[] {
@@ -492,19 +518,15 @@ export class PlcRuntimeEngine {
   }
 
   public getSnapshotAtCycle(cycleNumber: number): RuntimeMemorySnapshot | undefined {
-    for (let i = this.historyCount - 1; i >= 0; i--) {
-      const snap = this.historyAt(i)
-      if (snap && snap.cycleNumber === cycleNumber) return snap
-    }
-    return undefined
+    return this.history.getAtCycle(cycleNumber)
   }
 
   public jumpToLastEdge(symbolOrAddress: string): RuntimeMemorySnapshot | undefined {
-    // Scan backward through history to find where bit/value changed
-    if (this.historyCount < 2) return undefined
-    for (let i = this.historyCount - 1; i > 0; i--) {
-      const curSnap = this.historyAt(i)!
-      const prevSnap = this.historyAt(i - 1)!
+    const total = this.history.length
+    if (total < 2) return undefined
+    for (let i = total - 1; i > 0; i--) {
+      const curSnap = this.history.at(i)!
+      const prevSnap = this.history.at(i - 1)!
       const curVal = !!this.getVariableFromSnapshot(curSnap, symbolOrAddress)
       const prevVal = !!this.getVariableFromSnapshot(prevSnap, symbolOrAddress)
       if (curVal !== prevVal) {
@@ -572,21 +594,81 @@ export class PlcRuntimeEngine {
   }
 
   public setForcedValue(addressOrSymbol: string, value: unknown, active: boolean): void {
-    const key = addressOrSymbol.trim().toUpperCase()
+    this.forceTable.setForce(addressOrSymbol, value, active)
     if (active) {
-      this.forceOverrides.set(key, value)
-      this.memory.forceOverrides.set(key, value)
-    } else {
-      this.forceOverrides.delete(key)
-      this.memory.forceOverrides.delete(key)
+      this.suppressExternalSink = true
+      try {
+        this.setVariable(addressOrSymbol, value)
+      } finally {
+        this.suppressExternalSink = false
+      }
     }
-    // Also apply immediately
-    this.setVariable(addressOrSymbol, value)
+    if (!this.inScanCycle && this.frames.length === 0) {
+      this.externalWriteSink?.({ kind: 'setForcedValue', addressOrSymbol, value, active })
+    }
+  }
+
+  /**
+   * Mirrors worker-thread cyclic snapshots onto the local engine so TraceOscilloscope,
+   * time-travel debugging, tag monitoring, and plant physics continue seamlessly.
+   */
+  public ingestWorkerFrame(
+    snapshot: RuntimeMemorySnapshot,
+    historyDelta: RuntimeMemorySnapshot[],
+    metrics: RuntimeWorkerMetrics,
+    timerStates?: Record<string, { IN: boolean; Q: boolean; PT: number; ET: number }>,
+    counterStates?: Record<
+      string,
+      { CU: boolean; CD: boolean; R: boolean; PV: number; QU: boolean; QD: boolean; CV: number }
+    >,
+    dbBytes?: Record<number, Uint8Array>
+  ): void {
+    const framesToPush = historyDelta.length > 0 ? historyDelta : [snapshot]
+    for (const frame of framesToPush) {
+      this.pushHistory(frame)
+    }
+
+    this.memory.pii.fill(0)
+    this.memory.pii.set(snapshot.pii.subarray(0, this.memory.pii.length))
+    this.memory.piq.fill(0)
+    this.memory.piq.set(snapshot.piq.subarray(0, this.memory.piq.length))
+    this.memory.merker.fill(0)
+    this.memory.merker.set(snapshot.merker.subarray(0, this.memory.merker.length))
+
+    if (dbBytes) {
+      for (const [dbNumStr, bytes] of Object.entries(dbBytes)) {
+        const dbNum = Number(dbNumStr)
+        if (Number.isInteger(dbNum) && dbNum >= 1 && bytes instanceof Uint8Array) {
+          this.memory.setDbBytes(dbNum, bytes)
+        }
+      }
+      this.dbRegistry.refreshViews()
+    }
+
+    this.builtins.ingestWorkerStates(timerStates, counterStates)
+
+    this.cycleNumber = metrics.cycleNumber
+    this.lastCycleDurationMs = metrics.lastCycleDurationMs
+    this.averageCycleDurationMs = metrics.averageCycleDurationMs
+    this.maxCycleDurationMs = metrics.maxCycleDurationMs
+    this.activeObs = metrics.activeObs
+    this.state = metrics.state
+
+    if (this.physicsHook) {
+      const dt = this.lastIngestedTimestamp
+        ? Math.min(0.2, Math.max(0.001, (snapshot.timestamp - this.lastIngestedTimestamp) / 1000))
+        : 0.01
+      this.lastIngestedTimestamp = snapshot.timestamp
+      try {
+        this.physicsHook(dt, this)
+      } catch (err) {
+        this.reportOnce(`Plant model error: ${(err as Error).message}`, 'error')
+      }
+    }
   }
 
   public clearAllForcedValues(): void {
-    this.forceOverrides.clear()
-    this.memory.forceOverrides.clear()
+    this.forceTable.clearAll()
   }
 
   public setPhysicsHook(hook?: (dtSeconds: number, engine: PlcRuntimeEngine) => void): void {
@@ -594,6 +676,11 @@ export class PlcRuntimeEngine {
   }
 
   public injectHardwareFault(channel: string = '%IW64'): void {
+    if (!this.inScanCycle && !this.suppressExternalSink && this.externalWriteSink) {
+      this.externalWriteSink({ kind: 'injectHardwareFault', channel })
+      return
+    }
+
     // Force S7 Wire-Break raw count (32767 / 16#7FFF)
     this.setVariable(channel, 32767)
 
@@ -608,6 +695,11 @@ export class PlcRuntimeEngine {
   }
 
   public clearHardwareFault(channel: string = '%IW64'): void {
+    if (!this.inScanCycle && !this.suppressExternalSink && this.externalWriteSink) {
+      this.externalWriteSink({ kind: 'clearHardwareFault', channel })
+      return
+    }
+
     // Reset CPU Diagnostic Status bit (%M1.1)
     if (this.projectPayload?.hardware?.systemMemory?.enabled) {
       const byte = this.projectPayload.hardware.systemMemory.byteAddress
@@ -625,6 +717,8 @@ export class PlcRuntimeEngine {
 
     const startTime = performance.now()
     this.cycleNumber++
+    this.inScanCycle = true
+    try {
 
     // Plant model runs on measured wall time, clamped so a stalled window does not jump the plant
     if (this.physicsHook) {
@@ -639,6 +733,7 @@ export class PlcRuntimeEngine {
     }
 
     this.updateClockMemory()
+    this.writeSystemBits(this.firstScanPending)
     this.applyForces()
 
     this.currentLadPowerStates = {}
@@ -653,27 +748,34 @@ export class PlcRuntimeEngine {
       if (hardware?.systemMemory?.enabled) this.setBit('M', hardware.systemMemory.byteAddress, 0, false)
     }
 
-    const duration = Math.max(0.1, performance.now() - startTime)
-    this.lastCycleDurationMs = Math.round(duration * 100) / 100
-    this.averageCycleDurationMs =
-      Math.round(((this.averageCycleDurationMs * 0.9) + (this.lastCycleDurationMs * 0.1)) * 100) / 100
-    this.maxCycleDurationMs = Math.max(this.maxCycleDurationMs, this.lastCycleDurationMs)
-    this.checkWatchdog(duration)
+      const duration = Math.max(0.1, performance.now() - startTime)
+      this.lastCycleDurationMs = Math.round(duration * 100) / 100
+      this.averageCycleDurationMs =
+        Math.round(((this.averageCycleDurationMs * 0.9) + (this.lastCycleDurationMs * 0.1)) * 100) / 100
+      this.maxCycleDurationMs = Math.max(this.maxCycleDurationMs, this.lastCycleDurationMs)
+      this.checkWatchdog(duration)
 
-    this.emitSnapshot(1, forceEmit)
+      this.emitSnapshot(1, forceEmit)
+    } finally {
+      this.inScanCycle = false
+    }
   }
 
   private watchdogLimit(): number {
     return this.projectPayload?.hardware?.general?.cycleWatchdogTimeMs || 150
   }
 
-  /** Over the limit: time error and OB80. Over twice the limit: STOP. */
+  /** Over the limit: time error and OB80 (or STOP if OB80 is absent). Over twice the limit: STOP. */
   private checkWatchdog(durationMs: number): void {
     if (this.state !== 'RUN') return
     const limit = this.watchdogLimit()
     if (durationMs > limit * 2) {
       this.faultStop(`Cycle time ${durationMs.toFixed(1)} ms exceeded twice the watchdog limit of ${limit} ms`)
     } else if (durationMs > limit) {
+      if (!this.findOb(80)) {
+        this.faultStop(`Cycle time ${durationMs.toFixed(1)} ms exceeded the watchdog limit of ${limit} ms (OB80 not configured)`)
+        return
+      }
       this.addDiagnostic(`Cycle time ${durationMs.toFixed(1)} ms exceeded the watchdog limit of ${limit} ms`, 'warning')
       this.runOb(80)
     }
@@ -815,12 +917,7 @@ export class PlcRuntimeEngine {
   }
 
   private syncInstanceStates(): void {
-    for (const [key, t] of this.memory.timerStates.entries()) {
-      this.timerStates[key] = { IN: t.IN, Q: t.Q, PT: t.PT, ET: Math.round(t.ET) }
-    }
-    for (const [key, c] of this.memory.counterStates.entries()) {
-      this.counterStates[key] = { CU: c.CU, CD: c.CD, R: c.R, PV: c.PV, QU: c.QU, QD: c.QD, CV: c.CV }
-    }
+    this.builtins.syncInstanceStates()
   }
 
   /** Forced values win over the program at the start and end of each scan. */
@@ -835,15 +932,27 @@ export class PlcRuntimeEngine {
    */
   private runCyclicInterrupt(number: number): void {
     if (this.state !== 'RUN') return
-    this.runOb(number)
-    this.applyForces()
+    this.inScanCycle = true
+    const prevObs = this.activeObs
+    this.activeObs = `OB${number}`
+    try {
+      this.applyForces()
+      this.runOb(number)
+      this.applyForces()
+      this.syncInstanceStates()
+    } finally {
+      this.activeObs = prevObs
+      this.inScanCycle = false
+    }
   }
 
   /**
    * Executes OB82 (Diagnostic Fault)
    */
   private executeOb82(_faultChannel: string): void {
-    this.runOb(82)
+    if (this.state === 'RUN') {
+      this.runOb(82)
+    }
     this.emitSnapshot(82, true)
   }
 
@@ -902,7 +1011,8 @@ export class PlcRuntimeEngine {
   }
 
   private dbScope(entry: DbEntry): Scope {
-    return { bytes: entry.bytes, view: entry.view, base: 0, layout: entry.layout, path: entry.name }
+    const { bytes, view } = this.entryMemory(entry)
+    return { bytes, view, base: 0, layout: entry.layout, path: entry.name }
   }
 
   private callBlock(call: SclBlockCall): { handled: boolean; returnValue?: unknown } {
@@ -973,45 +1083,7 @@ export class PlcRuntimeEngine {
   }
 
   private callBuiltin(kind: BuiltinInstanceKind, key: string, call: SclBlockCall): void {
-    const inputs = new Map(Object.entries(call.inputs).map(([k, v]) => [k.toUpperCase(), v]))
-    const has = (n: string): boolean => inputs.has(n)
-    const bool = (n: string, fallback: boolean): boolean => (has(n) ? !!inputs.get(n) : fallback)
-    const num = (n: string, fallback: number): number => (has(n) ? Number(inputs.get(n)) || 0 : fallback)
-    const out = (n: string, value: unknown): void => {
-      const writerKey = Object.keys(call.writers).find((k) => k.toUpperCase() === n)
-      if (writerKey) call.writers[writerKey](value)
-    }
-    const now = this.clock()
-
-    if (kind === 'TON' || kind === 'TOF' || kind === 'TP') {
-      const current = this.memory.getTimer(key)
-      const inVal = bool('IN', current.IN)
-      const pt = num('PT', current.PT)
-      const t =
-        kind === 'TON'
-          ? this.memory.updateTonTimer(key, inVal, pt, now)
-          : kind === 'TOF'
-            ? this.memory.updateTofTimer(key, inVal, pt, now)
-            : this.memory.updateTpTimer(key, inVal, pt, now)
-      out('Q', t.Q)
-      out('ET', t.ET)
-    } else if (kind === 'R_TRIG' || kind === 'F_TRIG') {
-      const e = this.memory.updateEdge(key, kind, bool('CLK', false))
-      out('Q', e.Q)
-    } else {
-      const current = this.memory.getCounter(key)
-      const pv = num('PV', current.PV)
-      const c =
-        kind === 'CTU'
-          ? this.memory.updateCtuCounter(key, bool('CU', false), bool('R', false), pv)
-          : kind === 'CTD'
-            ? this.memory.updateCtdCounter(key, bool('CD', false), bool('LD', false), pv)
-            : this.memory.updateCtudCounter(key, bool('CU', false), bool('CD', false), bool('R', false), bool('LD', false), pv)
-      out('Q', kind === 'CTD' ? c.QD : c.QU)
-      out('QU', c.QU)
-      out('QD', c.QD)
-      out('CV', c.CV)
-    }
+    this.builtins.callBuiltin(kind, key, call)
   }
 
   // ===========================================================================
@@ -1026,10 +1098,15 @@ export class PlcRuntimeEngine {
       getVar: (symbol, quoted) => this.getVariable(symbol, quoted),
       setVar: (symbol, value, quoted) => this.setVariable(symbol, value, quoted),
       typeOf: (symbol, quoted) => this.typeOfSymbol(symbol, quoted),
+      returnTypeOf: (name) => {
+        const block = this.findBlock(name.replace(/"/g, '').trim())
+        return block && block.blockType === 'FC' ? this.blockInfo(block).returnType : undefined
+      },
       canCall: (name, quoted) => this.resolveCallee(name, quoted) !== null,
       callBlock: (call) => this.callBlock(call),
       hasSymbol: (symbol, quoted) => this.hasSymbol(symbol, quoted),
       resolveInstanceKey: (name, quoted) => this.resolveInstanceKey(name, quoted),
+      edgeStates: this.memory.sclEdgeStates,
       instancePrefix: () => {
         const scope = this.frames[this.frames.length - 1]?.scopes[0]
         return scope ? `${scope.path}.` : ''
@@ -1085,83 +1162,12 @@ export class PlcRuntimeEngine {
     if (loc) this.writeLocation(scope, loc, value)
   }
 
-  private isDeclaredCounter(upperKey: string): boolean {
-    if (this.memory.counterStates.has(upperKey)) return true
-
-    for (const entry of this.dbEntries.values()) {
-      if (entry.name.toUpperCase() === upperKey && (entry.builtin === 'CTU' || entry.builtin === 'CTD' || entry.builtin === 'CTUD')) {
-        return true
-      }
-    }
-
-    const hasCounterNode = (nodes: LadderNode[]): boolean => {
-      for (const n of nodes) {
-        if (n.kind === 'counter') {
-          const db = (n.instanceDb || '').replace(/^["']|["']$/g, '').trim().toUpperCase()
-          if (db === upperKey || upperKey.endsWith(`.${db}`)) return true
-        } else if (n.kind === 'parallel') {
-          for (const branch of n.branches) {
-            if (hasCounterNode(branch)) return true
-          }
-        }
-      }
-      return false
-    }
-
-    for (const lad of this.getLiveLadBlocks()) {
-      for (const net of lad.networks || []) {
-        if (hasCounterNode(net.nodes || [])) return true
-      }
-    }
-
-    const tail = upperKey.split('.').pop() || upperKey
-    for (const scl of this.getLiveSclBlocks()) {
-      const iface = this.interfaceOf(scl)
-      for (const v of [...iface.static, ...iface.inOut, ...iface.input, ...iface.output]) {
-        if (v.name.toUpperCase() === tail || v.name.toUpperCase() === upperKey) {
-          const kind = builtinInstanceKind(v.dataType)
-          if (kind === 'CTU' || kind === 'CTD' || kind === 'CTUD') return true
-        }
-      }
-    }
-
-    return false
-  }
-
   private readInstanceField(key: string, field: string): unknown {
-    const upperKey = key.toUpperCase()
-    if (this.memory.edgeStates.has(upperKey)) {
-      const e = this.memory.getEdge(upperKey)
-      return field === 'CLK' ? e.CLK : e.Q
-    }
-    const isCounter =
-      !this.memory.timerStates.has(upperKey) &&
-      (this.memory.counterStates.has(upperKey) ||
-        ['QU', 'QD', 'CV', 'PV', 'CU', 'CD', 'R', 'LD'].includes(field) ||
-        this.isDeclaredCounter(upperKey))
-    if (isCounter) {
-      const c = this.memory.getCounter(upperKey)
-      const values: Record<string, unknown> = { Q: c.QU, QU: c.QU, QD: c.QD, CV: c.CV, PV: c.PV, CU: c.CU, CD: c.CD, R: c.R, LD: c.LD }
-      return values[field]
-    }
-    const t = this.memory.getTimer(upperKey)
-    const values: Record<string, unknown> = { Q: t.Q, ET: Math.round(t.ET), IN: t.IN, PT: t.PT }
-    return values[field]
+    return this.builtins.readInstanceField(key, field)
   }
 
   private writeInstanceField(key: string, field: string, value: unknown): void {
-    const upperKey = key.toUpperCase()
-    const isCounter = this.memory.counterStates.has(upperKey) || ['QU', 'QD', 'CV', 'PV', 'CU', 'CD', 'R', 'LD'].includes(field)
-    if (isCounter) {
-      const c = this.memory.getCounter(upperKey) as unknown as Record<string, unknown>
-      if (field === 'Q') c.QU = !!value
-      else c[field] = typeof c[field] === 'boolean' ? !!value : Number(value) || 0
-      this.syncInstanceStates()
-      return
-    }
-    const t = this.memory.getTimer(upperKey) as unknown as Record<string, unknown>
-    if (field in t) t[field] = typeof t[field] === 'boolean' ? !!value : Number(value) || 0
-    this.syncInstanceStates()
+    this.builtins.writeInstanceField(key, field, value)
   }
 
   private refreshTagIndex(): void {
@@ -1207,20 +1213,8 @@ export class PlcRuntimeEngine {
   }
 
   private lookupForce(clean: string): { found: boolean; value?: unknown } {
-    if (this.forceOverrides.size === 0) return { found: false }
-    const upper = clean.toUpperCase()
-    if (this.forceOverrides.has(upper)) return { found: true, value: this.forceOverrides.get(upper) }
-
     this.refreshTagIndex()
-    const tag = this.tagByName.get(clean.toLowerCase())
-    if (tag?.address && this.forceOverrides.has(tag.address.toUpperCase())) {
-      return { found: true, value: this.forceOverrides.get(tag.address.toUpperCase()) }
-    }
-    const byAddress = this.tagByAddress.get(this.normalizeAddress(clean))
-    if (byAddress && this.forceOverrides.has(byAddress.name.toUpperCase())) {
-      return { found: true, value: this.forceOverrides.get(byAddress.name.toUpperCase()) }
-    }
-    return { found: false }
+    return this.forceTable.lookupForce(clean, this.tagByName, this.tagByAddress, (a) => this.normalizeAddress(a))
   }
 
   /**
@@ -1258,7 +1252,8 @@ export class PlcRuntimeEngine {
     const segments = splitPath(clean)
     const entry = this.dbEntries.get(segments[0].toLowerCase())
     if (entry) {
-      if (segments.length === 1) return readValue(entry.bytes, entry.view, entry.layout, 0, 0)
+      const { bytes, view } = this.entryMemory(entry)
+      if (segments.length === 1) return readValue(bytes, view, entry.layout, 0, 0)
       const loc = resolvePath(entry.layout, segments.slice(1), 0, entry.name)
       if (loc) return this.readLocation(this.dbScope(entry), loc)
       const field = segments.length === 2 ? segments[1].toUpperCase() : ''
@@ -1282,7 +1277,10 @@ export class PlcRuntimeEngine {
     const fieldMatch = clean.match(TIMER_FIELD)
     if (fieldMatch) return this.readInstanceField(fieldMatch[1], fieldMatch[2].toUpperCase())
     if (/^T\d+$/i.test(clean)) return this.memory.getTimer(clean).Q
-    if (/^C\d+$/i.test(clean)) return this.memory.getCounter(clean).QU
+    if (/^C\d+$/i.test(clean)) {
+      const c = this.memory.getCounter(clean)
+      return c.kind === 'CTD' ? c.QD : c.QU
+    }
 
     this.reportOnce(`Unknown symbol '${clean}'`, 'error')
     return 0
@@ -1315,6 +1313,9 @@ export class PlcRuntimeEngine {
     }
 
     this.writeGlobal(clean, value, quoted)
+    if (!this.inScanCycle && !this.suppressExternalSink && this.frames.length === 0) {
+      this.externalWriteSink?.({ kind: 'setVariable', symbolOrAddress, value })
+    }
   }
 
   private writeGlobal(clean: string, value: unknown, quoted = false): void {
@@ -1329,8 +1330,9 @@ export class PlcRuntimeEngine {
     const segments = splitPath(clean)
     const entry = this.dbEntries.get(segments[0].toLowerCase())
     if (entry) {
+      const { bytes, view } = this.entryMemory(entry)
       if (segments.length === 1) {
-        writeValue(entry.bytes, entry.view, entry.layout, 0, 0, value)
+        writeValue(bytes, view, entry.layout, 0, 0, value)
         return
       }
       const loc = resolvePath(entry.layout, segments.slice(1), 0, entry.name)
@@ -1370,8 +1372,7 @@ export class PlcRuntimeEngine {
   }
 
   private isKnownInstance(name: string): boolean {
-    const upper = name.toUpperCase()
-    return this.memory.timerStates.has(upper) || this.memory.counterStates.has(upper) || this.memory.edgeStates.has(upper)
+    return this.builtins.isKnownInstance(name)
   }
 
   private hasSymbol(symbol: string, quotedHint?: boolean): boolean {
@@ -1385,14 +1386,19 @@ export class PlcRuntimeEngine {
     return this.tagByName.has(clean.toLowerCase())
   }
 
+  private instanceMemberType(member: string): string | undefined {
+    return this.builtins.instanceMemberType(member)
+  }
+
   private typeOfSymbol(symbol: string, quotedHint?: boolean): string | undefined {
     const { clean, quoted } = this.splitName(symbol, quotedHint)
-    const nameOf = (type: S7Type): string | undefined => (type.kind === 'elementary' ? type.name : undefined)
+    const nameOf = (type: S7Type): string | undefined =>
+      type.kind === 'elementary' ? type.name : type.kind === 'string' ? 'STRING' : undefined
 
     if (!quoted && this.frames.length > 0) {
       const local = this.resolveLocal(clean)
       if (local) {
-        if (local.loc.instanceMember) return local.loc.instanceMember === 'Q' ? 'BOOL' : 'DINT'
+        if (local.loc.instanceMember) return this.instanceMemberType(local.loc.instanceMember)
         return nameOf(local.loc.type)
       }
     }
@@ -1409,8 +1415,17 @@ export class PlcRuntimeEngine {
     const entry = this.dbEntries.get(segments[0].toLowerCase())
     if (entry) {
       const loc = segments.length > 1 ? resolvePath(entry.layout, segments.slice(1)) : null
-      return loc ? nameOf(loc.type) : undefined
+      if (loc) {
+        if (loc.instanceMember) return this.instanceMemberType(loc.instanceMember)
+        return nameOf(loc.type)
+      }
+      if (segments.length === 2 && (entry.builtin || this.isKnownInstance(entry.name))) {
+        return this.instanceMemberType(segments[1])
+      }
+      return undefined
     }
+    const fieldMatch = clean.match(TIMER_FIELD)
+    if (fieldMatch) return this.instanceMemberType(fieldMatch[2])
     this.refreshTagIndex()
     return this.tagByName.get(clean.toLowerCase())?.dataType?.toUpperCase()
   }
@@ -1444,6 +1459,9 @@ export class PlcRuntimeEngine {
 
   public setBit(area: 'I' | 'Q' | 'M' | 'DB', byte: number, bit: number, val: boolean): void {
     this.memory.writeBit(area, byte, bit, val)
+    if (area !== 'DB' && !this.inScanCycle && !this.suppressExternalSink && this.frames.length === 0) {
+      this.externalWriteSink?.({ kind: 'setBit', area, byte, bit, value: val })
+    }
   }
 
   public getByte(area: 'I' | 'Q' | 'M' | 'DB', byte: number): number {
@@ -1452,6 +1470,9 @@ export class PlcRuntimeEngine {
 
   public setByte(area: 'I' | 'Q' | 'M' | 'DB', byte: number, val: number): void {
     this.memory.writeByte(area, byte, val)
+    if (area !== 'DB' && !this.inScanCycle && !this.suppressExternalSink && this.frames.length === 0) {
+      this.externalWriteSink?.({ kind: 'setByte', area, byte, value: val })
+    }
   }
 
   public getWord(area: 'I' | 'Q' | 'M' | 'DB', byte: number): number {
@@ -1460,6 +1481,9 @@ export class PlcRuntimeEngine {
 
   public setWord(area: 'I' | 'Q' | 'M' | 'DB', byte: number, val: number): void {
     this.memory.writeWord(area, byte, val)
+    if (area !== 'DB' && !this.inScanCycle && !this.suppressExternalSink && this.frames.length === 0) {
+      this.externalWriteSink?.({ kind: 'setWord', area, byte, value: val })
+    }
   }
 
   public getDWord(area: 'I' | 'Q' | 'M' | 'DB', byte: number): number {
@@ -1468,14 +1492,13 @@ export class PlcRuntimeEngine {
 
   public setDWord(area: 'I' | 'Q' | 'M' | 'DB', byte: number, val: number): void {
     this.memory.writeDWord(area, byte, val)
+    if (area !== 'DB' && !this.inScanCycle && !this.suppressExternalSink && this.frames.length === 0) {
+      this.externalWriteSink?.({ kind: 'setDWord', area, byte, value: val })
+    }
   }
 
   private decodeDataBlocks(): Record<string, Record<string, unknown>> {
-    const out: Record<string, Record<string, unknown>> = {}
-    for (const entry of this.dbEntries.values()) {
-      out[entry.name] = readValue(entry.bytes, entry.view, entry.layout, 0, 0) as Record<string, unknown>
-    }
-    return out
+    return this.dbRegistry.decodeDataBlocks()
   }
 
   /** Copies an area up to its last used byte; readers treat bytes past the end as zero. */
@@ -1496,7 +1519,7 @@ export class PlcRuntimeEngine {
   /**
    * Emits snapshot (throttled to ~25 FPS in free-running cyclic mode) and maintains the O(1) 1,000-cycle ring buffer
    */
-  private emitSnapshot(triggeringOb: number, forceEmit: boolean = true): void {
+  private emitSnapshot(triggeringOb: number, forceEmit: boolean = true, recordHistory: boolean = true): void {
     let shouldEmitUi = true
     if (this.isCyclicAutoMode && !forceEmit) {
       const nowWall = performance.now()
@@ -1523,8 +1546,10 @@ export class PlcRuntimeEngine {
       sclLineValues: skipHeavyClones ? {} : this.cloneSclLineValues()
     }
 
-    // Add to O(1) 1,000-cycle ring buffer
-    this.pushHistory(snapshot)
+    // Add to O(1) 1,000-cycle ring buffer on actual scan / diagnostic transitions
+    if (recordHistory) {
+      this.pushHistory(snapshot)
+    }
 
     if (!shouldEmitUi) return
 

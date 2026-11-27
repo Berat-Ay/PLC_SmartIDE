@@ -9,9 +9,11 @@ export interface S7TimerState {
   startTime: number
   lastTickTime: number
   running: boolean
+  accumulatedMs?: number
 }
 
 export interface S7CounterState {
+  kind?: 'CTU' | 'CTD' | 'CTUD'
   CU: boolean
   CD: boolean
   R: boolean
@@ -56,10 +58,12 @@ export class S7BinaryMemory {
   private merkerView: DataView
   private dbViews: Map<number, DataView> = new Map()
 
-  // Persistent Timers and Counters
+  // Persistent Timers, Counters, and Edge Triggers (instance-scoped per CPU memory)
   public timerStates: Map<string, S7TimerState> = new Map()
   public counterStates: Map<string, S7CounterState> = new Map()
   public edgeStates: Map<string, S7EdgeState> = new Map()
+  public ladderEdgeStates: Map<string, boolean> = new Map()
+  public sclEdgeStates: Map<string, boolean> = new Map()
 
   /** Called when an access falls outside a memory area. A real CPU would report an access error. */
   public onAccessError?: (message: string) => void
@@ -93,11 +97,32 @@ export class S7BinaryMemory {
 
   /** Replaces a data block's buffer with exactly this size, as a download does. */
   public allocateDb(dbNumber: number, sizeBytes: number): { bytes: Uint8Array; view: DataView } {
-    const bytes = new Uint8Array(sizeBytes)
+    const safeSize = Math.max(0, Math.trunc(sizeBytes))
+    const bytes = new Uint8Array(safeSize)
     const view = new DataView(bytes.buffer)
     this.dataBlocks.set(dbNumber, bytes)
     this.dbViews.set(dbNumber, view)
     return { bytes, view }
+  }
+
+  public getDbBuffer(dbNumber: number): Uint8Array | undefined {
+    return this.dataBlocks.get(dbNumber)
+  }
+
+  public getDbView(dbNumber: number): DataView | undefined {
+    return this.dbViews.get(dbNumber)
+  }
+
+  /** Copies raw bytes from a worker frame into the mirror DB buffer without detaching existing view when lengths match. */
+  public setDbBytes(dbNumber: number, srcBytes: Uint8Array): void {
+    const existing = this.dataBlocks.get(dbNumber)
+    if (existing && existing.length === srcBytes.length) {
+      existing.set(srcBytes)
+      return
+    }
+    const copy = new Uint8Array(srcBytes)
+    this.dataBlocks.set(dbNumber, copy)
+    this.dbViews.set(dbNumber, new DataView(copy.buffer))
   }
 
   public reset(): void {
@@ -110,17 +135,30 @@ export class S7BinaryMemory {
     this.timerStates.clear()
     this.counterStates.clear()
     this.edgeStates.clear()
+    this.ladderEdgeStates.clear()
+    this.sclEdgeStates.clear()
     this.forceOverrides.clear()
   }
 
   /**
    * Allocates or retrieves an authentic contiguous S7 DataBlock byte buffer.
+   * Preserves existing buffer identity whenever it is already >= sizeBytes (prevents DB split-brain).
    */
   public ensureDbBuffer(dbNumber: number, sizeBytes: number = 1024): Uint8Array {
+    if (!Number.isInteger(dbNumber) || dbNumber < 1) {
+      return new Uint8Array(0)
+    }
     let buf = this.dataBlocks.get(dbNumber)
-    if (!buf || buf.length < sizeBytes) {
-      const newBuf = new Uint8Array(Math.max(1024, sizeBytes))
-      if (buf) newBuf.set(buf)
+    if (!buf) {
+      const allocSize = Math.max(0, Math.trunc(sizeBytes))
+      const newBuf = new Uint8Array(allocSize)
+      this.dataBlocks.set(dbNumber, newBuf)
+      this.dbViews.set(dbNumber, new DataView(newBuf.buffer))
+      return newBuf
+    }
+    if (buf.length < sizeBytes) {
+      const newBuf = new Uint8Array(Math.trunc(sizeBytes))
+      newBuf.set(buf)
       this.dataBlocks.set(dbNumber, newBuf)
       this.dbViews.set(dbNumber, new DataView(newBuf.buffer))
       buf = newBuf
@@ -136,9 +174,13 @@ export class S7BinaryMemory {
     if (area === 'Q') return { buf: this.piq, view: this.piqView }
     if (area === 'M') return { buf: this.merker, view: this.merkerView }
     if (area === 'DB') {
-      const num = dbNumber || 1
-      this.ensureDbBuffer(num)
-      return { buf: this.dataBlocks.get(num)!, view: this.dbViews.get(num)! }
+      if (dbNumber === undefined || !Number.isInteger(dbNumber) || dbNumber < 1) return null
+      if (!this.dataBlocks.has(dbNumber)) {
+        this.ensureDbBuffer(dbNumber, 1024)
+      }
+      const buf = this.dataBlocks.get(dbNumber)
+      const view = this.dbViews.get(dbNumber)
+      return buf && view ? { buf, view } : null
     }
     return null
   }
@@ -148,8 +190,11 @@ export class S7BinaryMemory {
   // =========================================================================
 
   public readBit(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, bitOffset: number, dbNumber?: number): boolean {
+    if (!Number.isInteger(byteOffset) || byteOffset < 0 || !Number.isInteger(bitOffset) || bitOffset < 0 || bitOffset > 7) {
+      return false
+    }
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset >= target.buf.length || bitOffset < 0 || bitOffset > 7) return false
+    if (!target || byteOffset >= target.buf.length) return false
     return (target.buf[byteOffset] & (1 << bitOffset)) !== 0
   }
 
@@ -161,7 +206,15 @@ export class S7BinaryMemory {
     dbNumber?: number
   ): void {
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset >= target.buf.length || bitOffset < 0 || bitOffset > 7) {
+    if (
+      !target ||
+      !Number.isInteger(byteOffset) ||
+      byteOffset < 0 ||
+      byteOffset >= target.buf.length ||
+      !Number.isInteger(bitOffset) ||
+      bitOffset < 0 ||
+      bitOffset > 7
+    ) {
       this.onAccessError?.(`Write outside ${area} memory: byte ${byteOffset}.${bitOffset}`)
       return
     }
@@ -177,6 +230,7 @@ export class S7BinaryMemory {
   // =========================================================================
 
   public readByte(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, dbNumber?: number): number {
+    if (!Number.isInteger(byteOffset) || byteOffset < 0) return 0
     const target = this.getBufferAndView(area, dbNumber)
     if (!target || byteOffset >= target.buf.length) return 0
     return target.buf[byteOffset]
@@ -184,7 +238,7 @@ export class S7BinaryMemory {
 
   public writeByte(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, val: number, dbNumber?: number): void {
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset >= target.buf.length) {
+    if (!target || !Number.isInteger(byteOffset) || byteOffset < 0 || byteOffset >= target.buf.length) {
       this.onAccessError?.(`Write outside ${area} memory: byte ${byteOffset}`)
       return
     }
@@ -196,6 +250,7 @@ export class S7BinaryMemory {
   // =========================================================================
 
   public readWord(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, dbNumber?: number): number {
+    if (!Number.isInteger(byteOffset) || byteOffset < 0) return 0
     const target = this.getBufferAndView(area, dbNumber)
     if (!target || byteOffset + 1 >= target.buf.length) return 0
     return target.view.getUint16(byteOffset, false) // Big-Endian
@@ -203,7 +258,7 @@ export class S7BinaryMemory {
 
   public writeWord(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, val: number, dbNumber?: number): void {
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset + 1 >= target.buf.length) {
+    if (!target || !Number.isInteger(byteOffset) || byteOffset < 0 || byteOffset + 1 >= target.buf.length) {
       this.onAccessError?.(`Write outside ${area} memory: word ${byteOffset}`)
       return
     }
@@ -211,6 +266,7 @@ export class S7BinaryMemory {
   }
 
   public readInt(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, dbNumber?: number): number {
+    if (!Number.isInteger(byteOffset) || byteOffset < 0) return 0
     const target = this.getBufferAndView(area, dbNumber)
     if (!target || byteOffset + 1 >= target.buf.length) return 0
     return target.view.getInt16(byteOffset, false)
@@ -218,7 +274,7 @@ export class S7BinaryMemory {
 
   public writeInt(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, val: number, dbNumber?: number): void {
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset + 1 >= target.buf.length) {
+    if (!target || !Number.isInteger(byteOffset) || byteOffset < 0 || byteOffset + 1 >= target.buf.length) {
       this.onAccessError?.(`Write outside ${area} memory: word ${byteOffset}`)
       return
     }
@@ -230,6 +286,7 @@ export class S7BinaryMemory {
   // =========================================================================
 
   public readDWord(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, dbNumber?: number): number {
+    if (!Number.isInteger(byteOffset) || byteOffset < 0) return 0
     const target = this.getBufferAndView(area, dbNumber)
     if (!target || byteOffset + 3 >= target.buf.length) return 0
     return target.view.getUint32(byteOffset, false)
@@ -237,7 +294,7 @@ export class S7BinaryMemory {
 
   public writeDWord(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, val: number, dbNumber?: number): void {
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset + 3 >= target.buf.length) {
+    if (!target || !Number.isInteger(byteOffset) || byteOffset < 0 || byteOffset + 3 >= target.buf.length) {
       this.onAccessError?.(`Write outside ${area} memory: dword ${byteOffset}`)
       return
     }
@@ -245,6 +302,7 @@ export class S7BinaryMemory {
   }
 
   public readDInt(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, dbNumber?: number): number {
+    if (!Number.isInteger(byteOffset) || byteOffset < 0) return 0
     const target = this.getBufferAndView(area, dbNumber)
     if (!target || byteOffset + 3 >= target.buf.length) return 0
     return target.view.getInt32(byteOffset, false)
@@ -252,7 +310,7 @@ export class S7BinaryMemory {
 
   public writeDInt(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, val: number, dbNumber?: number): void {
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset + 3 >= target.buf.length) {
+    if (!target || !Number.isInteger(byteOffset) || byteOffset < 0 || byteOffset + 3 >= target.buf.length) {
       this.onAccessError?.(`Write outside ${area} memory: dword ${byteOffset}`)
       return
     }
@@ -264,6 +322,7 @@ export class S7BinaryMemory {
   // =========================================================================
 
   public readReal(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, dbNumber?: number): number {
+    if (!Number.isInteger(byteOffset) || byteOffset < 0) return 0
     const target = this.getBufferAndView(area, dbNumber)
     if (!target || byteOffset + 3 >= target.buf.length) return 0
     return target.view.getFloat32(byteOffset, false)
@@ -271,7 +330,7 @@ export class S7BinaryMemory {
 
   public writeReal(area: 'I' | 'Q' | 'M' | 'DB', byteOffset: number, val: number, dbNumber?: number): void {
     const target = this.getBufferAndView(area, dbNumber)
-    if (!target || byteOffset + 3 >= target.buf.length) {
+    if (!target || !Number.isInteger(byteOffset) || byteOffset < 0 || byteOffset + 3 >= target.buf.length) {
       this.onAccessError?.(`Write outside ${area} memory: dword ${byteOffset}`)
       return
     }
@@ -372,13 +431,15 @@ export class S7BinaryMemory {
       const inst = counterMatch[1].toUpperCase()
       const field = counterMatch[2].toUpperCase()
       const c = this.getCounter(inst)
-      if (field === 'QU' || field === 'Q') return c.QU
+      if (field === 'Q') return c.kind === 'CTD' ? c.QD : c.QU
+      if (field === 'QU') return c.QU
       if (field === 'QD') return c.QD
       if (field === 'CV') return c.CV
       if (field === 'PV') return c.PV
     }
     if (/^C\d+$/i.test(cleanSym)) {
-      return this.getCounter(cleanSym.toUpperCase()).QU
+      const c = this.getCounter(cleanSym.toUpperCase())
+      return c.kind === 'CTD' ? c.QD : c.QU
     }
 
     // 4. Physical address resolution
@@ -437,7 +498,10 @@ export class S7BinaryMemory {
       const inst = counterMatch[1].toUpperCase()
       const field = counterMatch[2].toUpperCase()
       const c = this.getCounter(inst)
-      if (field === 'QU' || field === 'Q') c.QU = Boolean(value)
+      if (field === 'Q') {
+        if (c.kind === 'CTD') c.QD = Boolean(value)
+        else c.QU = Boolean(value)
+      } else if (field === 'QU') c.QU = Boolean(value)
       else if (field === 'QD') c.QD = Boolean(value)
       else if (field === 'CV') c.CV = Number(value) || 0
       else if (field === 'PV') c.PV = Number(value) || 0
@@ -490,9 +554,18 @@ export class S7BinaryMemory {
     return t
   }
 
+  private clampTimerPt(ptMs: number): number {
+    return Number.isFinite(ptMs) ? Math.max(0, ptMs) : 0
+  }
+
+  private clampCounterPv(pv: number): number {
+    const truncated = Number.isFinite(pv) ? Math.trunc(pv) : 0
+    return Math.max(-32768, Math.min(32767, truncated))
+  }
+
   public updateTonTimer(name: string, rloIn: boolean, ptMs: number, nowMs: number): S7TimerState {
     const t = this.getTimer(name)
-    t.PT = ptMs
+    t.PT = this.clampTimerPt(ptMs)
 
     if (rloIn) {
       t.IN = true
@@ -501,7 +574,7 @@ export class S7BinaryMemory {
         t.startTime = nowMs
         t.lastTickTime = nowMs
         t.ET = 0
-        t.Q = false
+        t.Q = t.PT === 0
       } else {
         t.lastTickTime = nowMs
         t.ET = Math.min(t.PT, Math.max(0, nowMs - t.startTime))
@@ -519,13 +592,21 @@ export class S7BinaryMemory {
 
   public updateTofTimer(name: string, rloIn: boolean, ptMs: number, nowMs: number): S7TimerState {
     const t = this.getTimer(name)
-    t.PT = ptMs
+    const clampedPt = this.clampTimerPt(ptMs)
+    const prevIn = t.IN
+    t.PT = clampedPt
 
     if (rloIn) {
       t.IN = true
       t.running = false
       t.ET = 0
       t.Q = true
+      t.lastTickTime = nowMs
+    } else if (prevIn && t.PT === 0) {
+      t.IN = false
+      t.running = false
+      t.ET = 0
+      t.Q = false
       t.lastTickTime = nowMs
     } else if (t.Q) {
       t.IN = false
@@ -543,9 +624,9 @@ export class S7BinaryMemory {
         }
       }
     } else {
+      // Retain elapsed time ET = PT while IN remains low after expiration
       t.IN = false
       t.running = false
-      t.ET = 0
       t.Q = false
       t.lastTickTime = nowMs
     }
@@ -554,28 +635,74 @@ export class S7BinaryMemory {
 
   public updateTpTimer(name: string, rloIn: boolean, ptMs: number, nowMs: number): S7TimerState {
     const t = this.getTimer(name)
-    t.PT = ptMs
+    const clampedPt = this.clampTimerPt(ptMs)
     const risingEdge = rloIn && !t.IN
     t.IN = rloIn
 
     if (t.running) {
+      // S7 TP locks PT while pulse is running
       t.lastTickTime = nowMs
       t.ET = Math.min(t.PT, Math.max(0, nowMs - t.startTime))
       if (t.ET >= t.PT) {
         t.Q = false
         t.running = false
+        if (!rloIn) t.ET = 0
       }
     } else if (risingEdge) {
-      t.running = true
-      t.startTime = nowMs
-      t.lastTickTime = nowMs
-      t.ET = 0
-      t.Q = true
+      t.PT = clampedPt
+      if (t.PT === 0) {
+        t.running = false
+        t.ET = 0
+        t.Q = false
+        t.lastTickTime = nowMs
+      } else {
+        t.running = true
+        t.startTime = nowMs
+        t.lastTickTime = nowMs
+        t.ET = 0
+        t.Q = true
+      }
     } else {
       // ET keeps its final value while IN stays high and clears when IN falls
+      t.PT = clampedPt
       t.Q = false
       t.lastTickTime = nowMs
       if (!rloIn) t.ET = 0
+    }
+    return t
+  }
+
+  public updateTonrTimer(name: string, rloIn: boolean, resetIn: boolean, ptMs: number, nowMs: number): S7TimerState {
+    const t = this.getTimer(name)
+    t.PT = this.clampTimerPt(ptMs)
+
+    if (resetIn) {
+      t.IN = rloIn
+      t.running = false
+      t.accumulatedMs = 0
+      t.ET = 0
+      t.Q = false
+      t.lastTickTime = nowMs
+      return t
+    }
+
+    const baseAcc = t.accumulatedMs ?? t.ET ?? 0
+    if (rloIn) {
+      t.IN = true
+      const delta = t.running ? Math.max(0, nowMs - t.lastTickTime) : 0
+      const nextAcc = Math.min(t.PT, baseAcc + delta)
+      t.accumulatedMs = nextAcc
+      t.ET = nextAcc
+      t.Q = nextAcc >= t.PT
+      t.running = true
+      t.lastTickTime = nowMs
+    } else {
+      t.IN = false
+      t.running = false
+      t.accumulatedMs = Math.min(t.PT, baseAcc)
+      t.ET = t.accumulatedMs
+      t.Q = t.ET >= t.PT && t.PT > 0 ? true : t.Q && t.PT === 0
+      t.lastTickTime = nowMs
     }
     return t
   }
@@ -603,13 +730,14 @@ export class S7BinaryMemory {
 
   public updateCtuCounter(name: string, cuRlo: boolean, reset: boolean, pv: number): S7CounterState {
     const c = this.getCounter(name)
-    c.PV = pv
+    c.kind = 'CTU'
+    c.PV = this.clampCounterPv(pv)
     c.R = reset
     c.CU = cuRlo
 
     if (reset) {
       c.CV = 0
-      c.QU = false
+      c.QU = 0 >= c.PV
       c.QD = true
     } else {
       if (!c.prevCu && cuRlo && c.CV < 32767) {
@@ -624,12 +752,13 @@ export class S7BinaryMemory {
 
   public updateCtdCounter(name: string, cdRlo: boolean, load: boolean, pv: number): S7CounterState {
     const c = this.getCounter(name)
-    c.PV = pv
+    c.kind = 'CTD'
+    c.PV = this.clampCounterPv(pv)
     c.LD = load
     c.CD = cdRlo
 
     if (load) {
-      c.CV = pv
+      c.CV = c.PV
       c.QD = c.CV <= 0
       c.QU = c.CV >= c.PV
     } else {
@@ -653,7 +782,8 @@ export class S7BinaryMemory {
     pv: number
   ): S7CounterState {
     const c = this.getCounter(name)
-    c.PV = pv
+    c.kind = 'CTUD'
+    c.PV = this.clampCounterPv(pv)
     c.R = reset
     c.LD = load
     c.CU = cuRlo
@@ -661,10 +791,10 @@ export class S7BinaryMemory {
 
     if (reset) {
       c.CV = 0
-      c.QU = false
+      c.QU = 0 >= c.PV
       c.QD = true
     } else if (load) {
-      c.CV = pv
+      c.CV = c.PV
       c.QU = c.CV >= c.PV
       c.QD = c.CV <= 0
     } else {
@@ -725,5 +855,6 @@ function typeFromName(name: string): S7Type {
 }
 
 function fitsArea(type: S7Type, address: S7ResolvedAddress, size: number): boolean {
+  if (!Number.isInteger(address.byteOffset) || address.byteOffset < 0) return false
   return address.byteOffset + Math.max(1, type.byteSize) <= size
 }

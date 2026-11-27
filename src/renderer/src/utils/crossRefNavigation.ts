@@ -1,5 +1,6 @@
 import type { CrossReferenceItem } from '../../../shared/types/crossref'
 import type { DataBlockDefinition } from '../../../shared/types/blocks'
+import { makeTabId } from './tabIds'
 
 /**
  * Removes one or more trailing `.db.json` suffixes so canonical names and legacy
@@ -58,7 +59,7 @@ export function resolveDbCrossReferenceTab(
 
   if (matched) {
     return {
-      id: `tab_db_${matched.fileName}`,
+      id: makeTabId('db', matched.fileName),
       title: matched.name,
       type: 'db',
       targetId: matched.fileName
@@ -67,7 +68,7 @@ export function resolveDbCrossReferenceTab(
 
   const fallbackFileName = normalizeDbFileName(ref.sourceObjectId || ref.sourceObject)
   return {
-    id: `tab_db_${fallbackFileName}`,
+    id: makeTabId('db', fallbackFileName),
     title: ref.sourceObject || stripDbExtension(fallbackFileName),
     type: 'db',
     targetId: fallbackFileName

@@ -36,6 +36,7 @@ const BUILTIN_TYPE_NAMES: Record<string, string> = {
   TON: 'TON_TIME',
   TOF: 'TOF_TIME',
   TP: 'TP_TIME',
+  TONR: 'TONR_TIME',
   CTU: 'CTU_INT',
   CTD: 'CTD_INT',
   CTUD: 'CTUD_INT',
@@ -168,7 +169,7 @@ export function writeDataBlock(db: DataBlockDefinition): WrittenSource {
   if (db.dbType === 'Instance' && db.parentFbName) {
     const kind = builtinInstanceKind(db.parentFbName)
     lines.push('NON_RETAIN')
-    if (kind) lines.push(['TON', 'TOF', 'TP'].includes(kind) ? 'IEC_TIMER' : kind.startsWith('CT') ? 'IEC_COUNTER' : kind)
+    if (kind) lines.push(['TON', 'TOF', 'TP', 'TONR'].includes(kind) ? 'IEC_TIMER' : kind.startsWith('CT') ? 'IEC_COUNTER' : kind)
     else lines.push(`"${db.parentFbName}"`)
     lines.push('', 'BEGIN', '', 'END_DATA_BLOCK', '')
     return { content: lines.join('\n'), warnings }

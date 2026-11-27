@@ -144,12 +144,16 @@ class ListingBuilder {
       case 'timer': {
         const t = node as LadderTimerNode
         const inst = t.instanceDb || t.id
-        this.emit('CALL', `"${t.timerType || 'TON'}" , "${inst}"`, '// IEC timer', {
-          IN: t.inOperand || 'RLO',
-          PT: t.ptOperand || 'T#0ms',
-          Q: t.qOperand || `"${inst}".Q`,
-          ET: t.etOperand || `"${inst}".ET`
-        })
+        const params: Record<string, string> = {
+          IN: t.inOperand || 'RLO'
+        }
+        if (t.timerType === 'TONR') {
+          params.R = t.rOperand || 'FALSE'
+        }
+        params.PT = t.ptOperand || 'T#0ms'
+        params.Q = t.qOperand || `"${inst}".Q`
+        params.ET = t.etOperand || `"${inst}".ET`
+        this.emit('CALL', `"${t.timerType || 'TON'}" , "${inst}"`, '// IEC timer', params)
         if (hasSuccessor) this.emit('A', `"${inst}".Q`, '// Timer output continues the rung')
         return
       }
@@ -161,12 +165,22 @@ class ListingBuilder {
         const params: Record<string, string> = {}
         if (type !== 'CTD') params.CU = c.cuOperand || 'RLO'
         if (type !== 'CTU') params.CD = c.cdOperand || (type === 'CTD' ? 'RLO' : 'FALSE')
-        params[type === 'CTD' ? 'LD' : 'R'] = c.rLdOperand || 'FALSE'
+        if (type === 'CTUD') {
+          params.R = c.rLdOperand || 'FALSE'
+          params.LD = c.ldOperand || 'FALSE'
+        } else {
+          params[type === 'CTD' ? 'LD' : 'R'] = (type === 'CTD' ? c.ldOperand || c.rLdOperand : c.rLdOperand) || 'FALSE'
+        }
         params.PV = String(c.pvOperand ?? 10)
-        params.Q = c.qOperand || `"${inst}".${type === 'CTD' ? 'QD' : 'QU'}`
+        if (type === 'CTUD') {
+          params.QU = c.quOperand || c.qOperand || `"${inst}".QU`
+          params.QD = c.qdOperand || `"${inst}".QD`
+        } else {
+          params.Q = c.qOperand || `"${inst}".${type === 'CTD' ? 'QD' : 'QU'}`
+        }
         params.CV = c.cvOperand || `"${inst}".CV`
         this.emit('CALL', `"${type}" , "${inst}"`, '// IEC counter', params)
-        if (hasSuccessor) this.emit('A', params.Q, '// Counter output continues the rung')
+        if (hasSuccessor) this.emit('A', type === 'CTUD' ? params.QU : params.Q, '// Counter output continues the rung')
         return
       }
 

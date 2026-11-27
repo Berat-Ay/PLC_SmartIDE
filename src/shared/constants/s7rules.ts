@@ -144,7 +144,19 @@ export function getCategoryForType(dataType: string): 'BIT' | 'BYTE' | 'WORD' | 
   const upper = dataType.toUpperCase()
   if (upper === 'BOOL') return 'BIT'
   if (upper === 'BYTE' || upper === 'CHAR' || upper === 'SINT' || upper === 'USINT') return 'BYTE'
-  if (upper === 'WORD' || upper === 'INT' || upper === 'UINT') return 'WORD'
-  if (upper === 'DWORD' || upper === 'DINT' || upper === 'UDINT' || upper === 'REAL' || upper === 'TIME') return 'DWORD'
+  if (upper === 'WORD' || upper === 'INT' || upper === 'UINT' || upper === 'DATE' || upper === 'S5TIME' || upper === 'WCHAR') {
+    return 'WORD'
+  }
+  if (
+    upper === 'DWORD' ||
+    upper === 'DINT' ||
+    upper === 'UDINT' ||
+    upper === 'REAL' ||
+    upper === 'TIME' ||
+    upper === 'TOD' ||
+    upper === 'TIME_OF_DAY'
+  ) {
+    return 'DWORD'
+  }
   return 'WORD'
 }

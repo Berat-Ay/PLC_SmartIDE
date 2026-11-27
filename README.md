@@ -34,9 +34,9 @@ This prepares a `tia-package` folder to take to a computer with TIA installed. T
 | Item | Export | Import |
 |---|---|---|
 | SCL blocks (OB, FB, FC) | Yes | Yes |
-| Data blocks, UDTs | Yes | Yes. Nested start values are not imported, with a warning |
+| Data blocks, UDTs | Yes | Yes (including top-level & nested Struct start values) |
 | Tag tables | SimaticML and CSV | SimaticML |
-| LAD blocks | No, skipped with a warning | No, skipped with a warning |
+| LAD blocks | Yes (transpiled to SCL: TON/TOF/TP/TONR, CTU/CTD/CTUD, edges, comparators, math) | No, reported/skipped |
 
 ## AI agent
 
@@ -76,7 +76,7 @@ Behaviour that differs from a real CPU or has not been verified:
 
 **AI agent**
 
-- It does not work without an API key or an Ollama server. There are no built-in canned replies
+- User simulation scenarios run in an isolated `rungline-sim://` sandboxed frame with a 50 ms step watchdog; API keys stay encrypted in the main process store.
 - Gemini sends tags, block names and the source of the blocks it reads to Google. Read Google's terms before using it on a confidential project
 - Only the Gemini path uses the tool loop. OpenAI and Ollama only add ladder to OB1, without the compiler check or the simulation test
 - Ladder is written only to OB1. The agent can produce an FB or FC, but it cannot call it from ladder and cannot add a new OB

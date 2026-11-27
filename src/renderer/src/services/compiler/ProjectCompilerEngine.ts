@@ -9,8 +9,13 @@ import {
   LadderCoilNode,
   LadderTimerNode,
   LadderCounterNode,
+  LadderComparatorNode,
+  LadderMathNode,
+  LadderEmptyBoxNode,
   LadderParallelBranchNode
 } from '@shared/types/ladder'
+import { builtinInstanceKind } from '@shared/s7/typeLayout'
+import { effectiveInterface } from '@shared/scl/sourceBlock'
 import { MemoryOverlapEngine } from '../MemoryOverlapEngine'
 import { DoubleCoilDetector } from '../DoubleCoilDetector'
 import { SclInterpreter } from '../../runtime/SclInterpreter'
@@ -117,6 +122,7 @@ export class ProjectCompilerEngine {
     // =========================================================================
     const instantiatedTimers = new Set<string>()
     const instantiatedCounters = new Set<string>()
+    const globalDbNames = new Set<string>()
 
     // Collect instantiated timer/counter names declared in tag tables
     for (const tbl of effectiveTagTables) {
@@ -127,6 +133,42 @@ export class ProjectCompilerEngine {
         if (/^C\d+$/i.test(t.name)) {
           instantiatedCounters.add(t.name.toUpperCase())
         }
+      }
+    }
+
+    const registerBuiltinType = (instName: string, dataType: string): void => {
+      const kind = builtinInstanceKind(dataType)
+      if (!kind) return
+      const upper = instName.toUpperCase()
+      if (kind === 'TON' || kind === 'TOF' || kind === 'TP' || kind === 'TONR') {
+        instantiatedTimers.add(upper)
+      } else if (kind === 'CTU' || kind === 'CTD' || kind === 'CTUD') {
+        instantiatedCounters.add(upper)
+      }
+    }
+
+    for (const db of effectiveDataBlocks) {
+      if (db.dbType === 'Instance' && db.parentFbName) {
+        registerBuiltinType(db.name, db.parentFbName)
+      } else {
+        globalDbNames.add(db.name.toLowerCase())
+      }
+      for (const v of db.variables || []) {
+        registerBuiltinType(v.name, v.dataType)
+        registerBuiltinType(`${db.name}.${v.name}`, v.dataType)
+      }
+    }
+
+    for (const blk of effectiveLadBlocks) {
+      const iface = blk.interface
+      for (const v of [...(iface?.input || []), ...(iface?.output || []), ...(iface?.inOut || []), ...(iface?.static || [])]) {
+        registerBuiltinType(v.name, v.dataType)
+      }
+    }
+    for (const scl of effectiveSclBlocks) {
+      const iface = effectiveInterface(scl)
+      for (const v of [...iface.input, ...iface.output, ...iface.inOut, ...iface.static]) {
+        registerBuiltinType(v.name, v.dataType)
       }
     }
 
@@ -153,6 +195,25 @@ export class ProjectCompilerEngine {
           collectInstances(node)
         }
       }
+    }
+
+    const isMissingOperand = (raw: string | undefined): boolean => {
+      const val = (raw || '').trim()
+      return !val || val === '???' || val === '%??.?' || val.includes('???')
+    }
+
+    const isBlockLocalStruct = (blk: LadBlockDefinition, rootName: string): boolean => {
+      const lower = rootName.replace(/^#/, '').toLowerCase()
+      const iface = blk.interface
+      const allLocals = [
+        ...(iface?.input || []),
+        ...(iface?.output || []),
+        ...(iface?.inOut || []),
+        ...(iface?.static || []),
+        ...(iface?.temp || []),
+        ...(iface?.constant || [])
+      ]
+      return allLocals.some((v) => v.name.toLowerCase() === lower && !builtinInstanceKind(v.dataType))
     }
 
     // Inspect each node in every network
@@ -186,17 +247,21 @@ export class ProjectCompilerEngine {
         }
 
         // Sub-bit timer reference verification (e.g. T1.Q, T2.Q)
-        const timerMatch = op.match(/^([A-Za-z0-9_]+)\.(Q|ET|IN|PT)$/i)
+        const timerMatch = op.replace(/^"|"$/g, '').match(/^([A-Za-z0-9_]+)\.(Q|ET|IN|PT)$/i)
         if (timerMatch) {
           const inst = timerMatch[1].toUpperCase()
-          if (!instantiatedTimers.has(inst)) {
+          if (
+            !instantiatedTimers.has(inst) &&
+            !globalDbNames.has(inst.toLowerCase()) &&
+            !isBlockLocalStruct(blk, timerMatch[1])
+          ) {
             diagnostics.push({
               id: `err_timer_inst_${blk.fileName}_net${net.networkNumber}_${c.id}`,
               severity: 'Error',
               code: 'ERR_UNINSTANTIATED_TIMER',
               iecCode: 'S7-TMR-004',
               source: 'Timer Validator',
-              message: `[S7-TMR-004] Contact '${op}' in ${blk.name}, Network ${net.networkNumber} references timer '${inst}', but no '${inst}' TON/TOF/TP instruction is instantiated.`,
+              message: `[S7-TMR-004] Contact '${op}' in ${blk.name}, Network ${net.networkNumber} references timer '${inst}', but no '${inst}' TON/TOF/TP/TONR instruction is instantiated.`,
               location: {
                 blockName: blk.name,
                 blockFileName: blk.fileName,
@@ -213,17 +278,21 @@ export class ProjectCompilerEngine {
         }
 
         // Sub-bit counter reference verification (e.g. C1.QU, C1.QD)
-        const counterMatch = op.match(/^([A-Za-z0-9_]+)\.(QU|QD|CV|PV|CU|CD)$/i)
+        const counterMatch = op.replace(/^"|"$/g, '').match(/^([A-Za-z0-9_]+)\.(QU|QD|CV|PV|CU|CD)$/i)
         if (counterMatch) {
           const inst = counterMatch[1].toUpperCase()
-          if (!instantiatedCounters.has(inst)) {
+          if (
+            !instantiatedCounters.has(inst) &&
+            !globalDbNames.has(inst.toLowerCase()) &&
+            !isBlockLocalStruct(blk, counterMatch[1])
+          ) {
             diagnostics.push({
               id: `err_counter_inst_${blk.fileName}_net${net.networkNumber}_${c.id}`,
               severity: 'Error',
               code: 'ERR_UNINSTANTIATED_COUNTER',
               iecCode: 'S7-TMR-004',
               source: 'Counter Validator',
-              message: `[S7-TMR-004] Contact '${op}' in ${blk.name}, Network ${net.networkNumber} references counter '${inst}', but no '${inst}' CTU/CTD instruction is instantiated.`,
+              message: `[S7-TMR-004] Contact '${op}' in ${blk.name}, Network ${net.networkNumber} references counter '${inst}', but no '${inst}' CTU/CTD/CTUD instruction is instantiated.`,
               location: {
                 blockName: blk.name,
                 blockFileName: blk.fileName,
@@ -264,6 +333,83 @@ export class ProjectCompilerEngine {
             timestamp: Date.now()
           })
         }
+      } else if (node.kind === 'timer') {
+        const t = node as LadderTimerNode
+        if (t.rOperand && t.rOperand.includes('???')) {
+          diagnostics.push({
+            id: `err_unassigned_timer_${blk.fileName}_net${net.networkNumber}_${t.id}`,
+            severity: 'Error',
+            code: 'ERR_UNASSIGNED_OPERAND',
+            iecCode: 'S7-LAD-002',
+            source: 'LAD Compiler',
+            message: `[S7-LAD-002] Timer '${t.instanceDb}' in ${blk.name}, Network ${net.networkNumber} has unassigned reset operand ('???').`,
+            location: { blockName: blk.name, blockFileName: blk.fileName, networkNumber: net.networkNumber, nodeId: t.id },
+            targetId: t.id,
+            autoFixable: true,
+            fixAction: 'GO_TO_RUNG',
+            fixLabel: 'Go to Rung',
+            timestamp: Date.now()
+          })
+        }
+      } else if (node.kind === 'comparator') {
+        const cmp = node as LadderComparatorNode
+        if (isMissingOperand(cmp.op1) || isMissingOperand(cmp.op2)) {
+          diagnostics.push({
+            id: `err_unassigned_cmp_${blk.fileName}_net${net.networkNumber}_${cmp.id}`,
+            severity: 'Error',
+            code: 'ERR_UNASSIGNED_OPERAND',
+            iecCode: 'S7-LAD-002',
+            source: 'LAD Compiler',
+            message: `[S7-LAD-002] Comparator in ${blk.name}, Network ${net.networkNumber} has unassigned operand ('???').`,
+            location: { blockName: blk.name, blockFileName: blk.fileName, networkNumber: net.networkNumber, nodeId: cmp.id },
+            targetId: cmp.id,
+            autoFixable: true,
+            fixAction: 'GO_TO_RUNG',
+            fixLabel: 'Go to Rung',
+            timestamp: Date.now()
+          })
+        }
+      } else if (node.kind === 'math') {
+        const m = node as LadderMathNode
+        const hasMissing =
+          isMissingOperand(m.out) ||
+          (m.boxType === 'NORM_X' || m.boxType === 'SCALE_X'
+            ? isMissingOperand(m.value ?? m.in1) || (m.min !== undefined && m.min.includes('???')) || (m.max !== undefined && m.max.includes('???'))
+            : m.boxType === 'MOVE'
+              ? isMissingOperand(m.in1)
+              : isMissingOperand(m.in1) || isMissingOperand(m.in2))
+        if (hasMissing) {
+          diagnostics.push({
+            id: `err_unassigned_math_${blk.fileName}_net${net.networkNumber}_${m.id}`,
+            severity: 'Error',
+            code: 'ERR_UNASSIGNED_OPERAND',
+            iecCode: 'S7-LAD-002',
+            source: 'LAD Compiler',
+            message: `[S7-LAD-002] ${m.boxType} box in ${blk.name}, Network ${net.networkNumber} has unassigned operand ('???').`,
+            location: { blockName: blk.name, blockFileName: blk.fileName, networkNumber: net.networkNumber, nodeId: m.id },
+            targetId: m.id,
+            autoFixable: true,
+            fixAction: 'GO_TO_RUNG',
+            fixLabel: 'Go to Rung',
+            timestamp: Date.now()
+          })
+        }
+      } else if (node.kind === 'emptyBox') {
+        const eb = node as LadderEmptyBoxNode
+        diagnostics.push({
+          id: `err_empty_box_${blk.fileName}_net${net.networkNumber}_${eb.id}`,
+          severity: 'Error',
+          code: 'ERR_UNASSIGNED_OPERAND',
+          iecCode: 'S7-LAD-002',
+          source: 'LAD Compiler',
+          message: `[S7-LAD-002] Incomplete box '${eb.instruction || '???'}' in ${blk.name}, Network ${net.networkNumber}.`,
+          location: { blockName: blk.name, blockFileName: blk.fileName, networkNumber: net.networkNumber, nodeId: eb.id },
+          targetId: eb.id,
+          autoFixable: true,
+          fixAction: 'GO_TO_RUNG',
+          fixLabel: 'Go to Rung',
+          timestamp: Date.now()
+        })
       } else if (node.kind === 'parallel') {
         const p = node as LadderParallelBranchNode
         for (const branch of p.branches) {
@@ -344,7 +490,7 @@ export class ProjectCompilerEngine {
     // PASS 3: Double-Coil Syndrome Audit
     // =========================================================================
     for (const blk of effectiveLadBlocks) {
-      const conflicts = DoubleCoilDetector.detectConflicts(blk)
+      const conflicts = DoubleCoilDetector.detectConflicts(blk, effectiveTagTables)
       for (const conflict of conflicts) {
         diagnostics.push({
           id: `warn_double_coil_${blk.fileName}_${conflict.normalizedOperand}`,
@@ -375,9 +521,10 @@ export class ProjectCompilerEngine {
       if (sclBlk.code) {
         const syntaxRes = SclInterpreter.validateSyntax(sclBlk.code)
         if (!syntaxRes.valid) {
-          for (const err of syntaxRes.errors) {
+          for (let errIdx = 0; errIdx < syntaxRes.errors.length; errIdx++) {
+            const err = syntaxRes.errors[errIdx]
             diagnostics.push({
-              id: `err_scl_syntax_${sclBlk.fileName}_${Math.random().toString(36).substring(2, 7)}`,
+              id: `err_scl_syntax_${sclBlk.fileName}_${errIdx}`,
               severity: 'Error',
               code: 'ERR_SCL_SYNTAX',
               iecCode: 'S7-SCL-005',

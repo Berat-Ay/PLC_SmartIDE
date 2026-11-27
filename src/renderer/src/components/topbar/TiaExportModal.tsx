@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Check, Copy, Download, FileCode, FolderOpen, Share2, Terminal, Upload, X } from 'lucide-react'
 import { TiaExportBridge } from '../../services/export/TiaExportBridge'
 import { TiaMergeResult } from '@shared/tia/merge'
@@ -38,9 +38,10 @@ const NameList: React.FC<{ title: string; items: string[]; tone: string }> = ({ 
 
 const ExportModalBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [transpileLadToScl, setTranspileLadToScl] = useState(true)
+  const [bundleVersion, setBundleVersion] = useState(0)
   const bundle = useMemo(
     () => TiaExportBridge.generateBundle({ transpileLadToScl }),
-    [transpileLadToScl]
+    [transpileLadToScl, bundleVersion]
   )
   const [tab, setTab] = useState<ModalTab>('export')
   const [selected, setSelected] = useState(0)
@@ -49,14 +50,23 @@ const ExportModalBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [error, setError] = useState<string | null>(null)
   const [preview, setPreview] = useState<{ folder: string; merge: TiaMergeResult } | null>(null)
   const [imported, setImported] = useState(false)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    }
+  }, [])
 
   const activeFile = bundle.files[selected] || bundle.files[0]
   const hasDiskAccess = typeof window !== 'undefined' && !!window.electronApi
 
   const handleCopy = (): void => {
-    void navigator.clipboard.writeText(activeFile.content)
+    if (!activeFile) return
+    navigator.clipboard?.writeText(activeFile.content).catch(() => {})
     setCopied(true)
-    setTimeout(() => setCopied(false), 1200)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopied(false), 1200)
   }
 
   const handleExport = async (): Promise<void> => {
@@ -88,6 +98,7 @@ const ExportModalBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     TiaExportBridge.applyImport(preview.merge)
     setPreview(null)
     setImported(true)
+    setBundleVersion((v) => v + 1)
   }
 
   const changes = preview ? preview.merge.added.length + preview.merge.replaced.length : 0
@@ -209,17 +220,18 @@ const ExportModalBody: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                 </div>
               )}
               <div className="px-4 py-2 bg-industrial-950 border-b border-industrial-800 flex items-center justify-between text-xs font-mono">
-                <span className="text-industrial-100 font-bold">{activeFile.filename}</span>
+                <span className="text-industrial-100 font-bold">{activeFile ? activeFile.filename : 'No exported files'}</span>
                 <button
                   onClick={handleCopy}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs text-industrial-300 hover:text-white bg-industrial-800 hover:bg-industrial-700 rounded transition-colors"
+                  disabled={!activeFile}
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs text-industrial-300 hover:text-white bg-industrial-800 hover:bg-industrial-700 disabled:opacity-40 rounded transition-colors"
                 >
                   {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
                   <span>{copied ? 'Copied' : 'Copy'}</span>
                 </button>
               </div>
               <div className="flex-1 p-4 overflow-auto bg-industrial-950/60 font-mono text-xs leading-relaxed text-industrial-200 select-text">
-                <pre>{activeFile.content}</pre>
+                <pre>{activeFile ? activeFile.content : 'Add blocks or tags to the project to preview TIA Portal export files.'}</pre>
               </div>
             </div>
           </div>

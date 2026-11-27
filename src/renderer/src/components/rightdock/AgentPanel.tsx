@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   Sparkles,
   Bot,
@@ -22,7 +23,10 @@ import { useTagStore } from '../../stores/useTagStore'
 import { useBlockStore } from '../../stores/useBlockStore'
 import { useHardwareStore } from '../../stores/useHardwareStore'
 import { formatCpuChipLabel } from '../../utils/cpuChipLabel'
-import { AiModelRouter, AgentExecutionResponse, sanitizeUserPrompt } from '../../services/ai/AiModelRouter'
+import { parseInlineMarkdownTokens } from '../../utils/inlineMarkdown'
+import { AiModelRouter, AgentExecutionResponse, AiProvider, sanitizeUserPrompt } from '../../services/ai/AiModelRouter'
+import { isAgentAbortError } from '../../services/ai/aiTypes'
+import { resolveOllamaModel } from '../../services/ai/OllamaClient'
 import { PlcAgentTools, StagedFileChange } from '../../services/ai/PlcAgentTools'
 import { CoilDiagnosticEngine, CoilDiagnosticReport } from '../../services/ai/CoilDiagnosticEngine'
 import { RagKnowledgeEngine } from '../../services/ai/RagKnowledgeEngine'
@@ -90,38 +94,29 @@ const MarkdownMessageRenderer: React.FC<{ text: string }> = ({ text }) => {
 }
 
 function renderInlineMarkdown(str: string): React.ReactNode {
-  const parts: React.ReactNode[] = []
-  let remaining = str
-  let keyIdx = 0
-
-  while (remaining.length > 0) {
-    const boldMatch = remaining.match(/^(.*?)\*\*(.*?)\*\*(.*)$/)
-    const codeMatch = remaining.match(/^(.*?)`([^`]+)`(.*)$/)
-
-    if (boldMatch && (!codeMatch || (boldMatch.index ?? 0) <= (codeMatch.index ?? 0))) {
-      if (boldMatch[1]) parts.push(<span key={keyIdx++}>{boldMatch[1]}</span>)
-      parts.push(<strong key={keyIdx++} className="font-bold text-white">{boldMatch[2]}</strong>)
-      remaining = boldMatch[3]
-    } else if (codeMatch) {
-      if (codeMatch[1]) parts.push(<span key={keyIdx++}>{codeMatch[1]}</span>)
-      parts.push(
-        <code key={keyIdx++} className="px-1 py-0.5 bg-[#1a1c22] border border-[#2e323b] text-cyan-300 font-mono text-[11px] rounded-none">
-          {codeMatch[2]}
+  const tokens = parseInlineMarkdownTokens(str)
+  if (tokens.length === 0) return str
+  return tokens.map((tok, idx) => {
+    if (tok.type === 'bold') {
+      return (
+        <strong key={idx} className="font-bold text-white">
+          {tok.value}
+        </strong>
+      )
+    }
+    if (tok.type === 'code') {
+      return (
+        <code key={idx} className="px-1 py-0.5 bg-[#1a1c22] border border-[#2e323b] text-cyan-300 font-mono text-[11px] rounded-none">
+          {tok.value}
         </code>
       )
-      remaining = codeMatch[3]
-    } else {
-      parts.push(<span key={keyIdx++}>{remaining}</span>)
-      break
     }
-  }
-
-  return parts.length > 0 ? parts : str
+    return <span key={idx}>{tok.value}</span>
+  })
 }
 
 export const AgentPanel: React.FC = () => {
   const {
-    rightDockCollapsed,
     toggleRightDock,
     agentMode,
     agentTier,
@@ -131,11 +126,30 @@ export const AgentPanel: React.FC = () => {
     tabs,
     activeTabId,
     isBookTrainerOpen,
-    setBookTrainerOpen
-  } = useUIStore()
-  const { metadata, cpuState } = useProjectStore()
-  const { totalCollisions } = useTagStore()
-  const { ladBlocks, sclBlocks } = useBlockStore()
+    setBookTrainerOpen,
+    pendingCoilDiagnostic,
+    setPendingCoilDiagnostic
+  } = useUIStore(
+    useShallow((s) => ({
+      toggleRightDock: s.toggleRightDock,
+      agentMode: s.agentMode,
+      agentTier: s.agentTier,
+      agentMessages: s.agentMessages,
+      setAgentMode: s.setAgentMode,
+      setAgentTier: s.setAgentTier,
+      tabs: s.tabs,
+      activeTabId: s.activeTabId,
+      isBookTrainerOpen: s.isBookTrainerOpen,
+      setBookTrainerOpen: s.setBookTrainerOpen,
+      pendingCoilDiagnostic: s.pendingCoilDiagnostic,
+      setPendingCoilDiagnostic: s.setPendingCoilDiagnostic
+    }))
+  )
+  const metadata = useProjectStore((s) => s.metadata)
+  const cpuState = useProjectStore((s) => s.cpuState)
+  const totalCollisions = useTagStore((s) => s.totalCollisions)
+  const ladBlocks = useBlockStore((s) => s.ladBlocks)
+  const sclBlocks = useBlockStore((s) => s.sclBlocks)
   const hardwareConfig = useHardwareStore((s) => s.config)
   const cpuChipLabel = formatCpuChipLabel(hardwareConfig, metadata?.targetCpu)
 
@@ -145,71 +159,90 @@ export const AgentPanel: React.FC = () => {
   const [pendingChangeset, setPendingChangeset] = useState<StagedFileChange[]>([])
   const [activeDiagnostic, setActiveDiagnostic] = useState<CoilDiagnosticReport | null>(null)
   const [isExecuting, setIsExecuting] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
   const [savedStandardNotice, setSavedStandardNotice] = useState<string | null>(null)
+  const initialCfg = AiModelRouter.getInstance().getConfig()
+  const [provider, setProvider] = useState<AiProvider>(initialCfg.provider)
   const [currentModelId, setCurrentModelId] = useState(
-    AiModelRouter.getInstance().getConfig().selectedModelId || 'gemini-2.5-flash'
+    initialCfg.selectedModelId || 'gemini-2.5-flash'
   )
   const [availableModels, setAvailableModels] = useState(
-    AiModelRouter.getInstance().getConfig().availableModels || []
+    initialCfg.availableModels || []
   )
+  const [ollamaModel, setOllamaModel] = useState(resolveOllamaModel(initialCfg))
+  const [ollamaModels, setOllamaModels] = useState(initialCfg.ollamaModels || [])
+  const [openaiModel, setOpenaiModel] = useState(initialCfg.openaiModel || '')
+  const [openaiModels, setOpenaiModels] = useState(initialCfg.openaiModels || [])
+  const activeTurnIdRef = useRef(0)
+  const messagesEndRef = useRef<HTMLDivElement | null>(null)
+  const promptInputRef = useRef<HTMLInputElement | null>(null)
+  const diagTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (diagTimerRef.current) clearTimeout(diagTimerRef.current)
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [agentMessages.length])
 
   useEffect(() => {
     if (!isSettingsOpen) {
       const cfg = AiModelRouter.getInstance().getConfig()
+      setProvider(cfg.provider)
       setCurrentModelId(cfg.selectedModelId)
       setAvailableModels(cfg.availableModels || [])
+      setOllamaModel(resolveOllamaModel(cfg))
+      setOllamaModels(cfg.ollamaModels || [])
+      setOpenaiModel(cfg.openaiModel || '')
+      setOpenaiModels(cfg.openaiModels || [])
     }
   }, [isSettingsOpen])
 
-  // Listen for Live Diagnostic events triggered directly from Ladder Canvas
+  // Consume Live Diagnostic requests triggered from Ladder Canvas (via App.tsx pendingCoilDiagnostic)
   useEffect(() => {
-    const handleDiagnoseEvent = (e: Event) => {
-      const detail = (e as CustomEvent<{ operand: string; networkNumber: number }>).detail
-      if (!detail) return
+    if (!pendingCoilDiagnostic) return
+    const detail = pendingCoilDiagnostic
+    setPendingCoilDiagnostic(null)
 
-      if (rightDockCollapsed) {
-        toggleRightDock()
-      }
-      useUIStore.getState().setRightActiveTab('agent')
+    const { tabs: curTabs, activeTabId: curActiveTabId } = useUIStore.getState()
+    const currentTab = curTabs.find((t) => t.id === curActiveTabId)
+    const currentLadBlocks = useBlockStore.getState().ladBlocks
+    const activeLad = currentLadBlocks.find((b) => b.fileName === currentTab?.targetId) || currentLadBlocks[0]
+    if (!activeLad) return
 
-      const { tabs, activeTabId } = useUIStore.getState()
-      const currentTab = tabs.find((t) => t.id === activeTabId)
-      const currentLadBlocks = useBlockStore.getState().ladBlocks
-      const activeLad = currentLadBlocks.find((b) => b.fileName === currentTab?.targetId) || currentLadBlocks[0]
-      if (activeLad) {
-        const report = CoilDiagnosticEngine.diagnoseCoil(activeLad, detail.networkNumber, detail.operand)
-        setActiveDiagnostic(report)
+    const report = CoilDiagnosticEngine.diagnoseCoil(activeLad, detail.networkNumber, detail.operand)
+    setActiveDiagnostic(report)
 
-        if (report.blockingContact?.nodeId) {
-          window.dispatchEvent(
-            new CustomEvent('plc:highlight-blocking-node', {
-              detail: { nodeId: report.blockingContact.nodeId }
-            })
-          )
-        }
-
-        useUIStore.getState().sendAgentMessage(`Diagnostic request: Why is coil '${detail.operand}' OFF?`)
-        setTimeout(() => {
-          useUIStore.getState().sendAgentMessage(report.explanationEn || report.explanationTr)
-        }, 300)
-      }
+    if (report.blockingContact?.nodeId) {
+      window.dispatchEvent(
+        new CustomEvent('plc:highlight-blocking-node', {
+          detail: { nodeId: report.blockingContact.nodeId }
+        })
+      )
     }
 
-    window.addEventListener('plc:diagnose-coil', handleDiagnoseEvent)
-    return () => window.removeEventListener('plc:diagnose-coil', handleDiagnoseEvent)
-  }, [ladBlocks, rightDockCollapsed, toggleRightDock])
+    useUIStore.getState().sendAgentMessage(`Diagnostic request: Why is coil '${detail.operand}' OFF?`, 'user')
+    if (diagTimerRef.current) clearTimeout(diagTimerRef.current)
+    diagTimerRef.current = setTimeout(() => {
+      useUIStore.getState().sendAgentMessage(report.explanationEn || report.explanationTr, 'agent')
+    }, 300)
+  }, [pendingCoilDiagnostic, setPendingCoilDiagnostic])
 
   const activeTab = tabs.find((t) => t.id === activeTabId)
 
   const abortControllerRef = useRef<AbortController | null>(null)
 
   const handleCancelExecution = () => {
+    if (!isExecuting || isCancelling) return
+    setIsCancelling(true)
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
-      abortControllerRef.current = null
     }
-    setIsExecuting(false)
-    useUIStore.getState().sendAgentMessage('Generation cancelled by user.', 'agent')
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -240,12 +273,15 @@ export const AgentPanel: React.FC = () => {
   }
 
   const runAgent = async (call: (signal: AbortSignal) => Promise<AgentExecutionResponse>) => {
+    const turnId = ++activeTurnIdRef.current
     setIsExecuting(true)
+    setIsCancelling(false)
     const controller = new AbortController()
     abortControllerRef.current = controller
 
     try {
       const response = await call(controller.signal)
+      if (turnId !== activeTurnIdRef.current) return
 
       // Diff-view stages every change. In auto-apply a circuit that failed its test is staged for review instead
       if (response.stagedChangeset && response.stagedChangeset.length > 0) {
@@ -261,17 +297,25 @@ export const AgentPanel: React.FC = () => {
         acceptanceReport: response.acceptanceReport
       })
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err)
-      const errStack = err instanceof Error ? err.stack : undefined
-      useUIStore.getState().sendAgentMessage(`Agent Error: ${errMsg}`, 'agent', undefined, {
-        isError: true,
-        errorDetails: errStack || errMsg,
-        snippet: errMsg
-      })
+      if (turnId !== activeTurnIdRef.current) return
+      if (isAgentAbortError(err, controller.signal)) {
+        useUIStore.getState().sendAgentMessage('Generation cancelled by user.', 'agent')
+      } else {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        const errStack = err instanceof Error ? err.stack : undefined
+        useUIStore.getState().sendAgentMessage(`Agent Error: ${errMsg}`, 'agent', undefined, {
+          isError: true,
+          errorDetails: errStack || errMsg,
+          snippet: errMsg
+        })
+      }
     } finally {
-      setIsExecuting(false)
-      abortControllerRef.current = null
-      setTestAwaitingApproval(AiModelRouter.getInstance().hasPendingTest())
+      if (turnId === activeTurnIdRef.current) {
+        setIsExecuting(false)
+        setIsCancelling(false)
+        abortControllerRef.current = null
+        setTestAwaitingApproval(AiModelRouter.getInstance().hasPendingTest())
+      }
     }
   }
 
@@ -280,8 +324,16 @@ export const AgentPanel: React.FC = () => {
     if (isExecuting) {
       handleCancelExecution()
     }
-    setCurrentModelId(newId)
-    AiModelRouter.getInstance().updateConfig({ selectedModelId: newId })
+    if (provider === 'ollama') {
+      setOllamaModel(newId)
+      AiModelRouter.getInstance().updateConfig({ ollamaModel: newId })
+    } else if (provider === 'openai') {
+      setOpenaiModel(newId)
+      AiModelRouter.getInstance().updateConfig({ openaiModel: newId })
+    } else {
+      setCurrentModelId(newId)
+      AiModelRouter.getInstance().updateConfig({ selectedModelId: newId })
+    }
   }
 
   const handleUndoTurn = () => {
@@ -305,7 +357,8 @@ export const AgentPanel: React.FC = () => {
           contentJson: JSON.stringify(lad, null, 2)
         })
         setSavedStandardNotice(`Saved ${lad.name} to AI Standard Library!`)
-        setTimeout(() => setSavedStandardNotice(null), 2500)
+        if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+        noticeTimerRef.current = setTimeout(() => setSavedStandardNotice(null), 2500)
       }
     } else if (activeTab.type === 'scl') {
       const scl = sclBlocks.find((b) => b.fileName === activeTab.targetId || b.name === activeTab.title)
@@ -318,7 +371,8 @@ export const AgentPanel: React.FC = () => {
           contentJson: scl.code
         })
         setSavedStandardNotice(`Saved ${scl.name} to AI Standard Library!`)
-        setTimeout(() => setSavedStandardNotice(null), 2500)
+        if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+        noticeTimerRef.current = setTimeout(() => setSavedStandardNotice(null), 2500)
       }
     }
   }
@@ -440,11 +494,20 @@ export const AgentPanel: React.FC = () => {
           <select
             title="Model"
             data-testid="agent-model-quick-select"
-            value={currentModelId}
+            value={provider === 'ollama' ? ollamaModel : provider === 'openai' ? openaiModel : currentModelId}
             onChange={handleModelQuickChange}
             className="flex-1 min-w-0 bg-industrial-950 border border-industrial-700 text-industrial-200 text-[10px] font-mono px-1 py-0.5 rounded-none focus:outline-hidden truncate"
           >
-            {availableModels.map((m) => (
+            {(provider === 'ollama'
+              ? ollamaModels.length > 0
+                ? ollamaModels
+                : [{ id: ollamaModel, displayName: ollamaModel }]
+              : provider === 'openai'
+                ? openaiModels.length > 0
+                  ? openaiModels
+                  : [{ id: openaiModel || 'gpt-4o', displayName: openaiModel || 'gpt-4o' }]
+                : availableModels
+            ).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.displayName || m.id}
               </option>
@@ -522,14 +585,18 @@ export const AgentPanel: React.FC = () => {
           </div>
 
           <div className="text-[11px] text-industrial-200 leading-snug">
-            Blocking Contact: <strong className="text-white">{activeDiagnostic.blockingContact.operand}</strong> ({activeDiagnostic.blockingContact.address}) is evaluated as <strong className="text-rose-400">FALSE</strong>.
+            Blocking Element: <strong className="text-white">{activeDiagnostic.blockingContact.operand}</strong> ({activeDiagnostic.blockingContact.address}) is evaluated as{' '}
+            <strong className="text-rose-400">{activeDiagnostic.blockingContact.evaluatedValue ? 'TRUE' : 'FALSE'}</strong>.
           </div>
 
           <button
             data-testid="btn-force-blocking-bit"
             onClick={() => {
               if (activeDiagnostic.blockingContact) {
-                CoilDiagnosticEngine.forceBlockingBitTrue(activeDiagnostic.blockingContact.address)
+                CoilDiagnosticEngine.forceBlockingBit(
+                  activeDiagnostic.blockingContact.address,
+                  activeDiagnostic.blockingContact.recommendedForceValue
+                )
                 setActiveDiagnostic(null)
                 window.dispatchEvent(new CustomEvent('plc:clear-blocking-highlight'))
               }
@@ -537,7 +604,9 @@ export const AgentPanel: React.FC = () => {
             className="w-full flex items-center justify-center gap-1.5 py-1 px-2 bg-rose-600 hover:bg-rose-500 text-white font-semibold text-[11px] rounded-none shadow-sm transition-all"
           >
             <Zap className="w-3 h-3" />
-            <span>Force {activeDiagnostic.blockingContact.operand} TRUE for Test</span>
+            <span>
+              Force {activeDiagnostic.blockingContact.operand} {activeDiagnostic.blockingContact.recommendedForceValue ? 'TRUE' : 'FALSE'} for Test
+            </span>
           </button>
         </div>
       )}
@@ -601,7 +670,7 @@ export const AgentPanel: React.FC = () => {
                       data-testid="btn-copy-error-trace"
                       type="button"
                       onClick={() => {
-                        navigator.clipboard.writeText(msg.errorDetails || msg.text)
+                        navigator.clipboard?.writeText(msg.errorDetails || msg.text).catch(() => {})
                       }}
                       className="px-1.5 py-0.5 bg-red-900 hover:bg-red-800 text-white text-[10px] font-bold rounded-none cursor-pointer border border-red-700"
                     >
@@ -670,13 +739,15 @@ export const AgentPanel: React.FC = () => {
             <button
               data-testid="btn-cancel-synthesis"
               type="button"
+              disabled={isCancelling}
               onClick={handleCancelExecution}
-              className="px-2 py-0.5 bg-red-900/60 hover:bg-red-800 text-red-200 border border-red-700 text-[10px] font-bold cursor-pointer rounded-none uppercase transition-all"
+              className="px-2 py-0.5 bg-red-900/60 hover:bg-red-800 disabled:opacity-50 text-red-200 border border-red-700 text-[10px] font-bold cursor-pointer rounded-none uppercase transition-all"
             >
-              [■ Cancel]
+              {isCancelling ? '[Cancelling...]' : '[■ Cancel]'}
             </button>
           </div>
         )}
+        <div ref={messagesEndRef} />
       </div>
 
       {/* Test first: approve the test, or write a correction in the input box */}
@@ -704,14 +775,23 @@ export const AgentPanel: React.FC = () => {
 
       {/* Input Prompt Box */}
       <form onSubmit={handleSubmit} className="p-2.5 bg-[#0e0f12] border-t border-[#27272a] shrink-0">
-        <div className="flex items-stretch bg-[#14161b] border border-[#27272a] focus-within:border-purple-500">
+        <div
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              e.preventDefault()
+              promptInputRef.current?.focus()
+            }
+          }}
+          className="flex items-stretch bg-[#14161b] border border-[#27272a] focus-within:border-purple-500"
+        >
           <input
+            ref={promptInputRef}
             data-testid="agent-input-prompt"
             type="text"
             value={inputPrompt}
             onChange={(e) => setInputPrompt(e.target.value)}
             placeholder="Ask agent to synthesize, refactor, or debug..."
-            className="flex-1 min-w-0 bg-transparent rounded-none pl-3 py-2 text-xs text-industrial-100 placeholder-industrial-500 focus:outline-hidden"
+            className="flex-1 min-w-0 bg-transparent rounded-none pl-3 py-2 text-xs text-industrial-100 placeholder-industrial-500 select-text focus:outline-none"
           />
           <button
             data-testid="agent-submit-prompt"
@@ -732,7 +812,7 @@ export const AgentPanel: React.FC = () => {
         changeset={pendingChangeset}
         onClose={() => setDiffModalOpen(false)}
         onApproved={(report) => {
-          useUIStore.getState().sendAgentMessage(`[Approved & Applied] ${report}`)
+          useUIStore.getState().sendAgentMessage(`[Approved & Applied] ${report}`, 'agent')
         }}
       />
     </div>

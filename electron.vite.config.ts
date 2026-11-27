@@ -4,16 +4,20 @@ import react from '@vitejs/plugin-react'
 import type { Plugin } from 'vite'
 
 // Added to production builds only: the dev server needs inline scripts for hot reload.
-// 'unsafe-eval' is required by simulation scenarios, which run through new Function.
+// Simulation scenarios run in an isolated rungline-sim:// sandboxed iframe/worker, keeping
+// dynamic code evaluation and blanket external connect-src out of the main renderer CSP.
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-eval'",
+  "script-src 'self'",
+  "worker-src 'self' blob:",
+  "frame-src rungline-sim:",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self' data:",
-  "connect-src 'self' http: https: ws:",
+  "connect-src 'self'",
   "object-src 'none'",
-  "base-uri 'none'"
+  "base-uri 'none'",
+  "form-action 'none'"
 ].join('; ')
 
 function contentSecurityPolicy(): Plugin {
@@ -27,6 +31,11 @@ function contentSecurityPolicy(): Plugin {
 
 export default defineConfig({
   main: {
+    resolve: {
+      alias: {
+        '@shared': resolve(__dirname, 'src/shared')
+      }
+    },
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
@@ -37,6 +46,11 @@ export default defineConfig({
     }
   },
   preload: {
+    resolve: {
+      alias: {
+        '@shared': resolve(__dirname, 'src/shared')
+      }
+    },
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
@@ -59,6 +73,44 @@ export default defineConfig({
         '@renderer': resolve(__dirname, 'src/renderer/src')
       }
     },
-    plugins: [react(), contentSecurityPolicy()]
+    plugins: [react(), contentSecurityPolicy()],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            const normalized = id.replace(/\\/g, '/')
+            if (
+              normalized.includes('/node_modules/react/') ||
+              normalized.includes('/node_modules/react-dom/') ||
+              normalized.includes('/node_modules/scheduler/')
+            ) {
+              return 'vendor-react'
+            }
+            if (
+              normalized.includes('/node_modules/lucide-react/') ||
+              normalized.includes('/node_modules/zustand/')
+            ) {
+              return 'vendor-ui'
+            }
+            if (
+              normalized.includes('/src/renderer/src/runtime/') ||
+              normalized.includes('/src/shared/scl/') ||
+              normalized.includes('/src/shared/tia/') ||
+              normalized.includes('/src/shared/s7/') ||
+              normalized.includes('/src/renderer/src/services/compiler/')
+            ) {
+              return 'plc-core'
+            }
+            if (
+              normalized.includes('/src/renderer/src/services/ai/') ||
+              normalized.includes('/src/renderer/src/services/scenarios/')
+            ) {
+              return 'plc-ai'
+            }
+            return undefined
+          }
+        }
+      }
+    }
   }
 })

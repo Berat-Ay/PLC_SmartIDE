@@ -1,3 +1,4 @@
+import * as crypto from 'crypto'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { CreateProjectRequest, ProjectLoadPayload } from '../shared/types/ipc'
@@ -9,7 +10,11 @@ import { DataBlockDefinition, LadBlockDefinition, SclBlockDefinition } from '../
 import { getDefaultCpuConfig } from '../shared/constants/hardwareDefaults'
 import { buildInitialProjectPayload } from '../shared/project/createProjectPayload'
 import { effectiveInterface, emptyInterface, parseSourceBlock, toFullSource } from '../shared/scl/sourceBlock'
-import { assertPlainFileName, resolveInside } from './pathGuard'
+import { assertPlainFileName, resolveInsideReal } from './pathGuard'
+
+const MAX_PROJECT_FILE_BYTES = 20 * 1024 * 1024
+const MAX_TRASH_ATTEMPTS = 100
+const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
 
 function isMissingFile(err: unknown): boolean {
   return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
@@ -17,19 +22,29 @@ function isMissingFile(err: unknown): boolean {
 
 /** Writes through a temporary file, so a crash cannot leave a half-written project file. */
 async function writeFileAtomic(target: string, content: string): Promise<void> {
-  const temp = `${target}.${process.pid}.tmp`
+  const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`
   await fs.writeFile(temp, content, 'utf-8')
+  const delays = [50, 100, 200]
+  let lastErr: unknown
   try {
-    await fs.rename(temp, target)
-  } catch (err) {
-    // Sync clients and virus scanners can hold the target for a moment on Windows
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    try {
-      await fs.rename(temp, target)
-    } catch {
-      await fs.rm(temp, { force: true })
-      throw err
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      try {
+        await fs.rename(temp, target)
+        return
+      } catch (err) {
+        lastErr = err
+        const code = (err as NodeJS.ErrnoException)?.code
+        if (attempt < delays.length && code && RETRYABLE_RENAME_CODES.has(code)) {
+          await new Promise((resolve) => setTimeout(resolve, delays[attempt]))
+          continue
+        }
+        throw err
+      }
     }
+    throw lastErr
+  } catch (err) {
+    await fs.rm(temp, { force: true }).catch(() => {})
+    throw err
   }
 }
 
@@ -81,7 +96,7 @@ export class FileEngine {
     await this.ensureProjectDirectories(projectDir)
 
     // 1. Project metadata
-    const metaPath = path.join(projectDir, 'project.plc.json')
+    const metaPath = await resolveInsideReal(projectDir, 'project.plc.json')
     let metadata: ProjectMetadata
     try {
       metadata = JSON.parse(await fs.readFile(metaPath, 'utf-8'))
@@ -103,7 +118,7 @@ export class FileEngine {
     }
 
     // 2. Hardware / CPU config
-    const hwPath = path.join(projectDir, 'hardware', 'cpu_config.json')
+    const hwPath = await resolveInsideReal(projectDir, 'hardware/cpu_config.json')
     let hardware: CpuConfig
     try {
       hardware = JSON.parse(await fs.readFile(hwPath, 'utf-8'))
@@ -115,60 +130,83 @@ export class FileEngine {
 
     // A damaged file is reported and left on disk; the rest of the project still opens
     const loadErrors: { file: string; message: string }[] = []
-    const readEach = async (subdir: string, handle: (file: string, raw: string) => void): Promise<void> => {
-      const files = await fs.readdir(path.join(projectDir, subdir))
-      for (const file of files) {
+    const readEach = async (
+      subdir: string,
+      filter: (file: string) => boolean,
+      handle: (file: string, raw: string) => void
+    ): Promise<void> => {
+      const entries = await fs.readdir(path.join(projectDir, subdir), { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isSymbolicLink() || !entry.isFile() || !filter(entry.name)) continue
         try {
-          const fullPath = path.join(projectDir, subdir, file)
-          if ((await fs.stat(fullPath)).isDirectory()) continue
-          handle(file, await fs.readFile(fullPath, 'utf-8'))
+          const fullPath = await resolveInsideReal(projectDir, `${subdir}/${entry.name}`)
+          const stat = await fs.lstat(fullPath)
+          if (stat.isSymbolicLink() || !stat.isFile()) continue
+          if (stat.size > MAX_PROJECT_FILE_BYTES) {
+            throw new Error(`File exceeds maximum size (${MAX_PROJECT_FILE_BYTES} bytes)`)
+          }
+          handle(entry.name, await fs.readFile(fullPath, 'utf-8'))
         } catch (err) {
-          loadErrors.push({ file: `${subdir}/${file}`, message: (err as Error).message })
+          loadErrors.push({ file: `${subdir}/${entry.name}`, message: (err as Error).message })
         }
       }
     }
 
     // 3. Tag tables (/tags/*.tags.json)
     const tagTables: TagTable[] = []
-    await readEach('tags', (file, raw) => {
-      if (!file.endsWith('.tags.json')) return
-      const table: TagTable = JSON.parse(raw)
-      table.fileName = file
-      tagTables.push(table)
-    })
+    await readEach(
+      'tags',
+      (f) => f.endsWith('.tags.json'),
+      (file, raw) => {
+        const table: TagTable = JSON.parse(raw)
+        table.fileName = file
+        tagTables.push(table)
+      }
+    )
 
     // 4. UDT definitions (/types/*.udt.json)
     const udts: UdtDefinition[] = []
-    await readEach('types', (file, raw) => {
-      if (!file.endsWith('.udt.json')) return
-      const udt: UdtDefinition = JSON.parse(raw)
-      udt.fileName = file
-      udts.push(udt)
-    })
+    await readEach(
+      'types',
+      (f) => f.endsWith('.udt.json'),
+      (file, raw) => {
+        const udt: UdtDefinition = JSON.parse(raw)
+        udt.fileName = file
+        udts.push(udt)
+      }
+    )
 
     // 5. Blocks (/blocks/)
     const dataBlocks: DataBlockDefinition[] = []
     const ladBlocks: LadBlockDefinition[] = []
     const sclBlocks: SclBlockDefinition[] = []
-    await readEach('blocks', (file, raw) => {
-      if (file.endsWith('.db.json')) {
-        const db: DataBlockDefinition = JSON.parse(raw)
-        db.fileName = file
-        dataBlocks.push(db)
-      } else if (file.endsWith('.lad.json')) {
-        const lad: LadBlockDefinition = JSON.parse(raw)
-        lad.fileName = file
-        ladBlocks.push(lad)
-      } else if (file.endsWith('.scl')) {
-        sclBlocks.push(this.parseSclFile(file, raw))
+    await readEach(
+      'blocks',
+      (f) => f.endsWith('.db.json') || f.endsWith('.lad.json') || f.endsWith('.scl'),
+      (file, raw) => {
+        if (file.endsWith('.db.json')) {
+          const db: DataBlockDefinition = JSON.parse(raw)
+          db.fileName = file
+          dataBlocks.push(db)
+        } else if (file.endsWith('.lad.json')) {
+          const lad: LadBlockDefinition = JSON.parse(raw)
+          lad.fileName = file
+          ladBlocks.push(lad)
+        } else if (file.endsWith('.scl')) {
+          sclBlocks.push(this.parseSclFile(file, raw))
+        }
       }
-    })
+    )
 
     // 6. Simulation scenarios are loaded as text. They only run when the user applies them.
     const simulationScripts: { fileName: string; code: string }[] = []
-    await readEach('simulation', (file, raw) => {
-      if (file.endsWith('.sim.js')) simulationScripts.push({ fileName: file, code: raw })
-    })
+    await readEach(
+      'simulation',
+      (f) => f.endsWith('.sim.js'),
+      (file, raw) => {
+        simulationScripts.push({ fileName: file, code: raw })
+      }
+    )
 
     return {
       projectPath: projectDir,
@@ -191,42 +229,44 @@ export class FileEngine {
     const { projectPath, metadata, hardware, tagTables, udts, dataBlocks, ladBlocks, sclBlocks, simulationScripts } = payload
     await this.ensureProjectDirectories(projectPath)
 
-    // Save project.plc.json
-    await writeFileAtomic(path.join(projectPath, 'project.plc.json'), JSON.stringify(metadata, null, 2))
+    // Pre-validate all target file names & paths before writing anything to disk
+    const writes: Array<{ fullPath: string; content: string }> = [
+      { fullPath: await resolveInsideReal(projectPath, 'project.plc.json'), content: JSON.stringify(metadata, null, 2) },
+      { fullPath: await resolveInsideReal(projectPath, 'hardware/cpu_config.json'), content: JSON.stringify(hardware, null, 2) }
+    ]
 
-    // Save hardware/cpu_config.json
-    await writeFileAtomic(path.join(projectPath, 'hardware', 'cpu_config.json'), JSON.stringify(hardware, null, 2))
-
-    // Save tags
     for (const table of tagTables) {
-      const fileName = table.fileName || `${table.name || 'tags'}.tags.json`
-      await writeFileAtomic(path.join(projectPath, 'tags', assertPlainFileName(fileName)), JSON.stringify(table, null, 2))
+      const fileName = assertPlainFileName(table.fileName || `${table.name || 'tags'}.tags.json`)
+      writes.push({ fullPath: await resolveInsideReal(projectPath, `tags/${fileName}`), content: JSON.stringify(table, null, 2) })
     }
 
-    // Save types
     for (const udt of udts) {
-      const fileName = udt.fileName || `${udt.name}.udt.json`
-      await writeFileAtomic(path.join(projectPath, 'types', assertPlainFileName(fileName)), JSON.stringify(udt, null, 2))
+      const fileName = assertPlainFileName(udt.fileName || `${udt.name}.udt.json`)
+      writes.push({ fullPath: await resolveInsideReal(projectPath, `types/${fileName}`), content: JSON.stringify(udt, null, 2) })
     }
 
-    // Save blocks
     for (const db of dataBlocks) {
-      const fileName = db.fileName || `${db.name}.db.json`
-      await writeFileAtomic(path.join(projectPath, 'blocks', assertPlainFileName(fileName)), JSON.stringify(db, null, 2))
+      const fileName = assertPlainFileName(db.fileName || `${db.name}.db.json`)
+      writes.push({ fullPath: await resolveInsideReal(projectPath, `blocks/${fileName}`), content: JSON.stringify(db, null, 2) })
     }
 
     for (const lad of ladBlocks) {
-      const fileName = lad.fileName || `${lad.name}.lad.json`
-      await writeFileAtomic(path.join(projectPath, 'blocks', assertPlainFileName(fileName)), JSON.stringify(lad, null, 2))
+      const fileName = assertPlainFileName(lad.fileName || `${lad.name}.lad.json`)
+      writes.push({ fullPath: await resolveInsideReal(projectPath, `blocks/${fileName}`), content: JSON.stringify(lad, null, 2) })
     }
 
     for (const scl of sclBlocks) {
-      const fileName = scl.fileName || `${scl.name}.scl`
-      await writeFileAtomic(path.join(projectPath, 'blocks', assertPlainFileName(fileName)), toFullSource(scl))
+      const fileName = assertPlainFileName(scl.fileName || `${scl.name}.scl`)
+      writes.push({ fullPath: await resolveInsideReal(projectPath, `blocks/${fileName}`), content: toFullSource(scl) })
     }
 
     for (const script of simulationScripts || []) {
-      await writeFileAtomic(path.join(projectPath, 'simulation', assertPlainFileName(script.fileName)), script.code)
+      const fileName = assertPlainFileName(script.fileName)
+      writes.push({ fullPath: await resolveInsideReal(projectPath, `simulation/${fileName}`), content: script.code })
+    }
+
+    for (const item of writes) {
+      await writeFileAtomic(item.fullPath, item.content)
     }
 
     return true
@@ -236,7 +276,7 @@ export class FileEngine {
    * Saves an individual file
    */
   public static async saveSingleFile(projectDir: string, relativePath: string, content: string): Promise<boolean> {
-    const fullPath = resolveInside(projectDir, relativePath)
+    const fullPath = await resolveInsideReal(projectDir, relativePath)
     await fs.mkdir(path.dirname(fullPath), { recursive: true })
     await writeFileAtomic(fullPath, content)
     return true
@@ -251,13 +291,24 @@ export class FileEngine {
     const match = relativePath.replace(/\\/g, '/').replace(/^\/+/, '').match(/^(blocks|types|tags)\/([^/]+)$/)
     if (!match) throw new Error(`'${relativePath}' cannot be moved to the trash`)
     const fileName = assertPlainFileName(match[2])
-    const source = resolveInside(projectDir, `${match[1]}/${fileName}`)
+    const source = await resolveInsideReal(projectDir, `${match[1]}/${fileName}`)
 
-    const trashDir = resolveInside(projectDir, '.trash')
+    let sourceStat
+    try {
+      sourceStat = await fs.lstat(source)
+    } catch (err) {
+      if (isMissingFile(err)) return false
+      throw err
+    }
+    if (sourceStat.isSymbolicLink()) {
+      throw new Error(`Cannot trash symbolic link '${relativePath}'`)
+    }
+
+    const trashDir = await resolveInsideReal(projectDir, '.trash')
     await fs.mkdir(trashDir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    for (let attempt = 0; ; attempt++) {
-      const suffix = attempt === 0 ? '' : `_${attempt}`
+    for (let attempt = 0; attempt < MAX_TRASH_ATTEMPTS; attempt++) {
+      const suffix = attempt === 0 ? '' : `_${crypto.randomUUID().slice(0, 8)}`
       const target = path.join(trashDir, `${stamp}${suffix}_${match[1]}_${fileName}`)
       const taken = await fs.access(target).then(
         () => true,
@@ -268,10 +319,11 @@ export class FileEngine {
         await fs.rename(source, target)
         return true
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+        if (isMissingFile(err)) return false
         throw err
       }
     }
+    throw new Error(`Could not move '${relativePath}' to .trash after ${MAX_TRASH_ATTEMPTS} attempts`)
   }
 
   /**

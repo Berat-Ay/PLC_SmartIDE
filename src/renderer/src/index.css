@@ -46,6 +46,13 @@
     text-overflow: ellipsis;
   }
 
+  input,
+  textarea,
+  [contenteditable="true"] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
   /* Engineering table styling */
   table {
     border-collapse: collapse;

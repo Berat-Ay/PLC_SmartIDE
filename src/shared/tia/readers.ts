@@ -4,6 +4,7 @@ import { BlockVariable, DataBlockDefinition, SclBlockDefinition } from '../types
 import { TagDefinition, TagTable } from '../types/tags'
 import { UdtDefinition } from '../types/types'
 import { parseSourceBlock, ParsedSourceBlock } from '../scl/sourceBlock'
+import { splitPath } from '../s7/typeLayout'
 import { TiaManifest } from './bundle'
 
 export interface TiaImportFile {
@@ -20,14 +21,19 @@ export interface TiaImportResult {
   warnings: string[]
 }
 
+function safeCodePoint(code: number): string {
+  if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return ''
+  return String.fromCodePoint(code)
+}
+
 export function unescapeXml(text: string): string {
   return text
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_, code) => safeCodePoint(parseInt(code, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => safeCodePoint(parseInt(code, 16)))
     .replace(/&amp;/g, '&')
 }
 
@@ -40,6 +46,12 @@ function element(xml: string, name: string): string | undefined {
 export function readTagTableXml(xml: string, fileName: string): TagTable | null {
   const tableStart = xml.indexOf('<SW.Tags.PlcTagTable')
   if (tableStart < 0) return null
+
+  const tableSection = xml.slice(tableStart)
+  const objectListIdx = tableSection.indexOf('<ObjectList')
+  const headerSlice = objectListIdx >= 0 ? tableSection.slice(0, objectListIdx) : tableSection
+  const tableAttrMatch = headerSlice.match(/<AttributeList\b[^>]*>([\s\S]*?)<\/AttributeList>/)
+  const tableName = (tableAttrMatch ? element(tableAttrMatch[1], 'Name') : undefined) || fileName.replace(/\.xml$/i, '')
 
   const tagPattern = /<SW\.Tags\.PlcTag\b[\s\S]*?<\/SW\.Tags\.PlcTag>/g
   const tags: TagDefinition[] = []
@@ -57,17 +69,28 @@ export function readTagTableXml(xml: string, fileName: string): TagTable | null 
     })
   }
 
-  const tableName = element(xml.slice(tableStart), 'Name') || fileName.replace(/\.xml$/i, '')
   return { id: `table_${tableName}`, name: tableName, fileName: `${tableName}.tags.json`, tags }
 }
 
-/** Start values written after BEGIN in a DB source: Member := value; */
+function findNestedVariable(vars: BlockVariable[], segments: string[]): BlockVariable | undefined {
+  let list: BlockVariable[] | undefined = vars
+  let current: BlockVariable | undefined
+  for (const seg of segments) {
+    const clean = seg.replace(/^"|"$/g, '').trim()
+    current = list?.find((v) => v.name.toLowerCase() === clean.toLowerCase())
+    if (!current) return undefined
+    list = current.members
+  }
+  return current
+}
+
+/** Start values written after BEGIN in a DB source: Member := value; or Cfg.Limit := 5.0; */
 function applyDbStartValues(parsed: ParsedSourceBlock, warnings: string[]): void {
   for (const raw of parsed.body.split('\n')) {
     const line = raw.trim()
     if (!line || line.startsWith('//')) continue
-    const match = line.match(/^"?([A-Za-z_]\w*)"?\s*:=\s*(.+?)\s*;\s*$/)
-    const variable = match && parsed.interface.static.find((v) => v.name.toLowerCase() === match[1].toLowerCase())
+    const match = line.match(/^((?:"[^"]+"|[A-Za-z_]\w*)(?:\.(?:"[^"]+"|[A-Za-z_]\w*))*)\s*:=\s*(.+?)\s*;\s*$/)
+    const variable = match ? findNestedVariable(parsed.interface.static, splitPath(match[1])) : undefined
     if (match && variable) variable.defaultValue = match[2]
     else warnings.push(`${parsed.name}: start value '${line}' was not imported.`)
   }

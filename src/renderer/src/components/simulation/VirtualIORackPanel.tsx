@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   Cpu,
   Flame,
@@ -9,7 +10,8 @@ import {
   Gauge,
   Waves,
   Save,
-  CheckCircle2
+  CheckCircle2,
+  AlertTriangle
 } from 'lucide-react'
 import { useRuntimeStore } from '../../stores/useRuntimeStore'
 import { useSimulationStore } from '../../stores/useSimulationStore'
@@ -17,7 +19,8 @@ import { useTagStore } from '../../stores/useTagStore'
 import { TraceOscilloscope } from './TraceOscilloscope'
 
 export const VirtualIORackPanel: React.FC = () => {
-  const { currentSnapshot, forceOverrides } = useRuntimeStore()
+  const currentSnapshot = useRuntimeStore((s) => s.currentSnapshot)
+  const forceOverrides = useRuntimeStore((s) => s.forceOverrides)
   const {
     activeSubTab,
     setActiveSubTab,
@@ -28,6 +31,7 @@ export const VirtualIORackPanel: React.FC = () => {
     faults,
     metrics,
     scenarioCode,
+    scenarioError,
     setOutflowValvePct,
     setClosedLoopActive,
     injectFault,
@@ -36,10 +40,39 @@ export const VirtualIORackPanel: React.FC = () => {
     setAnalogInputRaw,
     setScenarioCode,
     applyScenarioScript
-  } = useSimulationStore()
-  const { tagTables } = useTagStore()
+  } = useSimulationStore(
+    useShallow((s) => ({
+      activeSubTab: s.activeSubTab,
+      setActiveSubTab: s.setActiveSubTab,
+      tankLevelRaw: s.tankLevelRaw,
+      reactorTempRaw: s.reactorTempRaw,
+      outflowValvePct: s.outflowValvePct,
+      closedLoopActive: s.closedLoopActive,
+      faults: s.faults,
+      metrics: s.metrics,
+      scenarioCode: s.scenarioCode,
+      scenarioError: s.scenarioError,
+      setOutflowValvePct: s.setOutflowValvePct,
+      setClosedLoopActive: s.setClosedLoopActive,
+      injectFault: s.injectFault,
+      clearFaults: s.clearFaults,
+      setDigitalInput: s.setDigitalInput,
+      setAnalogInputRaw: s.setAnalogInputRaw,
+      setScenarioCode: s.setScenarioCode,
+      applyScenarioScript: s.applyScenarioScript
+    }))
+  )
+  const tagTables = useTagStore((s) => s.tagTables)
 
   const [scriptSavedMessage, setScriptSavedMessage] = useState(false)
+  const scriptBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pressedChannelRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (scriptBannerTimerRef.current) clearTimeout(scriptBannerTimerRef.current)
+    }
+  }, [])
 
   // Map symbols from tag tables
   const findTagForAddress = (address: string): string => {
@@ -52,9 +85,16 @@ export const VirtualIORackPanel: React.FC = () => {
     return ''
   }
 
-  // Handle momentary pushbutton mousedown/mouseup
-  const handleMomentaryPress = (byte: number, bit: number, pressed: boolean) => {
-    setDigitalInput(byte, bit, pressed)
+  // Handle momentary pushbutton mousedown/mouseup (never release on hover-leave if never pressed)
+  const handleMomentaryPress = (byte: number, bit: number, pressed: boolean, fromLeave = false) => {
+    const key = `${byte}.${bit}`
+    if (pressed) {
+      pressedChannelRef.current = key
+      setDigitalInput(byte, bit, true)
+    } else if (!fromLeave || pressedChannelRef.current === key) {
+      if (pressedChannelRef.current === key) pressedChannelRef.current = null
+      setDigitalInput(byte, bit, false)
+    }
   }
 
   // Digital Inputs (%IB0..%IB1 = 16 channels)
@@ -216,7 +256,7 @@ export const VirtualIORackPanel: React.FC = () => {
                       <button
                         onMouseDown={() => handleMomentaryPress(ch.byte, ch.bit, true)}
                         onMouseUp={() => handleMomentaryPress(ch.byte, ch.bit, false)}
-                        onMouseLeave={() => handleMomentaryPress(ch.byte, ch.bit, false)}
+                        onMouseLeave={() => handleMomentaryPress(ch.byte, ch.bit, false, true)}
                         className="w-full py-1 text-[10px] font-semibold rounded-none bg-industrial-850 hover:bg-cyan-900/60 active:bg-cyan-600 active:text-white border border-industrial-750 text-industrial-300 transition-colors"
                       >
                         Hold PB
@@ -683,17 +723,23 @@ export const VirtualIORackPanel: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
-                {scriptSavedMessage && (
-                  <span className="flex items-center gap-1 text-xs text-emerald-400 font-semibold animate-pulse">
+                {scriptSavedMessage && !scenarioError && (
+                  <span data-testid="sim-script-success-badge" className="flex items-center gap-1 text-xs text-emerald-400 font-semibold animate-pulse">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Script Compiled & Hot-Reloaded!</span>
+                    <span>Script Compiled &amp; Hot-Reloaded (Sandboxed)!</span>
                   </span>
                 )}
                 <button
-                  onClick={() => {
-                    applyScenarioScript(scenarioCode)
-                    setScriptSavedMessage(true)
-                    setTimeout(() => setScriptSavedMessage(false), 2500)
+                  data-testid="btn-apply-scenario-script"
+                  onClick={async () => {
+                    const res = await applyScenarioScript(scenarioCode)
+                    if (res.ok) {
+                      setScriptSavedMessage(true)
+                      if (scriptBannerTimerRef.current) clearTimeout(scriptBannerTimerRef.current)
+                      scriptBannerTimerRef.current = setTimeout(() => setScriptSavedMessage(false), 2500)
+                    } else {
+                      setScriptSavedMessage(false)
+                    }
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-none bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs shadow-md transition-all"
                 >
@@ -702,6 +748,16 @@ export const VirtualIORackPanel: React.FC = () => {
                 </button>
               </div>
             </div>
+
+            {scenarioError && (
+              <div
+                data-testid="sim-script-error-banner"
+                className="p-2.5 bg-rose-950/70 border border-rose-600 text-rose-200 text-xs font-mono flex items-center gap-2"
+              >
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span className="break-words">{scenarioError}</span>
+              </div>
+            )}
 
             <textarea
               value={scenarioCode}

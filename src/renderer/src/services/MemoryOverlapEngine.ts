@@ -1,5 +1,6 @@
 import { S7MemoryArea } from '@shared/types/s7types'
 import { parseS7Address, getOccupiedCoordinates, getCategoryForType, formatS7Address } from '@shared/constants/s7rules'
+import { getCpuProfile } from '@shared/constants/cpuProfiles'
 import { TagTable, TagMemoryCollision } from '@shared/types/tags'
 import { CpuConfig } from '@shared/types/hardware'
 import { DiagnosticMessage } from '@shared/types/diagnostics'
@@ -142,17 +143,17 @@ export class MemoryOverlapEngine {
     // 4. Register all User Tags across all Tag Tables (deduplicated by normalized name and address)
     const seenTags = new Set<string>()
     for (const table of tagTables) {
-      for (const tag of table.tags) {
+      for (let tagIdx = 0; tagIdx < table.tags.length; tagIdx++) {
+        const tag = table.tags[tagIdx]
         if (tag.address) {
           const dedupeKey = `${tag.id || ''}::${tag.name.trim().toLowerCase()}::${tag.address.trim().toUpperCase()}`
           if (seenTags.has(dedupeKey)) continue
           seenTags.add(dedupeKey)
 
           const parsed = parseS7Address(tag.address)
-          const validId = tag.id || `tag_${table.id || 'tbl'}_${tag.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_')}_${Math.random().toString(36).substring(2, 7)}`
-          if (!tag.id) {
-            tag.id = validId
-          }
+          const validId =
+            tag.id ||
+            `tag_${table.id || 'tbl'}_${tagIdx}_${tag.name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_')}`
           registerOccupant({
             id: validId,
             name: tag.name,
@@ -308,6 +309,16 @@ export class MemoryOverlapEngine {
   ): string {
     const bitMap = this.buildBitMap(tagTables, cpuConfig)
     const category = getCategoryForType(dataType)
+    const profile = cpuConfig
+      ? getCpuProfile(cpuConfig.general?.profileId || cpuConfig.general?.targetCpu || cpuConfig.general?.cpuName)
+      : undefined
+    const areaLimit = profile
+      ? area === 'I'
+        ? profile.inputBytes
+        : area === 'Q'
+          ? profile.outputBytes
+          : profile.merkerBytes
+      : 65535
 
     const isBitFree = (byte: number, bit: number): boolean => {
       const key = `${area}:${byte}:${bit}`
@@ -320,7 +331,7 @@ export class MemoryOverlapEngine {
     }
 
     if (category === 'BIT') {
-      for (let byte = startFromByte; byte < 65535; byte++) {
+      for (let byte = startFromByte; byte < areaLimit; byte++) {
         for (let bit = 0; bit < 8; bit++) {
           if (isBitFree(byte, bit)) {
             return formatS7Address(area, 'BIT', byte, bit)
@@ -328,7 +339,7 @@ export class MemoryOverlapEngine {
         }
       }
     } else if (category === 'BYTE') {
-      for (let byte = startFromByte; byte < 65535; byte++) {
+      for (let byte = startFromByte; byte < areaLimit; byte++) {
         let allFree = true
         for (let bit = 0; bit < 8; bit++) {
           if (!isBitFree(byte, bit)) {
@@ -344,7 +355,7 @@ export class MemoryOverlapEngine {
       // Must align to even byte boundary
       let start = startFromByte
       if (start % 2 !== 0) start++
-      for (let byte = start; byte < 65535; byte += 2) {
+      for (let byte = start; byte + 1 < areaLimit; byte += 2) {
         let allFree = true
         for (let b = 0; b < 2; b++) {
           for (let bit = 0; bit < 8; bit++) {
@@ -363,7 +374,7 @@ export class MemoryOverlapEngine {
       // Must align to even byte boundary (4 bytes)
       let start = startFromByte
       if (start % 2 !== 0) start++
-      for (let byte = start; byte < 65535; byte += 2) {
+      for (let byte = start; byte + 3 < areaLimit; byte += 2) {
         let allFree = true
         for (let b = 0; b < 4; b++) {
           for (let bit = 0; bit < 8; bit++) {
@@ -412,11 +423,11 @@ export class MemoryOverlapEngine {
           occupiedCount++
           occupantNames.add(occs[0].name)
         } else if (occs.length > 1) {
-          // Exclude HardwareIO <-> Tag symbolic pairing on same address
-          const normalizedKeys = new Set(
-            occs.map((o) => (o.type === 'HardwareIO' ? 'sym_' + o.address : o.name.trim().toLowerCase()))
-          )
-          if (normalizedKeys.size > 1) {
+          // A single user Tag paired with its physical HardwareIO channel is symbolic naming, NOT a collision
+          const nonHw = occs.filter((o) => o.type !== 'HardwareIO')
+          const checkList = nonHw.length > 0 ? nonHw : occs
+          const distinctLogical = new Set(checkList.map((o) => o.id || o.name.trim().toLowerCase()))
+          if (distinctLogical.size > 1) {
             state = 'COLLIDING'
             occupiedCount++
             hasCollision = true
@@ -424,7 +435,7 @@ export class MemoryOverlapEngine {
           } else {
             state = 'OCCUPIED'
             occupiedCount++
-            occupantNames.add(occs[0].name)
+            occupantNames.add((nonHw[0] || occs[0]).name)
           }
         }
 

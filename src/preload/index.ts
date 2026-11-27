@@ -1,9 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { CreateProjectRequest, ElectronApi, FileChangeEventPayload, ProjectLoadPayload } from '../shared/types/ipc'
 
+if (!process.contextIsolated) {
+  throw new Error('Preload requires contextIsolation: true')
+}
+
 const electronApi: ElectronApi = {
   selectProjectDirectory: () => ipcRenderer.invoke('dialog:selectProjectDirectory'),
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory'),
+  getDefaultProjectsRoot: () => ipcRenderer.invoke('dialog:getDefaultProjectsRoot'),
   createProject: (options: CreateProjectRequest) => ipcRenderer.invoke('project:create', options),
   openProject: (projectDir: string) => ipcRenderer.invoke('project:open', projectDir),
   saveProjectFile: (projectDir: string, relativePath: string, content: string) =>
@@ -13,10 +18,11 @@ const electronApi: ElectronApi = {
   saveAll: (payload: ProjectLoadPayload) => ipcRenderer.invoke('project:save', payload),
   exportTiaBundle: (projectName, files) => ipcRenderer.invoke('tia:exportBundle', projectName, files),
   pickTiaImportFolder: () => ipcRenderer.invoke('tia:pickImportFolder'),
-  getSecret: (key: string) => ipcRenderer.invoke('secrets:get', key),
+  getSecretStatus: () => ipcRenderer.invoke('secrets:status'),
   setSecret: (key: string, value: string) => ipcRenderer.invoke('secrets:set', key, value),
   aiHttpRequest: (request) => ipcRenderer.invoke('ai:http', request),
   aiHttpCancel: (id: string) => ipcRenderer.invoke('ai:httpCancel', id),
+  isTestMode: process.env.NODE_ENV === 'test',
   onFileChanged: (callback: (payload: FileChangeEventPayload) => void) => {
     const handler = (_: unknown, payload: FileChangeEventPayload) => callback(payload)
     ipcRenderer.on('project:fileChanged', handler)
@@ -26,13 +32,4 @@ const electronApi: ElectronApi = {
   }
 }
 
-if (process.contextIsolated) {
-  try {
-    contextBridge.exposeInMainWorld('electronApi', electronApi)
-  } catch (error) {
-    console.error('Failed to expose electronApi to renderer:', error)
-  }
-} else {
-  // @ts-ignore
-  window.electronApi = electronApi
-}
+contextBridge.exposeInMainWorld('electronApi', electronApi)

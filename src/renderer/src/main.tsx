@@ -2,12 +2,15 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import './index.css'
+import { ErrorBoundary } from './components/common/ErrorBoundary'
 import { useTagStore } from './stores/useTagStore'
 import { useBlockStore } from './stores/useBlockStore'
 import { useRuntimeStore } from './stores/useRuntimeStore'
 import { useHardwareStore } from './stores/useHardwareStore'
 import { useUIStore } from './stores/useUIStore'
 import { useProjectStore } from './stores/useProjectStore'
+import { useSimulationStore, attachPhysicsToRuntime } from './stores/useSimulationStore'
+import { initProjectCoordinator } from './stores/projectCoordinator'
 import { AiModelRouter } from './services/ai/AiModelRouter'
 import { LadderDslCompiler } from './services/compiler/LadderDslCompiler'
 import { LadderGridLayoutEngine } from './services/layout/LadderGridLayoutEngine'
@@ -18,8 +21,13 @@ import { StlListingGenerator } from './services/compiler/StlListingGenerator'
 import { ProjectCompilerEngine } from './services/compiler/ProjectCompilerEngine'
 import { RagKnowledgeEngine } from './services/ai/RagKnowledgeEngine'
 import { CoilDiagnosticEngine } from './services/ai/CoilDiagnosticEngine'
+import { BlackBoxLogger } from './services/diagnostics/BlackBoxLogger'
 
-if (typeof window !== 'undefined') {
+initProjectCoordinator()
+attachPhysicsToRuntime()
+
+const isDevMode = Boolean((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV)
+if (typeof window !== 'undefined' && (isDevMode || window.electronApi?.isTestMode)) {
   ;(window as unknown as { plcTestContext?: unknown }).plcTestContext = {
     useTagStore,
     useBlockStore,
@@ -27,6 +35,7 @@ if (typeof window !== 'undefined') {
     useHardwareStore,
     useUIStore,
     useProjectStore,
+    useSimulationStore,
     AiModelRouter,
     LadderDslCompiler,
     LadderGridLayoutEngine,
@@ -36,12 +45,15 @@ if (typeof window !== 'undefined') {
     StlListingGenerator,
     ProjectCompilerEngine,
     RagKnowledgeEngine,
-    CoilDiagnosticEngine
+    CoilDiagnosticEngine,
+    BlackBoxLogger: BlackBoxLogger.getInstance()
   }
 }
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary label="Rungline Workbench">
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>
 )

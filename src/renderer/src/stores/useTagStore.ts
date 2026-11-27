@@ -1,9 +1,25 @@
 import { create } from 'zustand'
 import { TagTable, TagDefinition, TagMemoryCollision } from '@shared/types/tags'
 import { DiagnosticMessage } from '@shared/types/diagnostics'
+import { CpuConfig } from '@shared/types/hardware'
+import { getDefaultCpuConfig } from '@shared/constants/hardwareDefaults'
 import { MemoryOverlapEngine } from '../services/MemoryOverlapEngine'
-import { useHardwareStore } from './useHardwareStore'
-import { useCrossRefStore } from './useCrossRefStore'
+import { generateId } from '../utils/id'
+
+interface TagStoreHooks {
+  getCpuConfig?: () => CpuConfig
+  onSelectTagName?: (name: string) => void
+}
+
+const tagStoreHooks: TagStoreHooks = {}
+
+export function registerTagStoreHooks(hooks: TagStoreHooks): void {
+  Object.assign(tagStoreHooks, hooks)
+}
+
+function getCpuConfig(): CpuConfig {
+  return tagStoreHooks.getCpuConfig ? tagStoreHooks.getCpuConfig() : getDefaultCpuConfig()
+}
 
 interface TagStoreState {
   tagTables: TagTable[]
@@ -45,7 +61,7 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
       for (const t of tables) {
         const found = t.tags.find((tag) => tag.id === selectedTagId)
         if (found) {
-          useCrossRefStore.getState().setQuery(found.name)
+          tagStoreHooks.onSelectTagName?.(found.name)
           break
         }
       }
@@ -54,14 +70,14 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
 
   addTag: (tableId, initial) => {
     const { tagTables } = get()
-    const cpuConfig = useHardwareStore.getState().config
+    const cpuConfig = getCpuConfig()
 
     const area = (initial?.address?.startsWith('%I') ? 'I' : initial?.address?.startsWith('%Q') ? 'Q' : 'M') as 'I' | 'Q' | 'M'
     const dataType = initial?.dataType || 'BOOL'
     const safeAddr = initial?.address || MemoryOverlapEngine.findNextSafeAddress(area, dataType, tagTables, cpuConfig)
 
     const newTag: TagDefinition = {
-      id: `tag_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: generateId('tag'),
       name: initial?.name || `Tag_${Math.floor(Math.random() * 900 + 100)}`,
       dataType,
       address: safeAddr,
@@ -92,7 +108,6 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
 
     set({ tagTables: updatedTables })
     get().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
     return newTag
   },
 
@@ -110,7 +125,6 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
 
     set({ tagTables: updatedTables })
     get().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   deleteTag: (tableId, tagId) => {
@@ -127,13 +141,12 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
 
     set({ tagTables: updatedTables })
     get().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   createTagTable: (name) => {
     const cleanName = name.replace(/\.tags\.json$/i, '')
     const newTable: TagTable = {
-      id: `table_${Date.now()}`,
+      id: generateId('table'),
       name: cleanName,
       fileName: `${cleanName}.tags.json`,
       tags: []
@@ -157,12 +170,11 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
   deleteTagTable: (tableId) => {
     set((state) => ({ tagTables: state.tagTables.filter((t) => t.id !== tableId) }))
     get().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   autoAssignSafeAddress: (tagId) => {
     const { tagTables } = get()
-    const cpuConfig = useHardwareStore.getState().config
+    const cpuConfig = getCpuConfig()
 
     // Find the tag by id or by name (in case a name was passed)
     let targetTableId: string | null = null
@@ -193,7 +205,7 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
 
   resolveAllOverlaps: () => {
     const { tagTables, collisions } = get()
-    const cpuConfig = useHardwareStore.getState().config
+    const cpuConfig = getCpuConfig()
 
     if (collisions.size === 0) return
 
@@ -243,12 +255,11 @@ export const useTagStore = create<TagStoreState>((set, get) => ({
 
     set({ tagTables: currentTables })
     get().recalculateCollisions()
-    useCrossRefStore.getState().reindex()
   },
 
   recalculateCollisions: () => {
     const { tagTables } = get()
-    const cpuConfig = useHardwareStore.getState().config
+    const cpuConfig = getCpuConfig()
     const analysis = MemoryOverlapEngine.analyzeCollisions(tagTables, cpuConfig)
 
     set({

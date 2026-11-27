@@ -58,7 +58,7 @@ const INSTRUCTION_CATEGORIES: InstructionCategory[] = [
       { id: 'timer_tp', name: 'TP', title: 'Generate Pulse Timer', description: 'Generates output pulse of preset duration', kind: 'timer', subType: 'TP' },
       { id: 'timer_ton', name: 'TON', title: 'Generate On-Delay Timer', description: 'Delays setting output by preset time', kind: 'timer', subType: 'TON' },
       { id: 'timer_tof', name: 'TOF', title: 'Generate Off-Delay Timer', description: 'Delays resetting output by preset time', kind: 'timer', subType: 'TOF' },
-      { id: 'timer_tonr', name: 'TONR', title: 'Time Accumulator / Retentive Timer', description: 'Accumulates time over multiple runs', kind: 'timer', subType: 'TON' },
+      { id: 'timer_tonr', name: 'TONR', title: 'Time Accumulator / Retentive Timer', description: 'Accumulates time over multiple runs', kind: 'timer', subType: 'TONR' },
       { id: 'timer_rt', name: 'RT', title: 'Reset Timer', description: 'Resets timer elapsed time to 0', kind: 'emptyBox', subType: 'RT' }
     ]
   },
@@ -69,7 +69,7 @@ const INSTRUCTION_CATEGORIES: InstructionCategory[] = [
     instructions: [
       { id: 'counter_ctu', name: 'CTU', title: 'Count Up', description: 'Increments counter on rising edge', kind: 'counter', subType: 'CTU' },
       { id: 'counter_ctd', name: 'CTD', title: 'Count Down', description: 'Decrements counter on rising edge', kind: 'counter', subType: 'CTD' },
-      { id: 'counter_ctud', name: 'CTUD', title: 'Count Up and Down', description: 'Bidirectional pulse counter', kind: 'counter', subType: 'CTU' }
+      { id: 'counter_ctud', name: 'CTUD', title: 'Count Up and Down', description: 'Bidirectional pulse counter', kind: 'counter', subType: 'CTUD' }
     ]
   },
   {

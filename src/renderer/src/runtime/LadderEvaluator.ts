@@ -99,9 +99,13 @@ export class LadderEvaluator {
 
   private static writeOperand(op: string, value: unknown, context: SclExecutionContext): void {
     const raw = op.trim()
-    // An output pin holding a literal or just its own name is not connected to anything
-    if (/^(LTIME|TIME|LT|T)#/i.test(raw) || /^(Q|ET|QU|QD|CV)$/i.test(raw)) return
-    context.setVar(raw.replace(/"/g, ''), value, raw.startsWith('"'))
+    const clean = raw.replace(/"/g, '')
+    const quoted = raw.startsWith('"')
+    // An output pin holding a literal or just its own unconnected pin name is ignored,
+    // unless the current block actually declares a local/output symbol with that name.
+    if (/^(LTIME|TIME|LT|T)#/i.test(raw)) return
+    if (/^(Q|ET|QU|QD|CV)$/i.test(clean) && !context.hasSymbol?.(clean, quoted)) return
+    context.setVar(clean, value, quoted)
   }
 
   private static instanceKey(raw: string, context: SclExecutionContext): string {
@@ -303,12 +307,15 @@ export class LadderEvaluator {
         const ptVal = parseTimePresetMs(ptRaw, context)
 
         const mem = memory || this.fallbackMemory
+        const resetIn = t.rOperand ? !!this.readOperand(t.rOperand, context) : false
         const s7t: S7TimerState =
           t.timerType === 'TON'
             ? mem.updateTonTimer(instName, incomingPower, ptVal, currentTimeMs)
             : t.timerType === 'TOF'
               ? mem.updateTofTimer(instName, incomingPower, ptVal, currentTimeMs)
-              : mem.updateTpTimer(instName, incomingPower, ptVal, currentTimeMs)
+              : t.timerType === 'TONR'
+                ? mem.updateTonrTimer(instName, incomingPower, resetIn, ptVal, currentTimeMs)
+                : mem.updateTpTimer(instName, incomingPower, ptVal, currentTimeMs)
         const q = s7t.Q
         const etMs = Math.round(s7t.ET)
         const ptMs = Math.round(ptVal)
@@ -346,20 +353,27 @@ export class LadderEvaluator {
         const parsedPv = rawPv === undefined || rawPv === '' ? NaN : Number(rawPv)
         const pv = Number.isFinite(parsedPv) ? parsedPv : 10
         const isReset = !!this.readOperand(c.rLdOperand, context)
-        const isLoad = c.ldOperand ? !!this.readOperand(c.ldOperand, context) : false
-        const cuRlo = c.cuOperand ? incomingPower && !!this.readOperand(c.cuOperand, context) : incomingPower
-        const cdRlo = c.cdOperand
-          ? !!this.readOperand(c.cdOperand, context)
+        const isLoad = c.ldOperand
+          ? !!this.readOperand(c.ldOperand, context)
           : c.counterType === 'CTD'
-            ? incomingPower
+            ? isReset
             : false
+        const cuRlo = c.cuOperand ? incomingPower && !!this.readOperand(c.cuOperand, context) : incomingPower
+        const cdRlo =
+          c.counterType === 'CTD'
+            ? c.cdOperand
+              ? incomingPower && !!this.readOperand(c.cdOperand, context)
+              : incomingPower
+            : c.cdOperand
+              ? !!this.readOperand(c.cdOperand, context)
+              : false
 
         const mem = memory || this.fallbackMemory
         const s7c =
           c.counterType === 'CTUD'
             ? mem.updateCtudCounter(instName, cuRlo, cdRlo, isReset, isLoad, pv)
             : c.counterType === 'CTD'
-              ? mem.updateCtdCounter(instName, cdRlo, isReset, pv)
+              ? mem.updateCtdCounter(instName, cdRlo, isLoad, pv)
               : mem.updateCtuCounter(instName, cuRlo, isReset, pv)
         const { QU: qu, QD: qd, CV: cv } = s7c
         const q = c.counterType === 'CTD' ? qd : qu
@@ -372,6 +386,8 @@ export class LadderEvaluator {
           context.setVar(`${instName}.PV`, pv)
         }
         if (c.qOperand) this.writeOperand(c.qOperand, q, context)
+        if (c.quOperand) this.writeOperand(c.quOperand, qu, context)
+        if (c.qdOperand) this.writeOperand(c.qdOperand, qd, context)
         if (c.cvOperand) this.writeOperand(c.cvOperand, cv, context)
 
         results[c.id] = {

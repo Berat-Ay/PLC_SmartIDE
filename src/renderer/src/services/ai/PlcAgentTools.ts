@@ -21,6 +21,10 @@ import {
 import { UdtDefinition, UdtMember } from '@shared/types/types'
 import { TagDefinition } from '@shared/types/tags'
 import { effectiveInterface, emptyInterface, parseSourceBlock } from '@shared/scl/sourceBlock'
+import { normalizeS7Address } from '@shared/utils/s7AddressNormalizer'
+import { generateId } from '../../utils/id'
+import { makeTabId } from '../../utils/tabIds'
+import { READ_ONLY_TOOLS } from './AgentInstruction'
 import { CIRCUIT_PATTERNS, findPattern } from './PatternLibrary'
 
 export interface AgentToolCall {
@@ -136,12 +140,13 @@ export class PlcAgentTools {
   }
 
   public restoreSnapshot(snapshot: ProjectSnapshot): void {
-    useTagStore.getState().setTagTables(snapshot.tags)
+    const cloned = structuredClone(snapshot)
+    useTagStore.getState().setTagTables(cloned.tags)
     useBlockStore.setState({
-      udts: snapshot.udts,
-      dataBlocks: snapshot.dataBlocks,
-      ladBlocks: snapshot.ladBlocks,
-      sclBlocks: snapshot.sclBlocks
+      udts: cloned.udts,
+      dataBlocks: cloned.dataBlocks,
+      ladBlocks: cloned.ladBlocks,
+      sclBlocks: cloned.sclBlocks
     })
   }
 
@@ -193,20 +198,36 @@ export class PlcAgentTools {
   }
 
   /**
-   * Revert to the last captured snapshot
+   * Revert to the last captured snapshot (cloning state, recalculating tag collisions, and syncing snapshot files to disk)
    */
   public revertLastTurn(): AgentToolResult {
     if (!this.lastSnapshot) {
       return { tool: 'revert_last_turn', success: false, message: 'No snapshot available to revert.' }
     }
 
-    useTagStore.setState({ tagTables: this.lastSnapshot.tags })
+    const snap = structuredClone(this.lastSnapshot)
+    useTagStore.getState().setTagTables(snap.tags)
     useBlockStore.setState({
-      udts: this.lastSnapshot.udts,
-      dataBlocks: this.lastSnapshot.dataBlocks,
-      ladBlocks: this.lastSnapshot.ladBlocks,
-      sclBlocks: this.lastSnapshot.sclBlocks
+      udts: snap.udts,
+      dataBlocks: snap.dataBlocks,
+      ladBlocks: snap.ladBlocks,
+      sclBlocks: snap.sclBlocks
     })
+    for (const t of snap.tags) {
+      this.syncFileToDisk(`/tags/${t.fileName || `${t.id}.tags.json`}`, JSON.stringify(t, null, 2))
+    }
+    for (const u of snap.udts) {
+      this.syncFileToDisk(`/types/${u.fileName}`, JSON.stringify(u, null, 2))
+    }
+    for (const d of snap.dataBlocks) {
+      this.syncFileToDisk(`/blocks/${d.fileName}`, JSON.stringify(d, null, 2))
+    }
+    for (const l of snap.ladBlocks) {
+      this.syncFileToDisk(`/blocks/${l.fileName}`, JSON.stringify(l, null, 2))
+    }
+    for (const s of snap.sclBlocks) {
+      this.syncFileToDisk(`/blocks/${s.fileName}`, s.code)
+    }
     this.lastSnapshot = null
 
     return { tool: 'revert_last_turn', success: true, message: 'Project state reverted to previous turn snapshot.' }
@@ -217,9 +238,13 @@ export class PlcAgentTools {
    */
   public async executeToolBatch(
     calls: AgentToolCall[],
-    mode: 'auto-apply' | 'diff-view'
+    mode: 'auto-apply' | 'diff-view',
+    options: { skipSnapshot?: boolean } = {}
   ): Promise<ToolBatchExecutionResult> {
-    this.captureSnapshot()
+    const hasMutatingCall = calls.some((c) => !READ_ONLY_TOOLS.has(c.tool))
+    if (mode === 'auto-apply' && !options.skipSnapshot && hasMutatingCall) {
+      this.captureSnapshot()
+    }
     const results: AgentToolResult[] = []
     const stagedChangeset: StagedFileChange[] = []
 
@@ -251,26 +276,85 @@ export class PlcAgentTools {
    */
   public applyStagedChangeset(changeset: StagedFileChange[]): ToolBatchExecutionResult {
     this.captureSnapshot()
-    const blockStore = useBlockStore.getState()
     const uiStore = useUIStore.getState()
+    const results: AgentToolResult[] = []
+    let appliedCount = 0
 
     for (const change of changeset) {
+      const blockStore = useBlockStore.getState()
+      const tagStore = useTagStore.getState()
       try {
+        if (change.fileType === 'scl') {
+          let sclObj: Partial<SclBlockDefinition> | null = null
+          try {
+            const maybe = JSON.parse(change.afterContent)
+            if (maybe && typeof maybe === 'object' && typeof maybe.code === 'string') {
+              sclObj = maybe as Partial<SclBlockDefinition>
+            }
+          } catch {
+            // Raw SCL source text
+          }
+          if (sclObj?.fileName && sclObj.name) {
+            const exists = blockStore.sclBlocks.some((s) => s.fileName === sclObj!.fileName)
+            if (exists) blockStore.updateSclBlock(sclObj.fileName, sclObj)
+            else blockStore.addSclBlock(sclObj as SclBlockDefinition)
+            this.syncFileToDisk(change.path, sclObj.code || change.afterContent)
+            uiStore.openTab({
+              id: makeTabId('scl', sclObj.fileName),
+              title: sclObj.name,
+              type: 'scl',
+              targetId: sclObj.fileName
+            })
+          } else {
+            const fileName = change.path.replace(/^\/?blocks\//, '')
+            const name = change.title.replace(/^SCL:\s*/, '')
+            const current = blockStore.sclBlocks.find((b) => b.fileName === fileName || b.name === name)
+            if (current) {
+              blockStore.updateSclBlock(current.fileName, { code: change.afterContent })
+            } else {
+              const parsedSrc = parseSourceBlock(change.afterContent)
+              const kind = parsedSrc.kind === 'FB' ? 'FB' : 'FC'
+              const added: SclBlockDefinition = {
+                name,
+                fileName,
+                blockType: kind,
+                blockNumber: this.nextBlockNumber(kind),
+                optimizedAccess: parsedSrc.optimizedAccess ?? true,
+                interface: emptyInterface(),
+                code: change.afterContent
+              }
+              added.interface = effectiveInterface(added)
+              blockStore.addSclBlock(added)
+            }
+            this.syncFileToDisk(change.path, change.afterContent)
+            uiStore.openTab({
+              id: makeTabId('scl', fileName),
+              title: name,
+              type: 'scl',
+              targetId: fileName
+            })
+          }
+          appliedCount++
+          continue
+        }
+
         const parsed = JSON.parse(change.afterContent)
         if (change.fileType === 'udt') {
           const exists = blockStore.udts.some((u) => u.id === parsed.id || u.name === parsed.name)
           if (exists) {
-            blockStore.updateUdt(parsed.id, parsed)
+            const existing = blockStore.udts.find((u) => u.id === parsed.id || u.name === parsed.name)!
+            blockStore.updateUdt(existing.id, { ...parsed, id: existing.id })
           } else {
             blockStore.addUdt(parsed)
           }
           this.syncFileToDisk(change.path, change.afterContent)
           uiStore.openTab({
-            id: `udt_${parsed.id}`,
+            id: makeTabId('udt', parsed.id),
             title: parsed.name,
             type: 'udt',
             targetId: parsed.id
           })
+          appliedCount++
         } else if (change.fileType === 'db') {
           const exists = blockStore.dataBlocks.some((d) => d.fileName === parsed.fileName)
           if (exists) {
@@ -280,79 +364,72 @@ export class PlcAgentTools {
           }
           this.syncFileToDisk(change.path, change.afterContent)
           uiStore.openTab({
-            id: `db_${parsed.fileName}`,
+            id: makeTabId('db', parsed.fileName),
             title: parsed.name,
             type: 'db',
             targetId: parsed.fileName
           })
+          appliedCount++
         } else if (change.fileType === 'lad') {
-          blockStore.updateLadBlock(parsed.fileName, parsed)
+          const exists = blockStore.ladBlocks.some((l) => l.fileName === parsed.fileName)
+          if (exists) {
+            blockStore.updateLadBlock(parsed.fileName, parsed)
+          } else {
+            blockStore.addLadBlock(parsed)
+          }
           this.syncFileToDisk(change.path, change.afterContent)
           uiStore.openTab({
-            id: `lad_${parsed.fileName}`,
+            id: makeTabId('lad', parsed.fileName),
             title: parsed.name,
             type: 'lad',
             targetId: parsed.fileName
           })
-        } else if (change.fileType === 'scl') {
-          const exists = blockStore.sclBlocks.some((s) => s.fileName === parsed.fileName)
-          if (exists) {
-            blockStore.updateSclBlock(parsed.fileName, parsed)
-          } else {
-            blockStore.addSclBlock(parsed)
-          }
-          this.syncFileToDisk(change.path, change.afterContent)
-          uiStore.openTab({
-            id: `scl_${parsed.fileName}`,
-            title: parsed.name,
-            type: 'scl',
-            targetId: parsed.fileName
-          })
+          appliedCount++
         } else if (change.fileType === 'tag') {
-          const tagStore = useTagStore.getState()
           if (Array.isArray(parsed)) {
             tagStore.setTagTables(parsed)
-          } else if (parsed.id && parsed.tags) {
-            tagStore.setTagTables(tagStore.tagTables.map((t) => (t.id === parsed.id ? parsed : t)))
-          }
-          this.syncFileToDisk(change.path, change.afterContent)
-        }
-      } catch {
-        // Raw SCL text or non-json
-        if (change.fileType === 'scl') {
-          const fileName = change.path.replace(/^\/blocks\//, '')
-          const name = change.title.replace(/^SCL:\s*/, '')
-          const current = blockStore.sclBlocks.find((b) => b.fileName === fileName || b.name === name)
-          if (current) {
-            blockStore.updateSclBlock(current.fileName, { code: change.afterContent })
+          } else if (parsed.id && Array.isArray(parsed.tags)) {
+            const exists = tagStore.tagTables.some((t) => t.id === parsed.id)
+            tagStore.setTagTables(
+              exists ? tagStore.tagTables.map((t) => (t.id === parsed.id ? parsed : t)) : [...tagStore.tagTables, parsed]
+            )
           } else {
-            const kind = parseSourceBlock(change.afterContent).kind === 'FB' ? 'FB' : 'FC'
-            const added: SclBlockDefinition = {
-              name,
-              fileName,
-              blockType: kind,
-              blockNumber: this.nextBlockNumber(kind),
-              optimizedAccess: true,
-              interface: emptyInterface(),
-              code: change.afterContent
-            }
-            added.interface = effectiveInterface(added)
-            blockStore.addSclBlock(added)
+            results.push({
+              tool: 'apply_staged_changeset',
+              success: false,
+              message: `Invalid staged tag payload for ${change.path}.`
+            })
+            continue
           }
           this.syncFileToDisk(change.path, change.afterContent)
-          uiStore.openTab({
-            id: `scl_${fileName}`,
-            title: name,
-            type: 'scl',
-            targetId: fileName
+          appliedCount++
+        } else {
+          results.push({
+            tool: 'apply_staged_changeset',
+            success: false,
+            message: `Unsupported staged fileType '${change.fileType}' for ${change.path}.`
           })
         }
+      } catch (err: unknown) {
+        results.push({
+          tool: 'apply_staged_changeset',
+          success: false,
+          message: `Failed to apply staged change '${change.path}': ${err instanceof Error ? err.message : String(err)}`
+        })
       }
     }
 
     const compilerReport = this.runCompilerVerification()
+    const hasFailures = results.some((r) => !r.success)
+    if (!hasFailures) {
+      results.push({
+        tool: 'apply_staged_changeset',
+        success: true,
+        message: `Applied ${appliedCount} staged change(s).`
+      })
+    }
     return {
-      results: [{ tool: 'apply_staged_changeset', success: true, message: `Applied ${changeset.length} staged changes.` }],
+      results,
       compilerReport
     }
   }
@@ -466,15 +543,47 @@ export class PlcAgentTools {
 
     if (action === 'resolve_overlaps') {
       if (mode === 'diff-view') {
-        const beforeContent = JSON.stringify(tagStore.tagTables, null, 2)
-        staged.push({
-          path: '/tags/default_tags.tags.json',
-          title: 'Resolve S7 Memory Overlaps',
-          fileType: 'tag',
-          beforeContent,
-          afterContent: beforeContent.replace(/%MW10/g, '%MW14')
-        })
-        return { tool: 'manage_plc_tags', success: true, message: 'Memory overlap resolution staged in Diff-View.' }
+        const cpuConfig = useHardwareStore.getState().config
+        const beforeTables = structuredClone(tagStore.tagTables)
+        const resolvedTables = structuredClone(tagStore.tagTables)
+        const analysis = MemoryOverlapEngine.analyzeCollisions(resolvedTables, cpuConfig)
+        const distinctIds = new Set<string>()
+        for (const col of analysis.collisions.values()) {
+          if (col.tagId) distinctIds.add(col.tagId)
+        }
+        for (const tagId of distinctIds) {
+          for (const table of resolvedTables) {
+            const tag = table.tags.find((t) => t.id === tagId)
+            if (tag) {
+              const area = (tag.address.startsWith('%I') ? 'I' : tag.address.startsWith('%Q') ? 'Q' : 'M') as 'I' | 'Q' | 'M'
+              tag.address = MemoryOverlapEngine.findNextSafeAddress(area, tag.dataType, resolvedTables, cpuConfig, tagId)
+              break
+            }
+          }
+        }
+        let stagedTablesCount = 0
+        for (let i = 0; i < beforeTables.length; i++) {
+          const beforeTbl = beforeTables[i]
+          const afterTbl = resolvedTables[i]
+          if (JSON.stringify(beforeTbl) !== JSON.stringify(afterTbl)) {
+            stagedTablesCount++
+            staged.push({
+              path: `/tags/${beforeTbl.fileName || `${beforeTbl.id}.tags.json`}`,
+              title: `Resolve S7 Memory Overlaps (${beforeTbl.name})`,
+              fileType: 'tag',
+              beforeContent: JSON.stringify(beforeTbl, null, 2),
+              afterContent: JSON.stringify(afterTbl, null, 2)
+            })
+          }
+        }
+        return {
+          tool: 'manage_plc_tags',
+          success: true,
+          message:
+            stagedTablesCount > 0
+              ? `Memory overlap resolution staged for ${stagedTablesCount} tag table(s).`
+              : 'No memory overlaps needed resolution.'
+        }
       }
 
       tagStore.resolveAllOverlaps()
@@ -482,14 +591,42 @@ export class PlcAgentTools {
     }
 
     if (action === 'upsert' || action === 'add' || action === 'update') {
-      const incomingTags: TagDefinition[] = Array.isArray(params.tags)
-        ? (params.tags as TagDefinition[])
+      const rawIncoming: unknown[] = Array.isArray(params.tags)
+        ? params.tags
         : params.tag
-          ? [params.tag as TagDefinition]
+          ? [params.tag]
           : []
 
-      if (incomingTags.length === 0) {
+      if (rawIncoming.length === 0) {
         return { tool: 'manage_plc_tags', success: false, message: 'Missing tags payload.' }
+      }
+
+      const incomingTags: TagDefinition[] = []
+      for (const item of rawIncoming) {
+        if (!item || typeof item !== 'object') {
+          return { tool: 'manage_plc_tags', success: false, message: 'Invalid tag object in tags payload.' }
+        }
+        const rec = item as Partial<TagDefinition>
+        if (typeof rec.name !== 'string' || !rec.name.trim()) {
+          return { tool: 'manage_plc_tags', success: false, message: 'Every tag must have a non-empty string name.' }
+        }
+        const cleanName = rec.name.trim()
+        let normalizedAddress = typeof rec.address === 'string' ? rec.address.trim() : ''
+        if (normalizedAddress) {
+          const norm = normalizeS7Address(normalizedAddress)
+          if (!norm.isValid) {
+            return { tool: 'manage_plc_tags', success: false, message: `Tag '${cleanName}' has invalid S7 address '${rec.address}'.` }
+          }
+          normalizedAddress = norm.address
+        }
+        incomingTags.push({
+          id: typeof rec.id === 'string' && rec.id.trim() ? rec.id.trim() : '',
+          name: cleanName,
+          address: normalizedAddress,
+          dataType: (typeof rec.dataType === 'string' && rec.dataType.trim() ? rec.dataType.trim() : 'BOOL') as TagDefinition['dataType'],
+          comment: typeof rec.comment === 'string' ? rec.comment : '',
+          systemLocked: Boolean(rec.systemLocked)
+        })
       }
 
       const tableId = (params.tableId as string) || tagStore.tagTables[0]?.id
@@ -501,13 +638,26 @@ export class PlcAgentTools {
 
       if (mode === 'diff-view') {
         const before = JSON.stringify(targetTable, null, 2)
-        const updatedTags = [...targetTable.tags]
+        const updatedTags = structuredClone(targetTable.tags)
         for (const t of incomingTags) {
-          const existingIdx = updatedTags.findIndex((item) => item.id === t.id || item.name === t.name)
+          const existingIdx = updatedTags.findIndex(
+            (item) => (t.id && item.id === t.id) || item.name.toLowerCase() === t.name.toLowerCase()
+          )
           if (existingIdx !== -1) {
-            updatedTags[existingIdx] = { ...updatedTags[existingIdx], ...t }
+            const existing = updatedTags[existingIdx]
+            updatedTags[existingIdx] = {
+              ...existing,
+              name: t.name,
+              dataType: t.dataType || existing.dataType,
+              address: t.address || existing.address,
+              comment: t.comment ?? existing.comment
+            }
           } else {
-            updatedTags.push(t)
+            updatedTags.push({
+              ...t,
+              id: t.id || generateId('tag'),
+              systemLocked: Boolean(t.systemLocked)
+            })
           }
         }
         staged.push({
@@ -521,11 +671,21 @@ export class PlcAgentTools {
       }
 
       for (const t of incomingTags) {
-        const existing = targetTable.tags.find((item) => item.id === t.id || item.name === t.name)
+        const currentTable =
+          useTagStore.getState().tagTables.find((table) => table.id === targetTable.id) || targetTable
+        const existing = currentTable.tags.find(
+          (item) => (t.id && item.id === t.id) || item.name.toLowerCase() === t.name.toLowerCase()
+        )
         if (existing) {
-          tagStore.updateTag(targetTable.id, existing.id, t)
+          tagStore.updateTag(currentTable.id, existing.id, {
+            name: t.name,
+            dataType: t.dataType,
+            ...(t.address ? { address: t.address } : {}),
+            ...(t.comment !== undefined ? { comment: t.comment } : {})
+          })
         } else {
-          tagStore.addTag(targetTable.id, t)
+          const { id: _ignored, ...rest } = t
+          tagStore.addTag(currentTable.id, rest)
         }
       }
 
@@ -566,32 +726,43 @@ export class PlcAgentTools {
     mode: 'auto-apply' | 'diff-view',
     staged: StagedFileChange[]
   ): AgentToolResult {
-    const name = params.name as string
-    const fields = (params.fields || params.members) as Array<{ name: string; dataType: string; comment?: string }>
-    if (!name || !fields) {
-      return { tool: 'create_or_update_udt', success: false, message: 'Missing name or fields for UDT.' }
+    const name = typeof params.name === 'string' ? params.name.trim() : ''
+    const rawFields = params.fields ?? params.members
+    if (!name || !Array.isArray(rawFields) || rawFields.length === 0) {
+      return { tool: 'create_or_update_udt', success: false, message: 'Missing name or fields array for UDT.' }
     }
     if (!isPlainBlockName(name)) {
       return { tool: 'create_or_update_udt', success: false, message: `'${name}' is not a valid UDT name.` }
     }
 
-    const members: UdtMember[] = fields.map((f, i) => ({
-      id: `member_${i}`,
-      name: f.name,
-      dataType: f.dataType as UdtMember['dataType'],
-      comment: f.comment
-    }))
+    const members: UdtMember[] = []
+    for (let i = 0; i < rawFields.length; i++) {
+      const f = rawFields[i]
+      if (!f || typeof f !== 'object') {
+        return { tool: 'create_or_update_udt', success: false, message: `Invalid field at index ${i} for UDT '${name}'.` }
+      }
+      const fieldRec = f as { name?: unknown; dataType?: unknown; comment?: unknown }
+      if (typeof fieldRec.name !== 'string' || !fieldRec.name.trim() || typeof fieldRec.dataType !== 'string' || !fieldRec.dataType.trim()) {
+        return { tool: 'create_or_update_udt', success: false, message: `UDT '${name}' field at index ${i} must have non-empty string name and dataType.` }
+      }
+      members.push({
+        id: `member_${i}`,
+        name: fieldRec.name.trim(),
+        dataType: fieldRec.dataType.trim() as UdtMember['dataType'],
+        comment: typeof fieldRec.comment === 'string' ? fieldRec.comment : undefined
+      })
+    }
 
+    const existing = useBlockStore.getState().udts.find((u) => u.name === name)
     const udt: UdtDefinition = {
-      id: `udt_${name.toLowerCase()}`,
+      id: existing?.id || `udt_${name.toLowerCase()}`,
       name,
-      fileName: `${name}.udt.json`,
-      description: (params.description as string) || `UDT generated by Rungline Agent`,
+      fileName: existing?.fileName || `${name}.udt.json`,
+      description: typeof params.description === 'string' && params.description ? params.description : `UDT generated by Rungline Agent`,
       members
     }
 
     if (mode === 'diff-view') {
-      const existing = useBlockStore.getState().udts.find((u) => u.name === name)
       staged.push({
         path: `/types/${udt.fileName}`,
         title: `UDT: ${name}`,
@@ -603,15 +774,14 @@ export class PlcAgentTools {
     }
 
     const blockStore = useBlockStore.getState()
-    const existing = blockStore.udts.find((u) => u.name === name)
     if (existing) {
-      blockStore.updateUdt(existing.id, { ...udt, id: existing.id })
+      blockStore.updateUdt(existing.id, udt)
     } else {
       blockStore.addUdt(udt)
     }
     this.syncFileToDisk(`/types/${udt.fileName}`, JSON.stringify(udt, null, 2))
     useUIStore.getState().openTab({
-      id: `udt_${udt.id}`,
+      id: makeTabId('udt', udt.id),
       title: udt.name,
       type: 'udt',
       targetId: udt.id
@@ -625,26 +795,45 @@ export class PlcAgentTools {
     mode: 'auto-apply' | 'diff-view',
     staged: StagedFileChange[]
   ): AgentToolResult {
-    const name = params.name as string
-    const variablesRaw = (params.variables || []) as Array<{ name: string; dataType: string; initialValue?: string; comment?: string }>
+    const name = typeof params.name === 'string' ? params.name.trim() : ''
+    const variablesRaw = params.variables === undefined ? [] : params.variables
     if (!name) {
       return { tool: 'create_or_update_db', success: false, message: 'Missing name for DB.' }
     }
     if (!isPlainBlockName(name)) {
       return { tool: 'create_or_update_db', success: false, message: `'${name}' is not a valid DB name.` }
     }
+    if (!Array.isArray(variablesRaw)) {
+      return { tool: 'create_or_update_db', success: false, message: `DB '${name}' variables must be an array.` }
+    }
+
+    const variables: BlockVariable[] = []
+    for (let i = 0; i < variablesRaw.length; i++) {
+      const v = variablesRaw[i]
+      if (!v || typeof v !== 'object') {
+        return { tool: 'create_or_update_db', success: false, message: `Invalid variable at index ${i} for DB '${name}'.` }
+      }
+      const varRec = v as { name?: unknown; dataType?: unknown; initialValue?: unknown; defaultValue?: unknown; comment?: unknown }
+      if (typeof varRec.name !== 'string' || !varRec.name.trim() || typeof varRec.dataType !== 'string' || !varRec.dataType.trim()) {
+        return { tool: 'create_or_update_db', success: false, message: `DB '${name}' variable at index ${i} must have non-empty string name and dataType.` }
+      }
+      variables.push({
+        id: `var_${i}`,
+        name: varRec.name.trim(),
+        dataType: varRec.dataType.trim(),
+        defaultValue:
+          typeof varRec.initialValue === 'string'
+            ? varRec.initialValue
+            : typeof varRec.defaultValue === 'string'
+              ? varRec.defaultValue
+              : undefined,
+        retain: false,
+        accessibleFromHMI: true,
+        comment: typeof varRec.comment === 'string' ? varRec.comment : undefined
+      })
+    }
+
     const existingDb = useBlockStore.getState().dataBlocks.find((d) => d.name === name)
-
-    const variables: BlockVariable[] = variablesRaw.map((v, i) => ({
-      id: `var_${i}`,
-      name: v.name,
-      dataType: v.dataType,
-      defaultValue: v.initialValue,
-      retain: false,
-      accessibleFromHMI: true,
-      comment: v.comment
-    }))
-
     const db: DataBlockDefinition = {
       id: existingDb?.id || `db_${name.toLowerCase()}`,
       blockType: 'DB',
@@ -675,7 +864,7 @@ export class PlcAgentTools {
     }
     this.syncFileToDisk(`/blocks/${db.fileName}`, JSON.stringify(db, null, 2))
     useUIStore.getState().openTab({
-      id: `db_${db.fileName}`,
+      id: makeTabId('db', db.fileName),
       title: db.name,
       type: 'db',
       targetId: db.fileName

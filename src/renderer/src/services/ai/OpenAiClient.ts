@@ -1,8 +1,9 @@
 /** Asks an OpenAI-compatible API (OpenAI, or a custom server with /v1/chat/completions), streamed where it allows */
 
 import { aiHttp } from './aiHttp'
+import { abortableSleep, toChatMessages } from './aiClientUtils'
 import { BlackBoxLogger } from '../diagnostics/BlackBoxLogger'
-import { AiConfig, AiTier, GeminiContent } from './aiTypes'
+import { AgentCancelledError, AiConfig, AiTier, GeminiContent } from './aiTypes'
 
 /** The text of a streamed (server-sent events) chat answer, or null when the body is not a stream */
 function readStreamedChat(body: string): { text: string | null; error?: string } {
@@ -13,7 +14,8 @@ function readStreamedChat(body: string): { text: string | null; error?: string }
       : typeof content === 'string'
         ? content
         : ''
-  let text = ''
+  let deltaText = ''
+  let messageText = ''
   for (const line of body.split(/\r?\n/)) {
     const data = line.match(/^\s*data:\s?(.*)$/)?.[1]?.trim()
     if (!data || data === '[DONE]') continue
@@ -23,11 +25,19 @@ function readStreamedChat(body: string): { text: string | null; error?: string }
     } catch {
       continue
     }
-    if (chunk.error) return { text, error: typeof chunk.error === 'string' ? chunk.error : chunk.error.message || 'unknown error' }
+    if (chunk.error) {
+      return {
+        text: deltaText || messageText,
+        error: typeof chunk.error === 'string' ? chunk.error : chunk.error.message || 'unknown error'
+      }
+    }
     const choice = chunk.choices?.[0]
-    text += partText(choice?.delta?.content) + partText(choice?.message?.content)
+    const d = partText(choice?.delta?.content)
+    const m = partText(choice?.message?.content)
+    if (d) deltaText += d
+    if (m) messageText += m
   }
-  return { text }
+  return { text: deltaText || messageText }
 }
 
 /** The API's base URL, ending before /chat/completions */
@@ -63,6 +73,8 @@ export interface OpenAiRequestOptions {
   /** Endpoint + model pairs that accept JSON mode but never answer in it. Each costs one timeout */
   noJsonMode: Set<string>
   timeoutMs: number
+  /** True when the API key is stored in main-process encrypted storage and should be injected by main aiHttp */
+  useStoredSecret?: boolean
 }
 
 /**
@@ -70,7 +82,7 @@ export interface OpenAiRequestOptions {
  * at once when no model is set.
  */
 export function createOpenAiRequester(options: OpenAiRequestOptions): (contents: GeminiContent[]) => Promise<string> {
-  const { prompt, tier, mode, signal, config, noJsonMode, timeoutMs } = options
+  const { prompt, tier, mode, signal, config, noJsonMode, timeoutMs, useStoredSecret } = options
   const systemInstructionText = options.systemInstruction
   const base = openAiBaseUrl(config)
   const isOpenAi = /api\.openai\.com/i.test(base)
@@ -79,6 +91,7 @@ export function createOpenAiRequester(options: OpenAiRequestOptions): (contents:
     throw new Error('No model is set for this API. Fetch the models or type a model name in the AI settings.')
   }
   const key = (config.openaiApiKey || '').trim()
+  const authSecret = !key && useStoredSecret ? ('openaiApiKey' as const) : undefined
   BlackBoxLogger.getInstance().log('AI_REQUEST', `OpenAI-compatible API request (${model})`, { prompt, model, endpoint: base, tier, mode })
 
   // Not every server knows response_format. One that refuses it is asked without it from then on
@@ -98,15 +111,16 @@ export function createOpenAiRequester(options: OpenAiRequestOptions): (contents:
   // Reasoning models (OpenAI o-series, GPT-5) accept only their default temperature
   let sendTemperature = true
   const requestModel = async (contents: GeminiContent[]): Promise<string> => {
+    if (signal?.aborted) throw new AgentCancelledError()
     const startMs = Date.now()
-    const messages = [
-      { role: 'system', content: systemInstructionText },
-      ...contents.map((c) => ({ role: c.role === 'model' ? 'assistant' : 'user', content: c.parts.map((p) => p.text).join('\n') }))
-    ]
+    const messages = toChatMessages(systemInstructionText, contents)
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (key) headers.Authorization = `Bearer ${key}`
+
     const send = () =>
       aiHttp(`${base}/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        headers,
         body: JSON.stringify({
           model,
           messages,
@@ -115,7 +129,9 @@ export function createOpenAiRequester(options: OpenAiRequestOptions): (contents:
           ...(streamMode ? { stream: true } : {})
         }),
         timeoutMs: timeoutMs,
-        signal
+        signal,
+        authSecret,
+        allowPrivateNetwork: config.allowPrivateNetwork
       })
 
     let res = await send()
@@ -145,10 +161,11 @@ export function createOpenAiRequester(options: OpenAiRequestOptions): (contents:
       BlackBoxLogger.getInstance().log('AI_FALLBACK_OR_RETRY', `${model} returned HTTP ${res.status}. Trying again in 2 s`, {
         errorBody: res.body.slice(0, 2000)
       })
-      await new Promise((resolve) => setTimeout(resolve, 2000))
-      if (!signal?.aborted) res = await send()
+      const slept = await abortableSleep(2000, signal)
+      if (!slept) throw new AgentCancelledError()
+      res = await send()
     }
-    if (res.error === 'cancelled' || signal?.aborted) throw new Error('Synthesis cancelled by user.')
+    if (res.error === 'cancelled' || signal?.aborted) throw new AgentCancelledError()
     if (res.error === 'timeout' && jsonMode) {
       dropJsonMode(`did not answer in ${timeoutMs / 1000} s`)
       return requestModel(contents)

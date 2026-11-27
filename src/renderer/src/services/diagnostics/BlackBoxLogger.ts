@@ -1,6 +1,6 @@
 /**
  * Black-Box Flight Recorder & Diagnostic Telemetry Logger
- * 
+ *
  * Captures high-frequency diagnostic events across AI orchestration,
  * LLM raw responses, AST compilation, tag synchronization, and softPLC runtime.
  * Provides 1-click comprehensive markdown diagnostic export for troubleshooting.
@@ -28,8 +28,57 @@ export interface BlackBoxLogEntry {
   details?: any
 }
 
+export interface DiagnosticStoreReaders {
+  getOb1: () => unknown
+  getTagTables: () => unknown
+  getRuntimeSummary: () => unknown
+}
+
+const SENSITIVE_KEY_NAMES = new Set([
+  'apikey',
+  'geminiapikey',
+  'openaiapikey',
+  'authorization',
+  'x-goog-api-key',
+  'token',
+  'secret',
+  'password'
+])
+
+function maskSecretString(raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed.length <= 4) return '***'
+  return `...${trimmed.slice(-4)}`
+}
+
+function sanitizeString(input: string): string {
+  return input
+    .replace(/key=([a-zA-Z0-9_-]{10,})/g, (_m, key: string) => `key=...${key.slice(-4)}`)
+    .replace(/(Bearer\s+)([a-zA-Z0-9._-]{8,})/gi, (_m, prefix: string, token: string) => `${prefix}${maskSecretString(token)}`)
+    .replace(/\b(sk-[a-zA-Z0-9_-]{12,})\b/g, (token: string) => maskSecretString(token))
+    .replace(/\b(AIza[a-zA-Z0-9_-]{12,})\b/g, (token: string) => maskSecretString(token))
+}
+
+function sanitizeValue(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined || depth > 8) return value
+  if (typeof value === 'string') return sanitizeString(value)
+  if (typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, depth + 1))
+
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_NAMES.has(k.toLowerCase()) && typeof v === 'string' && v.trim()) {
+      out[k] = maskSecretString(v)
+    } else {
+      out[k] = sanitizeValue(v, depth + 1)
+    }
+  }
+  return out
+}
+
 export class BlackBoxLogger {
   private static instance: BlackBoxLogger | null = null
+  private static storeReaders: DiagnosticStoreReaders | null = null
   private logs: BlackBoxLogEntry[] = []
   private maxEntries: number = 500
   private startTime: number = Date.now()
@@ -43,12 +92,10 @@ export class BlackBoxLogger {
 
   private constructor() {
     this.startTime = Date.now()
-    if (typeof window !== 'undefined') {
-      ;(window as any).BlackBoxLogger = this
-      if ((window as any).plcTestContext) {
-        ;(window as any).plcTestContext.BlackBoxLogger = this
-      }
-    }
+  }
+
+  public static registerStoreReaders(readers: DiagnosticStoreReaders): void {
+    BlackBoxLogger.storeReaders = readers
   }
 
   public static getInstance(): BlackBoxLogger {
@@ -67,7 +114,7 @@ export class BlackBoxLogger {
       timestamp: new Date().toISOString(),
       elapsedMs: Date.now() - this.startTime,
       category,
-      summary,
+      summary: sanitizeString(summary),
       details: details !== undefined ? this.sanitizeDetails(details) : undefined
     }
 
@@ -128,33 +175,15 @@ export class BlackBoxLogger {
   }
 
   /**
-   * Sanitizes sensitive information (e.g. API keys) before storing
+   * Sanitizes sensitive information (e.g. API keys, Bearer tokens) before storing
    */
   private sanitizeDetails(details: any): any {
     if (!details) return details
     try {
-      if (typeof details === 'string') {
-        return details.replace(/key=([a-zA-Z0-9_-]{10,})/g, (_m, key) => {
-          return `key=...${key.slice(-4)}`
-        })
-      }
-      if (typeof details === 'object') {
-        const copy = JSON.parse(JSON.stringify(details))
-        if (copy.apiKey) {
-          copy.apiKey = `...${String(copy.apiKey).slice(-4)}`
-        }
-        if (copy.geminiApiKey) {
-          copy.geminiApiKey = `...${String(copy.geminiApiKey).slice(-4)}`
-        }
-        if (copy.url && typeof copy.url === 'string') {
-          copy.url = copy.url.replace(/key=([a-zA-Z0-9_-]{10,})/g, (_m: string, key: string) => `key=...${key.slice(-4)}`)
-        }
-        return copy
-      }
+      return sanitizeValue(details)
     } catch {
-      // Fallback
+      return details
     }
-    return details
   }
 
   /**
@@ -164,12 +193,28 @@ export class BlackBoxLogger {
     const nowIso = new Date().toISOString()
     const last50 = this.logs.slice(-50).reverse()
 
-    // Retrieve active stores if in browser environment
     let activeOb1Json = 'N/A'
     let activeTagsJson = 'N/A'
     let runtimeStateJson = 'N/A'
 
-    if (typeof window !== 'undefined') {
+    const readers = BlackBoxLogger.storeReaders
+    if (readers) {
+      try {
+        activeOb1Json = JSON.stringify(readers.getOb1(), null, 2) ?? 'N/A'
+      } catch (e) {
+        activeOb1Json = `Error reading blockStore: ${e}`
+      }
+      try {
+        activeTagsJson = JSON.stringify(readers.getTagTables(), null, 2) ?? 'N/A'
+      } catch (e) {
+        activeTagsJson = `Error reading tagStore: ${e}`
+      }
+      try {
+        runtimeStateJson = JSON.stringify(readers.getRuntimeSummary(), null, 2) ?? 'N/A'
+      } catch (e) {
+        runtimeStateJson = `Error reading runtimeStore: ${e}`
+      }
+    } else if (typeof window !== 'undefined') {
       try {
         const blockStore = (window as any).plcTestContext?.useBlockStore?.getState?.()
         if (blockStore) {

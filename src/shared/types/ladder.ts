@@ -2,7 +2,7 @@
 
 export type ContactType = 'NO_CONTACT' | 'NC_CONTACT' | 'P_TRIG' | 'N_TRIG'
 export type CoilType = 'OUTPUT_COIL' | 'NEGATED_COIL' | 'SET_COIL' | 'RESET_COIL'
-export type TimerType = 'TON' | 'TOF' | 'TP'
+export type TimerType = 'TON' | 'TOF' | 'TP' | 'TONR'
 export type CounterType = 'CTU' | 'CTD' | 'CTUD'
 export type ComparatorType = 'CMP_EQ' | 'CMP_NE' | 'CMP_GT' | 'CMP_LT' | 'CMP_GE' | 'CMP_LE'
 export type MathBoxType = 'ADD' | 'SUB' | 'MUL' | 'DIV' | 'MOVE' | 'NORM_X' | 'SCALE_X'
@@ -34,6 +34,7 @@ export interface LadderTimerNode {
   timerType: TimerType
   instanceDb: string // e.g. "IEC_Timer_0_DB"
   inOperand: string // Enable input
+  rOperand?: string // Reset input (TONR)
   ptOperand: string // Preset time e.g. "T#5s" or "5000"
   qOperand: string // Timer output
   etOperand: string // Elapsed time output

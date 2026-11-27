@@ -11,7 +11,6 @@ import { ProjectStartupWizard } from './components/wizard/ProjectStartupWizard'
 import { useProjectStore } from './stores/useProjectStore'
 import { useUIStore } from './stores/useUIStore'
 import { useTagStore } from './stores/useTagStore'
-import { useCrossRefStore } from './stores/useCrossRefStore'
 import { useRuntimeStore } from './stores/useRuntimeStore'
 import { useBlockStore } from './stores/useBlockStore'
 import { BlackBoxLogger } from './services/diagnostics/BlackBoxLogger'
@@ -24,35 +23,36 @@ const EXTERNAL_WRITE_QUIET_MS = 2000
 const LEFT_DOCK_MAX_SHARE = 0.22
 const RIGHT_DOCK_MAX_SHARE = 0.28
 
-if (typeof window !== 'undefined') {
-  ;(window as any).useProjectStore = useProjectStore
-  ;(window as any).useUIStore = useUIStore
-  ;(window as any).useTagStore = useTagStore
-  ;(window as any).useCrossRefStore = useCrossRefStore
-  ;(window as any).useRuntimeStore = useRuntimeStore
-  ;(window as any).useBlockStore = useBlockStore
-  ;(window as any).BlackBoxLogger = BlackBoxLogger.getInstance()
-  if (!(window as any).plcTestContext) {
-    ;(window as any).plcTestContext = {}
+BlackBoxLogger.registerStoreReaders({
+  getOb1: () => {
+    const blocks = useBlockStore.getState().ladBlocks
+    return blocks.find((b) => b.blockNumber === 1 || b.name === 'OB1_Main') || blocks[0]
+  },
+  getTagTables: () => useTagStore.getState().tagTables,
+  getRuntimeSummary: () => {
+    const rt = useRuntimeStore.getState()
+    return {
+      state: rt.state,
+      isMonitoring: rt.isMonitoring,
+      cycleCount: rt.engine?.getMetrics?.()?.cycleNumber || 0,
+      lastCycleMs: rt.engine?.getMetrics?.()?.lastCycleDurationMs || 0
+    }
   }
-  ;(window as any).plcTestContext.BlackBoxLogger = BlackBoxLogger.getInstance()
-  ;(window as any).plcTestContext.useTagStore = useTagStore
-}
+})
 
 export const App: React.FC = () => {
-  const { isLoaded, metadata } = useProjectStore()
-  const {
-    isPortalViewOpen,
-    leftDockCollapsed,
-    leftDockWidth,
-    setLeftDockWidth,
-    rightDockCollapsed,
-    rightDockWidth,
-    setRightDockWidth,
-    toggleRightDock,
-    rightActiveTab,
-    setRightActiveTab
-  } = useUIStore()
+  const isLoaded = useProjectStore((s) => s.isLoaded)
+  const metadata = useProjectStore((s) => s.metadata)
+  const isPortalViewOpen = useUIStore((s) => s.isPortalViewOpen)
+  const leftDockCollapsed = useUIStore((s) => s.leftDockCollapsed)
+  const leftDockWidth = useUIStore((s) => s.leftDockWidth)
+  const setLeftDockWidth = useUIStore((s) => s.setLeftDockWidth)
+  const rightDockCollapsed = useUIStore((s) => s.rightDockCollapsed)
+  const rightDockWidth = useUIStore((s) => s.rightDockWidth)
+  const setRightDockWidth = useUIStore((s) => s.setRightDockWidth)
+  const toggleRightDock = useUIStore((s) => s.toggleRightDock)
+  const rightActiveTab = useUIStore((s) => s.rightActiveTab)
+  const setRightActiveTab = useUIStore((s) => s.setRightActiveTab)
 
   // Resizing state for Left Dock
   const [isResizingLeft, setIsResizingLeft] = useState(false)
@@ -111,10 +111,14 @@ export const App: React.FC = () => {
     const handleGlobalOpenProject = async () => {
       const projectStore = useProjectStore.getState()
       if (window.electronApi) {
-        const selected = await window.electronApi.selectProjectDirectory()
-        if (selected) {
-          const payload = await window.electronApi.openProject(selected)
-          projectStore.setProject(payload)
+        try {
+          const selected = await window.electronApi.selectProjectDirectory()
+          if (selected) {
+            const payload = await window.electronApi.openProject(selected)
+            projectStore.setProject(payload)
+          }
+        } catch (err) {
+          console.error('Failed to open project:', err)
         }
       } else {
         projectStore.loadDemoProject()
@@ -122,12 +126,16 @@ export const App: React.FC = () => {
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      const ui = useUIStore.getState()
+      const project = useProjectStore.getState()
+      if (!project.isLoaded || !project.metadata || ui.isPortalViewOpen) return
+      if (document.querySelector('[role="dialog"], [data-testid="tia-modal"], [data-testid="ai-settings-modal"]')) {
+        return
+      }
       const action = resolveGlobalShortcut(e)
       if (!action) return
 
       e.preventDefault()
-      const ui = useUIStore.getState()
-      const project = useProjectStore.getState()
       const runtime = useRuntimeStore.getState()
 
       switch (action) {
@@ -173,9 +181,24 @@ export const App: React.FC = () => {
     AiModelRouter.getInstance().hydrateSecrets().catch((err) => console.warn('Could not load stored API keys:', err))
   }, [])
 
+  // Keep coil diagnostic trigger alive even when AI Agent dock/tab is not mounted yet
+  useEffect(() => {
+    const handleDiagnoseCoil = (e: Event) => {
+      const detail = (e as CustomEvent<{ operand: string; networkNumber: number }>).detail
+      if (!detail) return
+      const ui = useUIStore.getState()
+      ui.setPendingCoilDiagnostic(detail)
+      if (ui.rightDockCollapsed) ui.setRightDockCollapsed(false)
+      ui.setRightActiveTab('agent')
+    }
+    window.addEventListener('plc:diagnose-coil', handleDiagnoseCoil)
+    return () => window.removeEventListener('plc:diagnose-coil', handleDiagnoseCoil)
+  }, [])
+
   // Bi-directional IPC Hot-reload listener from main process
   useEffect(() => {
     if (window.electronApi) {
+      let mounted = true
       let reloadTimer: ReturnType<typeof setTimeout> | null = null
       const unsubscribe = window.electronApi.onFileChanged((payload) => {
         const project = useProjectStore.getState()
@@ -188,11 +211,19 @@ export const App: React.FC = () => {
         }
         if (reloadTimer) clearTimeout(reloadTimer)
         reloadTimer = setTimeout(async () => {
-          const reloaded = await window.electronApi.openProject(payload.projectPath)
-          useProjectStore.getState().setProject(reloaded)
+          try {
+            const reloaded = await window.electronApi.openProject(payload.projectPath)
+            if (!mounted) return
+            const latest = useProjectStore.getState()
+            if (latest.projectPath !== payload.projectPath || latest.isDirty) return
+            latest.setProject(reloaded)
+          } catch (err) {
+            console.warn('[File Watcher] Reload failed:', err)
+          }
         }, 300)
       })
       return () => {
+        mounted = false
         if (reloadTimer) clearTimeout(reloadTimer)
         unsubscribe()
       }
@@ -211,7 +242,7 @@ export const App: React.FC = () => {
       <TopAppBar />
 
       {/* Main 3-Column Industrial Workbench */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Left Dock: Project Tree with Drag Resizer */}
         {!leftDockCollapsed && (
           <aside
@@ -267,7 +298,7 @@ export const App: React.FC = () => {
             className="h-full shrink-0 flex overflow-hidden flex-col bg-[#111215]"
           >
             {/* Splitter resize handle on left border */}
-            <div className="flex-1 flex overflow-hidden">
+            <div className="flex-1 min-h-0 flex overflow-hidden">
               <div
                 onMouseDown={(e) => {
                   startXRightRef.current = e.clientX
@@ -306,7 +337,7 @@ export const App: React.FC = () => {
                 </div>
 
                 {/* Active Panel View */}
-                <div className="flex-1 overflow-hidden">
+                <div className="flex-1 min-h-0 overflow-hidden">
                   {rightActiveTab === 'instructions' ? (
                     <InstructionsTreePanel />
                   ) : (
