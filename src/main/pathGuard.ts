@@ -66,22 +66,9 @@ export function resolveInside(root: string, relativePath: string): string {
   return target
 }
 
-/**
- * Resolves a project-relative path and verifies via realpath that neither existing segments nor
- * symlinks/NTFS junctions escape the real project root.
- */
-export async function resolveInsideReal(root: string, relativePath: string): Promise<string> {
-  const target = resolveInside(root, relativePath)
-  const rootResolved = path.resolve(root)
-  let realRoot: string
-  try {
-    realRoot = await fs.realpath(rootResolved)
-  } catch {
-    realRoot = rootResolved
-  }
-
-  // Walk up from target to find the deepest existing ancestor
-  let current = target
+async function resolveCanonicalPath(p: string): Promise<string> {
+  const resolved = path.resolve(p)
+  let current = resolved
   const missingSegments: string[] = []
   let realAncestor: string | null = null
   while (true) {
@@ -95,8 +82,17 @@ export async function resolveInsideReal(root: string, relativePath: string): Pro
       current = parent
     }
   }
+  return realAncestor ? path.join(realAncestor, ...missingSegments) : resolved
+}
 
-  const realTarget = realAncestor ? path.join(realAncestor, ...missingSegments) : target
+/**
+ * Resolves a project-relative path and verifies via realpath that neither existing segments nor
+ * symlinks/NTFS junctions escape the real project root.
+ */
+export async function resolveInsideReal(root: string, relativePath: string): Promise<string> {
+  const target = resolveInside(root, relativePath)
+  const realRoot = await resolveCanonicalPath(root)
+  const realTarget = await resolveCanonicalPath(target)
   const realPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep
   if (!comparable(realTarget).startsWith(comparable(realPrefix))) {
     throw new Error(`Path '${relativePath}' escapes the project via symbolic link`)

@@ -95,6 +95,13 @@ async function run(): Promise<void> {
         'resolveInsideReal rejects symlink/junction escaping project root',
         await rejects(() => resolveInsideReal(approvedOpen, 'blocks/link_escape/pwn.txt'))
       )
+      const realOutside = await fs.realpath(outsideDir)
+      const canonicalBundleFile = await resolveInsideReal(path.join(junctionPath, 'new_bundle'), 'sources/UDT_Motor.udt')
+      check(
+        'resolveInsideReal allows non-existent root under symlinked/short parent path',
+        canonicalBundleFile === path.join(realOutside, 'new_bundle', 'sources', 'UDT_Motor.udt'),
+        canonicalBundleFile
+      )
       await fs.rm(junctionPath, { recursive: true, force: true })
     } else {
       console.log('  skip symlink/junction escape test: symlink creation not permitted on this environment')
